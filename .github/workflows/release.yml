@@ -29,7 +29,14 @@ jobs:
 
       # 构建 NSIS 安装包并上传到同名 GitHub Release（草稿）
       # tauri.conf.json 的 beforeBuildCommand 会自动执行 npm run build
+      # 显式传 tagName/releaseName：不依赖 action 从 git ref 推断（曾出现跳过上传的问题）
       - name: 构建并发布
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: "KimiCodeBar for Windows v__VERSION__"
+          releaseBody: "见下方 Assets 下载安装包（NSIS，当前用户安装、免管理员）。"
+          releaseDraft: true
+          prerelease: false
