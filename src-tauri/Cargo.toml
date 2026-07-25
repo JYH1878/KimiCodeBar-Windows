@@ -22,3 +22,4 @@ keyring = { version = "3", features = ["windows-native"] }
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"

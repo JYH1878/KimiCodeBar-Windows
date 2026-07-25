@@ -26,10 +26,9 @@ Kimi Code 用量监控的 Windows 系统托盘工具。常驻托盘不打扰，�
 
 ## 界面预览
 
-<!-- 截图位：建议截取 用量面板 与 设置页，放入 docs/screenshots/ 后取消注释
 ![用量面板](docs/screenshots/panel.png)
+
 ![设置页](docs/screenshots/settings.png)
--->
 
 ## 安装
 

@@ -54,6 +54,24 @@ pub fn show_panel(app: &AppHandle, tray: TrayRect) {
     let _ = window.set_focus();
 }
 
+/// 第二个实例启动时显示主面板：优先按托盘图标当前位置定位，
+/// 取不到托盘 rect 时退化为仅 show + focus。
+pub fn show_panel_for_second_instance(app: &AppHandle) {
+    let tray_rect = app
+        .tray_by_id(crate::tray::TRAY_ID)
+        .and_then(|tray| tray.rect().ok().flatten())
+        .map(|rect| TrayRect::new(rect.position, rect.size));
+    match tray_rect {
+        Some(tray) => show_panel(app, tray),
+        None => {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }
+    }
+}
+
 /// 把面板定位到托盘图标上方、水平居中对齐，并裁剪到所在显示器范围内。
 fn position_panel(app: &AppHandle, window: &WebviewWindow, tray: TrayRect) {
     let size = window.outer_size().unwrap_or_default();

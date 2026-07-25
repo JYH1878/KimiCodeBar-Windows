@@ -9,6 +9,10 @@ use tauri::Manager;
 
 fn main() {
     tauri::Builder::default()
+        // single-instance 需最先注册：第二个实例启动时把已有实例的主面板显示出来
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            panel::show_panel_for_second_instance(app);
+        }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
