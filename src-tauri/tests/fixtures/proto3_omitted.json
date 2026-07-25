@@ -1,0 +1,9 @@
+{
+  "usage": { "limit": "200" },
+  "limits": [
+    { "window": { "duration": 86400 }, "detail": { "limit": "100", "used": "30" } }
+  ],
+  "totalQuota": { "limit": "500", "remaining": "500" },
+  "user": { "membership": {} },
+  "boosterWallet": { "status": "STATUS_ACTIVE" }
+}

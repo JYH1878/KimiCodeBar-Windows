@@ -1,0 +1,1 @@
+{"default":{"identifier":"default","description":"KimiCodeBar 默认能力集：放开前端调用 opener 插件（打开授权页/控制台链接）","local":true,"windows":["main","settings"],"permissions":["core:default","opener:default","opener:allow-open-url","notification:default","autostart:default"]}}

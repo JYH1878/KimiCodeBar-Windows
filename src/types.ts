@@ -1,0 +1,113 @@
+// 前后端共享类型契约 —— 与 Rust 侧 serde 输出（snake_case）一一对应。
+// 架构方钉死，前端/后端代理均不得修改字段名；如需扩展需双方同步。
+
+/** 单个时间窗口（7 天 / 5 小时）用量，百分比为"剩余"语义 */
+export interface QuotaDetail {
+  used: number;
+  limit: number;
+  remaining: number;
+  /** RFC3339，如 2026-07-27T04:56:27.987852Z；可能缺失 */
+  reset_time?: string;
+  /** 剩余百分比 0-100 */
+  percent_remaining: number;
+}
+
+export interface TotalQuotaInfo {
+  limit: number;
+  remaining: number;
+  percent_remaining: number;
+}
+
+export interface BoosterInfo {
+  enabled: boolean;
+  balance_yuan: number;
+  monthly_charge_limit_enabled: boolean;
+  monthly_charge_limit_yuan?: number;
+  monthly_used_yuan?: number;
+  topup_limit_yuan?: number;
+}
+
+export interface KimiQuota {
+  weekly?: QuotaDetail;
+  five_hour?: QuotaDetail;
+  total?: TotalQuotaInfo;
+  /** LEVEL_FREE / LEVEL_BASIC / LEVEL_INTERMEDIATE / LEVEL_ADVANCED */
+  membership_level?: string;
+  booster?: BoosterInfo;
+}
+
+/** 面板状态：get_panel_state / refresh_now 的返回，quota-updated 事件的 payload */
+export interface PanelState {
+  /** 是否已配置任一凭证（API Key 或 OAuth） */
+  credential: boolean;
+  /** 是否正在后台刷新 */
+  loading: boolean;
+  /** 最近一次成功的配额（可能来自缓存；断网时依然展示） */
+  quota: KimiQuota | null;
+  /** 上次成功刷新时间（epoch 秒） */
+  fetched_at: number | null;
+  /** 最近一次错误信息（与缓存并存，用于非阻断横幅） */
+  error: string | null;
+  /** 任一窗口剩余低于阈值（默认 20%），UI 标红 */
+  low_warning: boolean;
+}
+
+// ============ 第 5 步：设置与凭证契约 ============
+
+/** 登录方式：A=手动 API Key，B=OAuth 设备码授权 */
+export type LoginMethod = "api_key" | "oauth";
+
+/** 应用设置：get_settings / save_settings 的载荷（与 Rust Settings 一致） */
+export interface AppSettings {
+  /** 未设置时为 null，后端自动优先 api_key 其次 oauth */
+  login_method: LoginMethod | null;
+  /** 自动刷新间隔（分钟，最小 1，默认 5） */
+  refresh_interval_min: number;
+  /** 低额度告警开关（默认 true） */
+  low_warn_enabled: boolean;
+  /** 告警阈值百分比（默认 20） */
+  warn_threshold_pct: number;
+  /** 开机自启（默认 false，保存时同步注册表） */
+  autostart: boolean;
+}
+
+/** 凭证配置状态：get_credential_status 的返回 */
+export interface CredentialStatus {
+  /** 当前生效的登录方式（settings.login_method） */
+  login_method: LoginMethod | null;
+  api_key_configured: boolean;
+  /** 脱敏展示，如 sk-kimi-****…a4nr；未配置为 null */
+  api_key_masked: string | null;
+  oauth_configured: boolean;
+}
+
+/** 设备码登录流程状态：start_device_login 的返回 + device-login-updated 事件 payload */
+export interface DeviceLoginState {
+  /** idle=未开始/已取消，waiting=等待用户授权，success=已拿到 token，error=失败 */
+  status: "idle" | "waiting" | "success" | "error";
+  /** 展示给用户的授权码（waiting 时有值） */
+  user_code: string | null;
+  verification_uri: string | null;
+  /** 含码直达链接，点"打开浏览器"用 */
+  verification_uri_complete: string | null;
+  /** 设备码有效期（秒） */
+  expires_in: number | null;
+  /** status=error 时的错误信息 */
+  error: string | null;
+}
+
+// ============ 第 6 步：更新检查契约 ============
+
+/** check_update 的返回。每次进程运行只在首次调用时真正走网络，之后返回内存缓存 */
+export interface UpdateInfo {
+  /** 当前版本，如 0.1.0 */
+  current: string;
+  /** 远端最新版本（检查失败为 null） */
+  latest: string | null;
+  /** 是否有新版本 */
+  has_update: boolean;
+  /** 有新版本时的 Release 页面地址（点击去下载） */
+  release_url: string | null;
+  /** 检查失败原因（网络等）；成功为 null */
+  error: string | null;
+}

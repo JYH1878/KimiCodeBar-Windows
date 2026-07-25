@@ -1,0 +1,21 @@
+{
+  "usage": {
+    "limit": "100",
+    "used": "30",
+    "remaining": "70",
+    "resetTime": "2027-01-10T12:00:00.000+08:00"
+  },
+  "limits": [
+    { "window": { "duration": 86400 }, "detail": { "limit": "100", "used": "30" } },
+    { "window": { "duration": 300 }, "detail": { "limit": "50", "used": "10", "remaining": "40", "resetTime": "2027-01-05T08:00:00.000+08:00" } }
+  ],
+  "totalQuota": { "limit": "500", "remaining": "300" },
+  "user": { "membership": { "level": "LEVEL_FREE" } },
+  "boosterWallet": {
+    "status": "STATUS_ACTIVE",
+    "balance": { "amountLeft": "315250700" },
+    "monthlyChargeLimit": { "currency": "CNY", "priceInCents": "9900" },
+    "monthlyUsed": { "currency": "CNY", "priceInCents": "1200" },
+    "topupLimit": { "currency": "CNY", "priceInCents": "50000" }
+  }
+}

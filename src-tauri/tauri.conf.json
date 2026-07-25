@@ -1,0 +1,58 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "KimiCodeBar",
+  "version": "0.1.0",
+  "identifier": "com.kimicodebar.win",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "KimiCodeBar",
+        "width": 360,
+        "height": 480,
+        "url": "index.html",
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "visible": false,
+        "backgroundColor": "#1a1b26"
+      },
+      {
+        "label": "settings",
+        "title": "KimiCodeBar 设置",
+        "width": 520,
+        "height": 640,
+        "url": "settings.html",
+        "visible": false
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "targets": "nsis",
+    "publisher": "JYH1878",
+    "copyright": "Copyright © 2026 xifandev, JYH1878",
+    "shortDescription": "Kimi Code 用量托盘监控",
+    "icon": [
+      "icons/icon.ico",
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese"],
+        "displayLanguageSelector": false
+      }
+    }
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "usage": {
+    "limit": "100",
+    "used": "30",
+    "remaining": "70",
+    "resetTime": "2027-01-10T12:00:00.000+08:00"
+  },
+  "totalQuota": { "limit": "500", "remaining": "300" },
+  "user": { "membership": { "level": "LEVEL_FREE" } }
+}

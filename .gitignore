@@ -1,0 +1,12 @@
+# Dependencies
+node_modules/
+
+# Vite build output
+dist/
+
+# Tauri / Rust build output
+src-tauri/target/
+target/
+
+# Logs
+*.log

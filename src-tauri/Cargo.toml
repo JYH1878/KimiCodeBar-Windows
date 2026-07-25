@@ -1,0 +1,24 @@
+[package]
+name = "kimicodebar"
+version = "0.1.0"
+description = "Kimi Code usage monitor in the Windows system tray"
+edition = "2021"
+rust-version = "1.77.2"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+urlencoding = "2"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "1"
+keyring = { version = "3", features = ["windows-native"] }
+tauri-plugin-notification = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-opener = "2"

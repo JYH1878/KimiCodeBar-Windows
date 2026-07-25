@@ -1,0 +1,540 @@
+:root {
+  color-scheme: dark;
+  font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  background-color: #1a1b26;
+  color: #c0caf5;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* ===== 用量面板 ===== */
+
+/* 面板根容器：360px 宽、纵向排列、内容超高时纵向滚动、禁止横向滚动 */
+.panel {
+  width: 360px;
+  max-width: 100vw;
+  height: 100%;
+  margin: 0 auto;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background-color: #1a1b26;
+}
+
+/* 面板通用卡片（与设置页 .card 区分，左对齐、内边距更紧凑） */
+.pcard {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background-color: #24283b;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  transition: background-color 0.15s ease;
+}
+
+.pcard:hover {
+  background-color: #292e42;
+}
+
+.muted-text {
+  font-size: 13px;
+  color: #7982a9;
+}
+
+/* --- 用量卡 --- */
+
+.usage-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.usage-title {
+  font-size: 13px;
+  color: #a9b1d6;
+}
+
+.usage-pct {
+  font-size: 26px;
+  font-weight: 700;
+  color: #7aa2f7;
+}
+
+/* 剩余低于 20%：整体标红 */
+.usage-card.low .usage-pct {
+  color: #f7768e;
+}
+
+.progress {
+  margin-top: 8px;
+  height: 8px;
+  border-radius: 4px;
+  background-color: #1a1b26;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #7aa2f7, #bb9af7);
+  transition: width 0.3s ease;
+}
+
+.usage-card.low .progress-fill {
+  background: linear-gradient(90deg, #f7768e, #ff9e64);
+}
+
+.usage-foot {
+  margin-top: 8px;
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  color: #7982a9;
+}
+
+/* --- 会员等级 / Booster 一行两小卡 --- */
+
+.mini-row {
+  display: flex;
+  gap: 10px;
+}
+
+.mini-row > * {
+  flex: 1;
+  min-width: 0;
+}
+
+.mini-title {
+  font-size: 11px;
+  color: #7982a9;
+}
+
+.mini-value {
+  margin-top: 4px;
+  font-size: 16px;
+  font-weight: 600;
+  color: #c0caf5;
+}
+
+.mini-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: #7982a9;
+}
+
+/* --- 错误横幅（非阻断） --- */
+
+.error-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid rgba(247, 118, 142, 0.45);
+  background-color: rgba(247, 118, 142, 0.12);
+  font-size: 12px;
+  color: #f7768e;
+}
+
+.error-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+
+/* --- 按钮 --- */
+
+.btn {
+  padding: 4px 10px;
+  border: 1px solid #3b4261;
+  border-radius: 6px;
+  background-color: #24283b;
+  color: #c0caf5;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    background-color 0.15s ease,
+    border-color 0.15s ease;
+}
+
+.btn:hover:not(:disabled) {
+  background-color: #292e42;
+  border-color: #7aa2f7;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn.primary {
+  border-color: #7aa2f7;
+  background-color: #7aa2f7;
+  color: #1a1b26;
+  font-weight: 600;
+}
+
+.btn.primary:hover:not(:disabled) {
+  background-color: #89b4fa;
+}
+
+/* --- 空状态 --- */
+
+.empty-state {
+  margin: auto;
+  padding: 32px 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+}
+
+/* --- 加载动画 --- */
+
+.loading-center {
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.spinner {
+  width: 28px;
+  height: 28px;
+  border: 3px solid #3b4261;
+  border-top-color: #7aa2f7;
+  border-radius: 50%;
+  animation: rotate 0.8s linear infinite;
+}
+
+.spin {
+  display: inline-block;
+  animation: rotate 1s linear infinite;
+}
+
+@keyframes rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* --- 底栏 --- */
+
+.footer {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 2px 0;
+  font-size: 11px;
+  color: #7982a9;
+}
+
+.footer-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* 底栏左侧：更新徽标与"更新于"时间横向对齐 */
+.fetched-at {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 更新提示徽标：小圆角胶囊、主题蓝底色、悬停手型 */
+.update-badge {
+  padding: 1px 7px;
+  border: none;
+  border-radius: 999px;
+  background-color: #7aa2f7;
+  color: #1a1b26;
+  font-size: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color 0.15s ease;
+}
+
+.update-badge:hover {
+  background-color: #89b4fa;
+}
+
+/* ===== 设置窗口 ===== */
+
+/* 设置页根容器：520px 宽、纵向排列、超高纵向滚动、禁止横向滚动 */
+.settings {
+  width: 520px;
+  max-width: 100vw;
+  height: 100%;
+  margin: 0 auto;
+  padding: 14px 18px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background-color: #1a1b26;
+}
+
+.settings-title {
+  font-size: 16px;
+  font-weight: 600;
+  color: #7aa2f7;
+  padding: 0 2px;
+}
+
+/* 设置页分区卡片（左对齐，无悬停变色，内部纵向排列） */
+.scard {
+  padding: 12px 14px;
+  border-radius: 10px;
+  background-color: #24283b;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.scard-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #c0caf5;
+}
+
+/* --- 登录方式单选 --- */
+
+.radio-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #3b4261;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  transition:
+    border-color 0.15s ease,
+    background-color 0.15s ease;
+}
+
+.radio-row:hover {
+  border-color: #565f89;
+}
+
+.radio-row.active {
+  border-color: #7aa2f7;
+  background-color: rgba(122, 162, 247, 0.08);
+}
+
+.radio-row input[type="radio"] {
+  margin: 0;
+  accent-color: #7aa2f7;
+}
+
+/* --- 输入框 / 表单行 --- */
+
+.input {
+  padding: 6px 10px;
+  border: 1px solid #3b4261;
+  border-radius: 6px;
+  background-color: #1a1b26;
+  color: #c0caf5;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.input:focus {
+  border-color: #7aa2f7;
+}
+
+.input.grow {
+  flex: 1;
+  min-width: 0;
+}
+
+.num-input {
+  width: 90px;
+  text-align: right;
+}
+
+.input-row {
+  display: flex;
+  gap: 8px;
+}
+
+/* 表单行：左标签右控件 */
+.form-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  color: #a9b1d6;
+}
+
+.form-row input[type="checkbox"] {
+  margin: 0;
+  width: 15px;
+  height: 15px;
+  accent-color: #7aa2f7;
+}
+
+/* --- 徽标 / 脱敏凭证 --- */
+
+.badge {
+  padding: 2px 8px;
+  border: 1px solid rgba(158, 206, 106, 0.4);
+  border-radius: 999px;
+  background-color: rgba(158, 206, 106, 0.12);
+  color: #9ece6a;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.cred-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mono-text {
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  color: #a9b1d6;
+  word-break: break-all;
+}
+
+/* --- 授权码块（等宽大号，点击复制） --- */
+
+.user-code {
+  width: 100%;
+  padding: 10px;
+  border: 1px solid #3b4261;
+  border-radius: 8px;
+  background-color: #1a1b26;
+  color: #e0af68;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 24px;
+  letter-spacing: 3px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+
+.user-code:hover {
+  border-color: #7aa2f7;
+}
+
+/* --- 提示行 --- */
+
+.hint-muted {
+  font-size: 12px;
+  color: #7982a9;
+  line-height: 1.6;
+}
+
+.hint-ok {
+  font-size: 12px;
+  color: #9ece6a;
+}
+
+.hint-err {
+  font-size: 12px;
+  color: #f7768e;
+  word-break: break-all;
+}
+
+/* 行内文字链接（打开外部页面） */
+.link {
+  padding: 0;
+  border: none;
+  background: none;
+  color: #7aa2f7;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.link:hover {
+  text-decoration: underline;
+}
+
+/* 等待授权行：小转圈与文字对齐 */
+.waiting-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.spinner.small {
+  width: 14px;
+  height: 14px;
+  border-width: 2px;
+}
+
+/* --- 按钮补充 --- */
+
+.btn.danger {
+  border-color: rgba(247, 118, 142, 0.5);
+  color: #f7768e;
+}
+
+.btn.danger:hover:not(:disabled) {
+  background-color: rgba(247, 118, 142, 0.12);
+  border-color: #f7768e;
+}
+
+.btn.wide {
+  width: 100%;
+  padding: 8px 10px;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px 8px;
+}
+
+/* 右对齐按钮行 */
+.row-end {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* --- 设置页底栏 --- */
+
+.settings-footer {
+  margin-top: auto;
+  padding: 2px 2px 0;
+  text-align: center;
+  font-size: 11px;
+  color: #565f89;
+}
+
+/* 底栏内的文字按钮/提示与版本号保持同字号 */
+.settings-footer .link,
+.settings-footer .hint-ok,
+.settings-footer .hint-err {
+  font-size: inherit;
+}
+
+.link:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

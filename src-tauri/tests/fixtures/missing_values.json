@@ -1,0 +1,6 @@
+{
+  "usage": { "limit": "100", "remaining": "70" },
+  "limits": [
+    { "window": { "duration": 300 }, "detail": { "limit": "50", "used": "10" } }
+  ]
+}
