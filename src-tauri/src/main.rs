@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod cli;
 mod commands;
 mod diagnostics;
 mod hotkey;
@@ -11,6 +12,12 @@ mod tray;
 use tauri::Manager;
 
 fn main() {
+    // CLI 拦截必须先于一切 Tauri / 日志初始化：单实例插件会把第二个实例
+    // 吞成"唤起已有面板"，--status 一旦走进 Builder 就无法输出 JSON 退出
+    if let Some(code) = cli::maybe_run() {
+        std::process::exit(code);
+    }
+
     tauri::Builder::default()
         // single-instance 需最先注册：第二个实例启动时把已有实例的主面板显示出来
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
