@@ -6,7 +6,7 @@
 
 Kimi Code 用量监控的 Windows 系统托盘工具。常驻托盘不打扰，左键一点看额度，快烧完了变红提醒你。
 
-基于 **Tauri 2 + Rust + React** 构建：安装包不到 3 MB，运行内存约 40–80 MB。
+基于 **Tauri 2 + Rust + React** 构建：安装包不到 3 MB，运行内存约 30–60 MB。
 
 > 社区版本，非 Kimi 官方出品。
 
@@ -64,18 +64,23 @@ Kimi Code 用量监控的 Windows 系统托盘工具。常驻托盘不打扰，�
 ## 常见问题
 
 **`sk-kimi-` 的 Key 和开放平台的 `sk-` Key 是一回事吗？**
+
 不是。Kimi Code（kimi.com/code/console）的 Key 以 `sk-kimi-` 开头；开放平台（platform.moonshot.cn）的 `sk-` Key 用于通用大模型 API，两者不互通。本工具只接受 `sk-kimi-` Key（设置页会校验并提示）。
 
 **会员档位 Andante / Moderato / Allegretto / Allegro 是什么？**
+
 Kimi 会员等级的官方命名（音乐速度记号，由慢到快对应由低到高）。工具按 API 返回原样显示。
 
 **Booster 是什么？**
+
 Kimi Code 的按量付费钱包：订阅额度用完后，可用预存余额继续按量使用。未开通时卡片显示"未开通"；开通后显示余额与月度已用/限额。
 
 **断网了会怎样？**
+
 面板照常展示最近一次成功查询的缓存数据，顶部出现提示横幅，不会报错或崩溃；网络恢复后自动刷新。
 
 **我的数据会被上传到别处吗？**
+
 不会。所有凭证与配置仅存本机（API Key 在 Windows 凭据管理器，其余在 `%APPDATA%\KimiCodeBar\`）。网络请求只发往：`api.kimi.com`（用量）、`auth.kimi.com`（授权）、`api.github.com`（更新检查）。
 
 ## 从源码构建
