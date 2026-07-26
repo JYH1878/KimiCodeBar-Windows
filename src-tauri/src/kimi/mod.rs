@@ -4,6 +4,7 @@
 //! 均调用同一个 `GET /coding/v1/usages` 接口。
 
 pub mod client;
+pub mod dpapi;
 pub mod models;
 pub mod oauth;
 pub mod web;

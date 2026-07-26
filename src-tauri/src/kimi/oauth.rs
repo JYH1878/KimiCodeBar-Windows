@@ -7,6 +7,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::kimi::dpapi;
 use crate::kimi::{AUTH_BASE, HTTP_TIMEOUT_SECS, OAUTH_CLIENT_ID, USER_AGENT};
 
 /// 轮询总预算 15 分钟，与 CLI / Mac 版一致
@@ -192,26 +193,45 @@ pub fn is_expiring_soon(creds: &Credentials, margin_secs: i64) -> bool {
 }
 
 /// 从 %APPDATA%\KimiCodeBar\credentials.json 读取（不存在返回 Ok(None)）。
+///
+/// 当前格式：DPAPI（CurrentUser 作用域）加密的二进制密文。
+/// 兼容旧版本写出的明文 JSON：DPAPI 解密失败则回退按明文解析，
+/// 解析成功立刻以加密形式原地重写（透明迁移）；明文也解析失败按损坏处理返回 None。
 pub fn load_credentials() -> Result<Option<Credentials>, OAuthError> {
     let path = credentials_file_path();
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(OAuthError::Io(e.to_string())),
     };
-    // 文件损坏时按无凭证处理（与 Mac 版 `try?` 解码语义一致）
-    Ok(serde_json::from_str(&text).ok())
+    // 1) 先按 DPAPI 密文解；解开了但内容非法同样按损坏处理
+    if let Ok(json) = dpapi::unprotect(&bytes) {
+        return Ok(serde_json::from_slice(&json).ok());
+    }
+    // 2) 解密失败：回退按明文 JSON 解析（旧版本写出的文件）
+    match serde_json::from_slice::<Credentials>(&bytes) {
+        Ok(creds) => {
+            // 原地升级为密文；重写失败不算致命（下次 load 还会再试）
+            let _ = save_credentials(&creds);
+            Ok(Some(creds))
+        }
+        // 3) 明文也解析失败：按无凭证/损坏处理（与 Mac 版 `try?` 解码语义一致）
+        Err(_) => Ok(None),
+    }
 }
 
 /// 原子写入（临时文件 + rename）到 %APPDATA%\KimiCodeBar\credentials.json。
+/// 内容：JSON 序列化 → UTF-8 字节 → DPAPI 加密后的二进制密文；
+/// DPAPI 失败时宁可报错也不落明文。
 pub fn save_credentials(creds: &Credentials) -> Result<(), OAuthError> {
     let path = credentials_file_path();
     let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     std::fs::create_dir_all(dir).map_err(|e| OAuthError::Io(e.to_string()))?;
 
     let json = serde_json::to_string_pretty(creds).map_err(|e| OAuthError::Io(e.to_string()))?;
+    let blob = dpapi::protect(json.as_bytes()).map_err(OAuthError::Io)?;
     let tmp_path = dir.join("credentials.json.tmp");
-    std::fs::write(&tmp_path, json).map_err(|e| OAuthError::Io(e.to_string()))?;
+    std::fs::write(&tmp_path, blob).map_err(|e| OAuthError::Io(e.to_string()))?;
     // Windows 上 rename 不允许目标已存在，先删再改名
     if path.exists() {
         std::fs::remove_file(&path).map_err(|e| OAuthError::Io(e.to_string()))?;
@@ -613,11 +633,25 @@ mod tests {
             "access-789"
         );
 
-        // 磁盘格式为 snake_case JSON
-        let raw = std::fs::read_to_string(dir.join("credentials.json")).unwrap();
-        assert!(raw.contains("\"access_token\""));
-        assert!(raw.contains("\"refresh_token\""));
-        assert!(raw.contains("\"expires_at\""));
+        // 磁盘格式为 DPAPI 密文：不含任何明文 token / JSON 键名（Windows 上）
+        let raw = std::fs::read(dir.join("credentials.json")).unwrap();
+        #[cfg(windows)]
+        {
+            let raw_text = String::from_utf8_lossy(&raw);
+            assert!(!raw_text.contains("access-789"));
+            assert!(!raw_text.contains("refresh-456"));
+            assert!(!raw_text.contains("access_token"));
+            // 密文整体也不应能按 JSON 解析
+            assert!(serde_json::from_slice::<serde_json::Value>(&raw).is_err());
+        }
+        #[cfg(not(windows))]
+        {
+            // 非 Windows 下 DPAPI 为透传实现，磁盘仍是 snake_case JSON
+            let raw_text = String::from_utf8(raw).unwrap();
+            assert!(raw_text.contains("\"access_token\""));
+            assert!(raw_text.contains("\"refresh_token\""));
+            assert!(raw_text.contains("\"expires_at\""));
+        }
 
         clear_credentials().unwrap();
         assert!(load_credentials().unwrap().is_none());
@@ -637,6 +671,55 @@ mod tests {
         std::fs::write(dir.join("credentials.json"), "not json").unwrap();
 
         assert!(load_credentials().unwrap().is_none());
+
+        // 随机二进制（既非 DPAPI 密文也非明文 JSON）同样按损坏处理
+        let garbage: Vec<u8> = (0u8..=255).collect();
+        std::fs::write(dir.join("credentials.json"), garbage).unwrap();
+        assert!(load_credentials().unwrap().is_none());
+
+        std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_credentials_migrates_plaintext_file_to_encrypted() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("kimicodebar-test-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("KIMICODEBAR_CONFIG_DIR", &dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 旧版本写出的明文 snake_case JSON
+        let plaintext = r#"{
+  "access_token": "legacy-access",
+  "refresh_token": "legacy-refresh",
+  "expires_at": 1900000000,
+  "scope": "legacy-scope",
+  "token_type": "Bearer"
+}"#;
+        std::fs::write(dir.join("credentials.json"), plaintext).unwrap();
+
+        // 明文旧文件可正常读出
+        let creds = load_credentials().unwrap().expect("明文旧文件应能读出");
+        assert_eq!(creds.access_token, "legacy-access");
+        assert_eq!(creds.refresh_token.as_deref(), Some("legacy-refresh"));
+        assert_eq!(creds.expires_at, Some(1_900_000_000));
+        assert_eq!(creds.scope.as_deref(), Some("legacy-scope"));
+
+        // 读取后文件已被原地升级为密文
+        let raw = std::fs::read(dir.join("credentials.json")).unwrap();
+        let raw_text = String::from_utf8_lossy(&raw);
+        assert!(
+            !raw_text.contains("legacy-access"),
+            "迁移后文件不应再含明文 token"
+        );
+        #[cfg(windows)]
+        assert!(serde_json::from_slice::<serde_json::Value>(&raw).is_err());
+
+        // 升级后的密文仍可正常读回
+        let creds = load_credentials().unwrap().expect("迁移后的密文应能读回");
+        assert_eq!(creds.access_token, "legacy-access");
+        assert_eq!(creds.refresh_token.as_deref(), Some("legacy-refresh"));
+        assert_eq!(creds.expires_at, Some(1_900_000_000));
 
         std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&dir);

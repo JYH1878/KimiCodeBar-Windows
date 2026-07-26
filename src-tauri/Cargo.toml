@@ -27,3 +27,11 @@ tauri-plugin-global-shortcut = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2"
+
+# credentials.json 的 DPAPI 加密（CryptProtectData / CryptUnprotectData，CurrentUser 作用域）。
+# 复用依赖树中已有的 windows-sys，仅启用所需 feature。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security_Cryptography",
+] }
