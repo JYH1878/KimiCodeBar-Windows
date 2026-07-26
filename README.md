@@ -1,6 +1,7 @@
 # KimiCodeBar for Windows
 
 [![GitHub release](https://img.shields.io/github/v/release/JYH1878/KimiCodeBar-Windows)](https://github.com/JYH1878/KimiCodeBar-Windows/releases)
+[![CI](https://github.com/JYH1878/KimiCodeBar-Windows/actions/workflows/ci.yml/badge.svg)](https://github.com/JYH1878/KimiCodeBar-Windows/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-blue)](https://github.com/JYH1878/KimiCodeBar-Windows)
 
@@ -41,6 +42,8 @@ Kimi Code 用量监控的 Windows 系统托盘工具。常驻托盘不打扰，�
 首次启动后图标常驻系统托盘（可能在"隐藏的图标"折叠区，拖出来即可）。
 
 系统要求：Windows 10 1809+ / Windows 11；依赖 WebView2 运行时（Windows 11 已预装，缺失时安装包会引导安装）。
+
+> 首次运行可能被 Windows SmartScreen 拦截（应用未购买代码签名证书，属开源软件常见情况）：点击"更多信息"→"仍要运行"即可。
 
 ## 使用指南
 
@@ -111,6 +114,17 @@ cd src-tauri && cargo test
 | 前端 | React 18 + TypeScript + Vite，无重型 UI 依赖 |
 | 持久化 | JSON 文件（settings / cache）+ Windows 凭据管理器（API Key）+ 本地凭证文件（OAuth） |
 | 打包 | NSIS（当前用户安装，免管理员） |
+
+## 工程与质量
+
+- **CI 门禁**：每次 push / PR 自动执行 `cargo fmt --check`、`cargo clippy -D warnings`、ESLint、`cargo test`（[工作流](.github/workflows/ci.yml)）
+- **测试策略**：110+ 单元/集成测试，重点覆盖用量响应的防御性解析（字段缺失、proto3 省略、字段别名、金额单位换算）、OAuth 流程纯逻辑、版本比较、配置读写回环；真实 API 响应脱敏后作为 fixture 常驻回归
+- **Dependabot**：每周自动检查 npm / cargo / GitHub Actions 依赖升级并开 PR
+- **自动发版**：打 `v*` tag → CI 自动构建 NSIS 安装包与便携 zip → 生成 Release 草稿，人工确认后发布（[工作流](.github/workflows/release.yml)）
+
+## 参与贡献
+
+欢迎 Issue 与 PR，请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)；遇到问题时可在应用内导出诊断文件（设置 → 诊断与日志）附到 Issue 中。
 
 ## 致谢与相关项目
 
