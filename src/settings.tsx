@@ -13,6 +13,7 @@ import {
 } from "./ipc";
 import { ApiKeySection } from "./components/ApiKeySection";
 import { DeviceLoginSection } from "./components/DeviceLoginSection";
+import { WebTokenSection } from "./components/WebTokenSection";
 
 /** 通用设置表单的本地状态（数字输入框先按字符串持有，保存时解析钳制） */
 interface GeneralForm {
@@ -246,6 +247,12 @@ function SettingsApp() {
           onChanged={reloadStatus}
         />
       )}
+
+      {/* 高级：月度总量（网页 token，可选，默认收起的折叠卡片） */}
+      <WebTokenSection
+        configured={status?.web_token_configured ?? false}
+        onChanged={reloadStatus}
+      />
 
       {/* D. 通用设置 */}
       <section className="scard">

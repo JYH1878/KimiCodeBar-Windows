@@ -13,6 +13,8 @@ use crate::storage;
 const KEYRING_SERVICE: &str = "KimiCodeBar";
 /// keyring 条目名（凭据管理器里的"用户名"）
 const KEYRING_USER: &str = "api_key";
+/// keyring 条目名：网页端 kimi-auth token（月度总量用）
+const KEYRING_WEB_USER: &str = "web_token";
 /// OAuth token 剩余有效期小于该值（秒）即提前刷新，与 Mac 版 5 分钟一致
 const REFRESH_MARGIN_SECS: i64 = 300;
 
@@ -52,6 +54,31 @@ pub fn load_api_key() -> Result<Option<String>, CredError> {
 /// 删除 API Key：本来就不存在也算成功
 pub fn clear_api_key() -> Result<(), CredError> {
     match entry()?.delete_credential() {
+        Ok(()) => Ok(()),
+        Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(CredError::Keyring(e.to_string())),
+    }
+}
+
+/// 保存网页端 kimi-auth token（月度总量用）到 Windows 凭据管理器
+pub fn save_web_token(token: &str) -> Result<(), CredError> {
+    web_entry()?
+        .set_password(token)
+        .map_err(|e| CredError::Keyring(e.to_string()))
+}
+
+/// 读取网页端 token：未保存过 → Ok(None)
+pub fn load_web_token() -> Result<Option<String>, CredError> {
+    match web_entry()?.get_password() {
+        Ok(token) => Ok(Some(token)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(CredError::Keyring(e.to_string())),
+    }
+}
+
+/// 删除网页端 token：本来就不存在也算成功
+pub fn clear_web_token() -> Result<(), CredError> {
+    match web_entry()?.delete_credential() {
         Ok(()) => Ok(()),
         Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(CredError::Keyring(e.to_string())),
@@ -114,6 +141,11 @@ async fn oauth_token() -> Result<Option<(CredentialKind, String)>, CredError> {
 
 fn entry() -> Result<Entry, CredError> {
     Entry::new(KEYRING_SERVICE, KEYRING_USER).map_err(|e| CredError::Keyring(e.to_string()))
+}
+
+/// 网页端 token 的 keyring 条目（与 api_key 同 service，不同 key）
+fn web_entry() -> Result<Entry, CredError> {
+    Entry::new(KEYRING_SERVICE, KEYRING_WEB_USER).map_err(|e| CredError::Keyring(e.to_string()))
 }
 
 #[cfg(test)]

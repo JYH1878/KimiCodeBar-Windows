@@ -1,0 +1,12 @@
+{
+  "ratelimit_code_5h": {
+    "ratio": 0.32
+  },
+  "subscription_balance": {
+    "feature": "FEATURE_OMNI",
+    "type": "SUBSCRIPTION",
+    "amount_used_ratio": 0.4,
+    "kimi_code_used_ratio": 0.1,
+    "expire_time": "2026-08-01T00:00:00Z"
+  }
+}

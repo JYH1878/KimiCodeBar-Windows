@@ -10,6 +10,7 @@ import type {
   AppSettings,
   CredentialStatus,
   DeviceLoginState,
+  MonthlyInfo,
   PanelState,
   UpdateInfo,
 } from "./types";
@@ -22,6 +23,15 @@ export const isTauri = "__TAURI_INTERNALS__" in window;
 // mock 的重置时间写成相对当前时间的未来值，倒计时展示更真实
 const MOCK_WEEKLY_RESET = new Date(Date.now() + 3 * 24 * 3600 * 1000).toISOString();
 const MOCK_FIVE_HOUR_RESET = new Date(Date.now() + 2 * 3600 * 1000).toISOString();
+const MOCK_MONTHLY_RESET = new Date(Date.now() + 12 * 24 * 3600 * 1000).toISOString();
+
+/** 浏览器 mock 的月度总量假数据：总 15.07%（Kimi 11.12% + Code 3.95%） */
+const MOCK_MONTHLY: MonthlyInfo = {
+  total_pct: 15.07,
+  kimi_pct: 11.12,
+  code_pct: 3.95,
+  reset_time: MOCK_MONTHLY_RESET,
+};
 
 /** 浏览器开发用的 mock 面板状态：weekly 87% / five_hour 36% / 中级版 / Booster 未开通 */
 const MOCK_STATE: PanelState = {
@@ -52,6 +62,9 @@ const MOCK_STATE: PanelState = {
   fetched_at: Math.floor(Date.now() / 1000),
   error: null,
   low_warning: false,
+  // 月度卡也在浏览器 mock 下展示，便于脱离后端调试分段条
+  monthly: MOCK_MONTHLY,
+  monthly_error: null,
 };
 
 /** 获取面板状态（含缓存配额，断网也可立即渲染） */
@@ -115,6 +128,8 @@ const mockDb = {
   // 预置一个假 Key，方便浏览器开发时看到"已配置"徽标
   apiKey: "sk-kimi-mock9f8e7d6c5b4a" as string | null,
   oauthConfigured: false,
+  // 网页 token（月度总量用）：初始未配置，走 setWebToken/clearWebToken 变更
+  webToken: null as string | null,
 };
 
 /** 浏览器 mock 的 device-login-updated 事件订阅者集合 */
@@ -156,6 +171,7 @@ function mockCredentialStatus(): CredentialStatus {
     api_key_configured: mockDb.apiKey !== null,
     api_key_masked: mockDb.apiKey ? `sk-kimi-****…${mockDb.apiKey.slice(-4)}` : null,
     oauth_configured: mockDb.oauthConfigured,
+    web_token_configured: mockDb.webToken !== null,
   };
 }
 
@@ -204,6 +220,32 @@ export async function clearApiKey(): Promise<void> {
 export async function getCredentialStatus(): Promise<CredentialStatus> {
   if (!isTauri) return mockCredentialStatus();
   return invoke<CredentialStatus>("get_credential_status");
+}
+
+// ============ 月度总量（网页 token，可选增强）============
+
+/**
+ * 校验并保存网页 token（kimi-auth cookie 的值，支持整串 cookie 粘贴由后端识别）。
+ * 后端先调网页接口校验，失败抛中文错误原样透传；成功返回当月月度总量。
+ */
+export async function setWebToken(token: string): Promise<MonthlyInfo> {
+  if (!isTauri) {
+    if (token.trim() === "") throw new Error("请粘贴 kimi-auth 的值");
+    // 模拟网络延迟，便于调试"校验中…"加载态
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    mockDb.webToken = token.trim();
+    return MOCK_MONTHLY;
+  }
+  return invoke<MonthlyInfo>("set_web_token", { token });
+}
+
+/** 清除已保存的网页 token（面板月度卡随之不再展示） */
+export async function clearWebToken(): Promise<void> {
+  if (!isTauri) {
+    mockDb.webToken = null;
+    return;
+  }
+  return invoke<void>("clear_web_token");
 }
 
 /** 发起 OAuth 设备码登录：返回 waiting 状态，后续进度由 device-login-updated 事件推送 */

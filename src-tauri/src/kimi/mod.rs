@@ -6,6 +6,7 @@
 pub mod client;
 pub mod models;
 pub mod oauth;
+pub mod web;
 
 /// 用量查询接口 base（Mac 版与 Windows 移植版一致）
 pub const API_BASE: &str = "https://api.kimi.com";

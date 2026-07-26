@@ -50,6 +50,10 @@ export interface PanelState {
   error: string | null;
   /** 任一窗口剩余低于阈值（默认 20%），UI 标红 */
   low_warning: boolean;
+  /** 月度总量（已配置网页 token 且有数据时展示；可能为 null） */
+  monthly?: MonthlyInfo | null;
+  /** 月度数据获取失败原因（如网页登录态过期）；成功为 null */
+  monthly_error?: string | null;
 }
 
 // ============ 第 5 步：设置与凭证契约 ============
@@ -79,6 +83,22 @@ export interface CredentialStatus {
   /** 脱敏展示，如 sk-kimi-****…a4nr；未配置为 null */
   api_key_masked: string | null;
   oauth_configured: boolean;
+  /** 网页 token（月度总量用）是否已配置 */
+  web_token_configured: boolean;
+}
+
+// ============ 月度总量（网页 token，可选增强）============
+
+/** 月度总量：来自网页端 GetSubscriptionStats，百分比为"已用"语义 */
+export interface MonthlyInfo {
+  /** 月度总已用百分比（Kimi + Code 合计） */
+  total_pct: number;
+  /** 其中 Kimi 已用百分比（= total - code 防御计算） */
+  kimi_pct: number;
+  /** 其中 Code 已用百分比 */
+  code_pct: number;
+  /** 月度重置时间 RFC3339；可能缺失 */
+  reset_time?: string;
 }
 
 /** 设备码登录流程状态：start_device_login 的返回 + device-login-updated 事件 payload */

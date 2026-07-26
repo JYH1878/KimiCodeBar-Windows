@@ -74,6 +74,9 @@ pub struct CachedQuota {
     pub quota: KimiQuota,
     /// 拉取成功时间（epoch 秒）
     pub fetched_at: i64,
+    /// 月度总量缓存（网页 token 数据）；旧版缓存文件无此字段，向后兼容
+    #[serde(default)]
+    pub monthly: Option<crate::kimi::web::MonthlyInfo>,
 }
 
 /// 读取设置：文件不存在 → 默认；损坏 → 默认；其他 IO 错误 → Err。
@@ -274,6 +277,7 @@ mod tests {
         let cache = CachedQuota {
             quota,
             fetched_at: 1_900_000_000,
+            monthly: None,
         };
         save_cache(&cache).unwrap();
         assert!(dir.join("cache.json").exists());
@@ -281,6 +285,7 @@ mod tests {
 
         let loaded = load_cache().expect("应能读回缓存");
         assert_eq!(loaded.fetched_at, 1_900_000_000);
+        assert!(loaded.monthly.is_none());
         let weekly = loaded.quota.weekly.as_ref().expect("weekly 应存在");
         assert_eq!(weekly.limit, 100.0);
         assert!((weekly.percent_remaining - 70.0).abs() < 1e-9);
@@ -289,6 +294,7 @@ mod tests {
         save_cache(&CachedQuota {
             quota: loaded.quota.clone(),
             fetched_at: 1_900_000_100,
+            monthly: None,
         })
         .unwrap();
         assert_eq!(load_cache().unwrap().fetched_at, 1_900_000_100);
@@ -309,6 +315,44 @@ mod tests {
         std::fs::write(dir.join("cache.json"), "not json").unwrap();
 
         assert!(load_cache().is_none());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn cache_monthly_roundtrip_and_backward_compat() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = use_temp_config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 旧版缓存文件没有 monthly 字段：#[serde(default)] 保证读回 None
+        std::fs::write(
+            dir.join("cache.json"),
+            r#"{"quota":{},"fetched_at":1900000000}"#,
+        )
+        .unwrap();
+        let loaded = load_cache().expect("旧格式缓存应能读回");
+        assert!(loaded.monthly.is_none());
+
+        // 带月度数据写入 → 读回一致
+        let monthly = crate::kimi::web::MonthlyInfo {
+            total_pct: 16.12,
+            kimi_pct: 11.12,
+            code_pct: 5.0,
+            reset_time: Some("2026-08-01T00:00:00Z".to_string()),
+        };
+        save_cache(&CachedQuota {
+            quota: crate::quota::KimiQuota::default(),
+            fetched_at: 1_900_000_000,
+            monthly: Some(monthly),
+        })
+        .unwrap();
+        let loaded = load_cache().expect("应能读回缓存");
+        let m = loaded.monthly.expect("monthly 应存在");
+        assert!((m.total_pct - 16.12).abs() < 1e-9);
+        assert!((m.kimi_pct - 11.12).abs() < 1e-9);
+        assert!((m.code_pct - 5.0).abs() < 1e-9);
+        assert_eq!(m.reset_time.as_deref(), Some("2026-08-01T00:00:00Z"));
 
         cleanup(&dir);
     }

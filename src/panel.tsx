@@ -4,6 +4,7 @@ import "./styles.css";
 import type { PanelState, QuotaDetail, UpdateInfo } from "./types";
 import { checkUpdate, getPanelState, refreshNow, openSettings, openExternalUrl, onQuotaUpdated, onUpdateInfo } from "./ipc";
 import { UsageCard } from "./components/UsageCard";
+import { MonthlyCard } from "./components/MonthlyCard";
 import { MembershipCard } from "./components/MembershipCard";
 import { BoosterCard } from "./components/BoosterCard";
 import { ErrorBanner } from "./components/ErrorBanner";
@@ -121,6 +122,9 @@ function PanelApp() {
       )}
       {quota?.weekly && <UsageCard title="7 天用量" detail={quota.weekly} />}
       {quota?.five_hour && <UsageCard title="5 小时用量" detail={quota.five_hour} />}
+      {/* 月度总量（网页 token 可选增强）：monthly 与 monthly_error 都为空时整卡不渲染 */}
+      {state.monthly && <MonthlyCard monthly={state.monthly} />}
+      {state.monthly_error && <p className="monthly-error">{state.monthly_error}</p>}
       {totalDetail && <UsageCard title="总额度" detail={totalDetail} />}
       {quota && (
         <div className="mini-row">

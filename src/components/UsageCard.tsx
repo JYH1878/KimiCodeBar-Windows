@@ -3,8 +3,9 @@ import type { QuotaDetail } from "../types";
 /**
  * 重置倒计时文案：x天后/x小时后/x分钟后重置；
  * 不足 1 分钟（含已过期）显示"即将重置"，reset_time 缺失或无法解析显示"未知"。
+ * 导出供 MonthlyCard 复用。
  */
-function resetCountdownText(resetTime?: string): string {
+export function resetCountdownText(resetTime?: string): string {
   if (!resetTime) return "未知";
   const diffMs = new Date(resetTime).getTime() - Date.now();
   if (Number.isNaN(diffMs)) return "未知";

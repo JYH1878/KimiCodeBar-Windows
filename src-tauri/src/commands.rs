@@ -8,6 +8,7 @@ use std::sync::Mutex;
 use kimicodebar::creds;
 use kimicodebar::kimi::client::KimiClient;
 use kimicodebar::kimi::oauth;
+use kimicodebar::kimi::web::{self, MonthlyInfo, WebError};
 use kimicodebar::quota::{needs_low_warning, KimiQuota, QuotaError};
 use kimicodebar::storage::{self, CachedQuota};
 use kimicodebar::update;
@@ -69,6 +70,8 @@ pub struct CredentialStatus {
     /// 脱敏展示，如 sk-kimi-****…a4nr；未配置为 None
     pub api_key_masked: Option<String>,
     pub oauth_configured: bool,
+    /// 网页 token（月度总量用）是否已配置
+    pub web_token_configured: bool,
 }
 
 /// 设备码登录流程状态（与 src/types.ts 的 DeviceLoginState 一一对应，
@@ -165,6 +168,12 @@ pub struct PanelState {
     pub error: Option<String>,
     /// 任一窗口剩余低于阈值，UI 标红
     pub low_warning: bool,
+    /// 月度总量（已配置网页 token 且有数据时展示；可能为 None）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monthly: Option<MonthlyInfo>,
+    /// 月度数据获取失败原因（如网页登录态过期）；成功为 None
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub monthly_error: Option<String>,
 }
 
 /// 进程内共享状态（`.manage(AppState::new())`，启动时从 cache.json 预热）
@@ -182,6 +191,10 @@ struct Inner {
     error: Option<String>,
     /// 最近一次成功刷新（配额, epoch 秒）；启动时由 cache.json 预热
     last_quota: Option<(KimiQuota, i64)>,
+    /// 最近一次成功的月度总量；启动时由 cache.json 预热
+    monthly: Option<MonthlyInfo>,
+    /// 月度数据获取失败原因（如网页登录态过期）；成功为 None
+    monthly_error: Option<String>,
 }
 
 #[derive(Default)]
@@ -194,12 +207,17 @@ struct DeviceLoginInner {
 
 impl AppState {
     pub fn new() -> Self {
-        let last_quota = storage::load_cache().map(|c| (c.quota, c.fetched_at));
+        let cache = storage::load_cache();
+        let last_quota = cache.as_ref().map(|c| (c.quota.clone(), c.fetched_at));
+        // 月度数据随配额缓存一并预热（断网/未刷新也能展示）
+        let monthly = cache.and_then(|c| c.monthly);
         Self {
             inner: Mutex::new(Inner {
                 loading: false,
                 error: None,
                 last_quota,
+                monthly,
+                monthly_error: None,
             }),
             device_login: Mutex::new(DeviceLoginInner::default()),
             refresh_lock: tokio::sync::Mutex::new(()),
@@ -235,10 +253,14 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
             Err(_) => FetchOutcome::Failed("请求超时，请检查网络".to_string()),
         };
 
+    // 月度总量（网页 token）：拿到配额后无论成败都继续尝试
+    let monthly_outcome = fetch_monthly().await;
+
     let panel = {
         let mut inner = state.inner.lock().unwrap();
         // 所有分支必须先复位 loading（NoCredential 曾漏掉这行导致永久卡死）
         inner.loading = false;
+        let quota_success = matches!(outcome, FetchOutcome::Success(..));
         match outcome {
             // 当前登录方式无凭证：若另一种方式有凭证（用户刚切了方式），给引导文案；
             // 完全没有凭证则 error=None，面板显示 EmptyState 引导
@@ -249,18 +271,48 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
                     None
                 };
             }
-            // 成功：落盘缓存、清错误、更新 last_quota
+            // 成功：清错误、更新 last_quota（缓存在下方统一落盘）
             FetchOutcome::Success(quota, fetched_at) => {
-                let _ = storage::save_cache(&CachedQuota {
-                    quota: quota.clone(),
-                    fetched_at,
-                });
                 inner.error = None;
                 inner.last_quota = Some((quota, fetched_at));
             }
             // 失败：保留旧缓存数据，仅记错误
             FetchOutcome::Failed(message) => inner.error = Some(message),
         }
+
+        // 月度结果：成功才覆盖数据；失败一律保留旧数据，仅记原因
+        let mut monthly_success = false;
+        match monthly_outcome {
+            // 未配置网页 token：清空月度展示
+            MonthlyOutcome::NoToken => {
+                inner.monthly = None;
+                inner.monthly_error = None;
+            }
+            MonthlyOutcome::Success(info) => {
+                inner.monthly = Some(info);
+                inner.monthly_error = None;
+                monthly_success = true;
+            }
+            MonthlyOutcome::Unauthorized => {
+                inner.monthly_error = Some("网页登录态已过期，请到设置页更新".to_string());
+            }
+            MonthlyOutcome::Failed => {
+                inner.monthly_error = Some("月度数据刷新失败".to_string());
+            }
+        }
+
+        // 配额或月度任一成功：把最新内存态落盘（月度挂在配额缓存上，向后兼容；
+        // 配额失败但月度成功时沿用旧配额数据，fetched_at 不变）
+        if quota_success || monthly_success {
+            if let Some((quota, fetched_at)) = &inner.last_quota {
+                let _ = storage::save_cache(&CachedQuota {
+                    quota: quota.clone(),
+                    fetched_at: *fetched_at,
+                    monthly: inner.monthly.clone(),
+                });
+            }
+        }
+
         assemble_panel_state(&inner)
     };
 
@@ -468,7 +520,36 @@ pub fn get_credential_status() -> CredentialStatus {
         api_key_configured: api_key.is_some(),
         api_key_masked: api_key.as_deref().map(mask_api_key),
         oauth_configured: matches!(oauth::load_credentials(), Ok(Some(_))),
+        web_token_configured: matches!(creds::load_web_token(), Ok(Some(_))),
     }
+}
+
+/// 保存网页 token（kimi-auth）：先规范化，再真实调 GetSubscriptionStats 校验；
+/// 通过后存凭据管理器并触发一次刷新，让月度数据立刻上面板
+#[tauri::command]
+pub async fn set_web_token(app: AppHandle, token: String) -> Result<MonthlyInfo, String> {
+    let token = web::normalize_web_token(&token)?;
+    match web::fetch_subscription_stats(&token).await {
+        Ok(info) => {
+            creds::save_web_token(&token).map_err(|e| e.to_string())?;
+            do_refresh(&app).await;
+            Ok(info)
+        }
+        Err(WebError::Unauthorized) => {
+            Err("网页登录态无效或已过期，请重新复制 kimi-auth 的值".to_string())
+        }
+        Err(WebError::Http(_)) => Err("网络错误，校验失败".to_string()),
+        // Parse：展示原始错误文本
+        Err(e @ WebError::Parse(_)) => Err(e.to_string()),
+    }
+}
+
+/// 清除网页 token 并触发一次刷新（面板回到无月度数据态）
+#[tauri::command]
+pub async fn clear_web_token(app: AppHandle) -> Result<(), String> {
+    creds::clear_web_token().map_err(|e| e.to_string())?;
+    do_refresh(&app).await;
+    Ok(())
 }
 
 /// 发起设备码登录：先取设备授权码，立即返回 waiting 状态；
@@ -633,6 +714,32 @@ enum FetchOutcome {
     Failed(String),
 }
 
+/// 月度刷新的四种结局（独立于配额刷新结果处理）
+enum MonthlyOutcome {
+    /// 未配置网页 token
+    NoToken,
+    /// 拉取成功
+    Success(MonthlyInfo),
+    /// 网页登录态失效（401/403）：保留旧数据，提示更新
+    Unauthorized,
+    /// 其他失败（网络/解析/keyring）：保留旧数据
+    Failed,
+}
+
+/// 取网页 token 并拉取月度总量；未配置 token → NoToken
+async fn fetch_monthly() -> MonthlyOutcome {
+    let token = match creds::load_web_token() {
+        Ok(Some(token)) => token,
+        Ok(None) => return MonthlyOutcome::NoToken,
+        Err(_) => return MonthlyOutcome::Failed,
+    };
+    match web::fetch_subscription_stats(&token).await {
+        Ok(info) => MonthlyOutcome::Success(info),
+        Err(WebError::Unauthorized) => MonthlyOutcome::Unauthorized,
+        Err(_) => MonthlyOutcome::Failed,
+    }
+}
+
 /// 取 token 并拉取配额
 async fn fetch_with_credential() -> FetchOutcome {
     let token = match creds::get_active_token().await {
@@ -658,9 +765,14 @@ fn assemble_panel_state(inner: &Inner) -> PanelState {
         Some((quota, fetched_at)) => (Some(quota.clone()), Some(*fetched_at)),
         None => (None, None),
     };
+    // 低额判定：任一时间窗剩余低于阈值，或月度已用超过 100 - 阈值
     let low_warning = quota
         .as_ref()
-        .is_some_and(|q| needs_low_warning(q, settings.warn_threshold_pct));
+        .is_some_and(|q| needs_low_warning(q, settings.warn_threshold_pct))
+        || inner
+            .monthly
+            .as_ref()
+            .is_some_and(|m| m.total_pct >= 100.0 - settings.warn_threshold_pct);
     PanelState {
         credential: has_any_credential(),
         loading: inner.loading,
@@ -668,6 +780,8 @@ fn assemble_panel_state(inner: &Inner) -> PanelState {
         fetched_at,
         error: inner.error.clone(),
         low_warning,
+        monthly: inner.monthly.clone(),
+        monthly_error: inner.monthly_error.clone(),
     }
 }
 

@@ -1,0 +1,17 @@
+{
+  "ratelimitCode5h": {
+    "ratio": 0.32,
+    "resetTime": "2026-07-26T10:00:00Z"
+  },
+  "ratelimitCode7d": {
+    "ratio": 0.51,
+    "resetTime": "2026-07-29T00:00:00Z"
+  },
+  "subscriptionBalance": {
+    "feature": "FEATURE_OMNI",
+    "type": "SUBSCRIPTION",
+    "amountUsedRatio": 0.1612,
+    "kimiCodeUsedRatio": 0.05,
+    "expireTime": "2026-08-01T00:00:00Z"
+  }
+}

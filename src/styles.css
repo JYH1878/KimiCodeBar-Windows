@@ -103,6 +103,34 @@ body,
   color: #7982a9;
 }
 
+/* --- 月度总量卡 --- */
+
+/* 分段进度条：Kimi 段与 Code 段连续拼接，两段合计宽度即总已用百分比 */
+.monthly-progress {
+  display: flex;
+}
+
+.monthly-progress .seg-kimi {
+  height: 100%;
+  background-color: #3b4261;
+  transition: width 0.3s ease;
+}
+
+.monthly-progress .seg-code {
+  height: 100%;
+  background-color: #7aa2f7;
+  transition: width 0.3s ease;
+}
+
+/* 月度数据获取失败：卡片下方红色小字（负 margin 抵消部分面板 gap，贴近卡片） */
+.monthly-error {
+  margin-top: -4px;
+  padding: 0 4px;
+  font-size: 11px;
+  color: #f7768e;
+  word-break: break-all;
+}
+
 /* --- 会员等级 / Booster 一行两小卡 --- */
 
 .mini-row {
@@ -517,8 +545,60 @@ body,
   gap: 8px;
 }
 
-/* --- 设置页底栏 --- */
+/* --- 折叠卡片（高级区） --- */
 
+/* 折叠标题行：整行可点，左侧标题+徽标，右侧箭头 */
+.collapse-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;
+  border: none;
+  background: none;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.collapse-head .scard-title {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 折叠箭头：展开时旋转 90° */
+.chevron {
+  color: #7982a9;
+  font-size: 12px;
+  transition: transform 0.15s ease;
+}
+
+.chevron.open {
+  transform: rotate(90deg);
+}
+
+/* 步骤引导有序列表 */
+.steps {
+  margin-left: 18px;
+  font-size: 12px;
+  color: #7982a9;
+  line-height: 1.8;
+}
+
+.steps .link {
+  font-size: inherit;
+}
+
+/* 多行等宽输入框（网页 token 粘贴），与 .input 搭配使用 */
+.textarea {
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+  font-family: Consolas, "Cascadia Mono", monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* --- 设置页底栏 --- */
 .settings-footer {
   margin-top: auto;
   padding: 2px 2px 0;
