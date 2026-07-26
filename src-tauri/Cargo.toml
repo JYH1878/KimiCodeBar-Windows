@@ -17,7 +17,7 @@ chrono = { version = "0.4", default-features = false, features = ["std", "clock"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 urlencoding = "2"
 uuid = { version = "1", features = ["v4"] }
-thiserror = "1"
+thiserror = "2"
 keyring = { version = "3", features = ["windows-native"] }
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
