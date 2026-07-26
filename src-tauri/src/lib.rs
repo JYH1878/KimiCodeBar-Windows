@@ -2,6 +2,7 @@
 //! 托盘/UI 等二进制侧逻辑在 main.rs，本库只放可测试的核心逻辑。
 
 pub mod creds;
+pub mod history;
 pub mod kimi;
 pub mod quota;
 pub mod storage;

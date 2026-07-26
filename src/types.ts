@@ -89,6 +89,20 @@ export interface CredentialStatus {
   web_token_configured: boolean;
 }
 
+// ============ 用量趋势（本地历史，纯事实不预测）============
+
+/** 历史采样点：每次成功刷新记录一条，百分比为"已用"语义 */
+export interface HistoryPoint {
+  /** epoch 秒 */
+  t: number;
+  /** 7 天窗口已用百分比（缺失为 null） */
+  weekly?: number | null;
+  /** 5 小时窗口已用百分比（缺失为 null） */
+  five_hour?: number | null;
+  /** 月度总量已用百分比（缺失为 null） */
+  monthly?: number | null;
+}
+
 // ============ 月度总量（网页 token，可选增强）============
 
 /** 月度总量：来自网页端 GetSubscriptionStats，百分比为"已用"语义 */

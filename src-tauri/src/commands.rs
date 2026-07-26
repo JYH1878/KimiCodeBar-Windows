@@ -6,6 +6,7 @@
 use std::sync::Mutex;
 
 use kimicodebar::creds;
+use kimicodebar::history;
 use kimicodebar::kimi::client::KimiClient;
 use kimicodebar::kimi::oauth;
 use kimicodebar::kimi::web::{self, MonthlyInfo, WebError};
@@ -329,6 +330,23 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
             }
         }
 
+        // 配额刷新成功：追加一条本地历史采样（用量趋势图数据，纯事实不预测）。
+        // 月度取本轮最终值（失败沿用旧值，未配置为 None）；t 用本轮成功时刻。
+        // 历史是派生数据，读写失败只记日志，不影响刷新主流程
+        if quota_success {
+            if let Some((quota, fetched_at)) = &inner.last_quota {
+                let mut store = history::HistoryStore::load();
+                store.append(history::sample_point(
+                    quota,
+                    inner.monthly.as_ref(),
+                    *fetched_at,
+                ));
+                if let Err(e) = store.save() {
+                    tracing::warn!("保存用量历史失败: {e}");
+                }
+            }
+        }
+
         assemble_panel_state(&inner)
     };
 
@@ -401,6 +419,13 @@ pub fn quota_summary(quota: &KimiQuota) -> String {
 #[tauri::command]
 pub fn get_panel_state(state: State<'_, AppState>) -> PanelState {
     state.snapshot()
+}
+
+/// 用量趋势历史（本地累积的成功刷新采样，纯事实不预测）：
+/// load 后按 t 升序返回；无历史或文件损坏为空数组
+#[tauri::command]
+pub fn get_usage_history() -> Vec<history::HistoryPoint> {
+    history::HistoryStore::load().into_points()
 }
 
 #[tauri::command]

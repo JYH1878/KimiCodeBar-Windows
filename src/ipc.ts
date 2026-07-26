@@ -10,6 +10,7 @@ import type {
   AppSettings,
   CredentialStatus,
   DeviceLoginState,
+  HistoryPoint,
   MonthlyInfo,
   PanelState,
   UpdateInfo,
@@ -112,6 +113,35 @@ export function onQuotaUpdated(cb: (state: PanelState) => void): () => void {
     cancelled = true;
     unlisten?.();
   };
+}
+
+// ============ 用量趋势（本地历史采样，纯事实不预测）============
+
+/**
+ * 获取本地累积的历史采样点（每次成功刷新记录一条，百分比为"已用"语义）。
+ * 浏览器 mock 生成近 24 小时、每 10 分钟一个点的合成数据：
+ * weekly 从 20 缓慢爬升到 65，five_hour 呈锯齿波（模拟 5 小时窗口到期重置），
+ * monthly 从 14 缓升到 15。
+ */
+export async function getUsageHistory(): Promise<HistoryPoint[]> {
+  if (!isTauri) {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const points: HistoryPoint[] = [];
+    // 24 小时 × 每小时 6 个点 = 144 个间隔，含首尾共 145 个点
+    for (let i = 0; i <= 144; i++) {
+      const ratio = i / 144;
+      // 5 小时窗口 = 30 个点一个周期：周期内爬升、到顶骤降回起点（锯齿）
+      const phase = (i % 30) / 30;
+      points.push({
+        t: nowSec - 24 * 3600 + i * 600,
+        weekly: Math.min(100, 20 + 45 * ratio + Math.sin(i / 7) * 1.5),
+        five_hour: Math.min(100, 8 + 80 * phase + Math.sin(i / 5) * 2),
+        monthly: 14 + ratio,
+      });
+    }
+    return points;
+  }
+  return invoke<HistoryPoint[]>("get_usage_history");
 }
 
 // ============ 第 5 步：设置与凭证 ============

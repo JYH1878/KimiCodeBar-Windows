@@ -131,6 +131,38 @@ body,
   word-break: break-all;
 }
 
+/* --- 用量趋势卡（手写 SVG，不引图表库） --- */
+
+/* 趋势图 SVG：占满卡宽，高度按 viewBox 比例自适应 */
+.trend-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-top: 8px;
+}
+
+/* 0%/50%/100% 三条参考虚线（浅灰，不画刻度数字） */
+.trend-ref {
+  stroke: #3b4261;
+  stroke-width: 0.6;
+  stroke-dasharray: 3 3;
+}
+
+/* 右端图例小字（"7天"/"5h"） */
+.trend-legend-text {
+  font-size: 9px;
+  fill: #a9b1d6;
+}
+
+/* 历史数据不足 2 点时的占位文案（高度接近图表，避免卡片跳动） */
+.trend-empty {
+  margin-top: 8px;
+  padding: 28px 0;
+  text-align: center;
+  font-size: 12px;
+  color: #7982a9;
+}
+
 /* --- 会员等级 / Booster 一行两小卡 --- */
 
 .mini-row {
@@ -260,12 +292,17 @@ body,
 
 /* --- 底栏 --- */
 
+/* 底栏：内容不足 480px 时 margin-top:auto 沉底；内容超出窗口 .panel 纵向滚动时
+   sticky 吸底（背景色遮挡下方滚过的内容） */
 .footer {
   margin-top: auto;
+  position: sticky;
+  bottom: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 2px 2px 0;
+  padding: 6px 2px 2px;
+  background-color: #1a1b26;
   font-size: 11px;
   color: #7982a9;
 }
