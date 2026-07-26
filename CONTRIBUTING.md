@@ -1,6 +1,6 @@
 # 贡献指南
 
-感谢你愿意为 KimiCodeBar for Windows 出一份力。本项目是社区驱动的开源工具（MIT 协议），任何形式的贡献都欢迎：bug 报告、功能建议、文档改进、代码 PR。
+感谢您愿意为 KimiCodeBar for Windows 出一份力。本项目是社区驱动的开源工具（MIT 协议），任何形式的贡献都欢迎：bug 报告、功能建议、文档改进、代码 PR。
 
 ## 提 Issue
 
