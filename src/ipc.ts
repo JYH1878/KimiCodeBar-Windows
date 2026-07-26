@@ -278,8 +278,12 @@ export async function openExternalUrl(url: string): Promise<void> {
 
 // ============ 第 6 步：更新检查 ============
 
-/** 检查应用更新。检查失败时后端不抛错，而是把原因放进返回的 error 字段，调用方按需静默 */
-export async function checkUpdate(): Promise<UpdateInfo> {
+/**
+ * 检查应用更新。force=true 强制走网络（设置页手动点击）；缺省走后端时间缓存
+ * （上次成功 6 小时 / 上次错误 10 分钟内复用旧结果）。
+ * 检查失败时后端不抛错，而是把原因放进返回的 error 字段，调用方按需静默
+ */
+export async function checkUpdate(force?: boolean): Promise<UpdateInfo> {
   if (!isTauri) {
     // mock 固定返回"有新版"，便于浏览器下查看徽标/提示效果
     return {
@@ -290,5 +294,28 @@ export async function checkUpdate(): Promise<UpdateInfo> {
       error: null,
     };
   }
-  return invoke<UpdateInfo>("check_update");
+  return invoke<UpdateInfo>("check_update", { force });
+}
+
+/**
+ * 订阅后端推送的更新检查结果（update-info 事件，payload 为 UpdateInfo；
+ * 面板打开时的后台检查、强制检查完成时广播）。
+ * 返回反注册函数，供组件卸载时调用。
+ */
+export function onUpdateInfo(cb: (info: UpdateInfo) => void): () => void {
+  if (!isTauri) {
+    // 浏览器 mock 没有后端推送，返回空的反注册函数
+    return () => {};
+  }
+  let unlisten: (() => void) | null = null;
+  // 与 onQuotaUpdated 相同的兜底：注册完成前卸载也能正确反注册
+  let cancelled = false;
+  listen<UpdateInfo>("update-info", (event) => cb(event.payload)).then((fn) => {
+    if (cancelled) fn();
+    else unlisten = fn;
+  });
+  return () => {
+    cancelled = true;
+    unlisten?.();
+  };
 }

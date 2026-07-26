@@ -98,7 +98,7 @@ export interface DeviceLoginState {
 
 // ============ 第 6 步：更新检查契约 ============
 
-/** check_update 的返回。每次进程运行只在首次调用时真正走网络，之后返回内存缓存 */
+/** check_update 的返回。后端时间缓存：上次成功 6 小时 / 上次错误 10 分钟内复用旧结果，force 参数可强制走网络 */
 export interface UpdateInfo {
   /** 当前版本，如 0.1.0 */
   current: string;

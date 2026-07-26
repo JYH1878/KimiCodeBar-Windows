@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 import type { PanelState, QuotaDetail, UpdateInfo } from "./types";
-import { checkUpdate, getPanelState, refreshNow, openSettings, openExternalUrl, onQuotaUpdated } from "./ipc";
+import { checkUpdate, getPanelState, refreshNow, openSettings, openExternalUrl, onQuotaUpdated, onUpdateInfo } from "./ipc";
 import { UsageCard } from "./components/UsageCard";
 import { MembershipCard } from "./components/MembershipCard";
 import { BoosterCard } from "./components/BoosterCard";
@@ -67,10 +67,15 @@ function PanelApp() {
         if (alive && info.has_update) setUpdate(info);
       })
       .catch(() => {});
+    // 订阅后端主动推送的更新检查结果（托盘打开面板时的后台检查完成会广播 update-info）
+    const unlistenUpdate = onUpdateInfo((info) => {
+      if (info.has_update) setUpdate(info);
+    });
     const timer = setInterval(() => setTick((t) => t + 1), 60_000);
     return () => {
       alive = false;
       unlisten();
+      unlistenUpdate();
       clearInterval(timer);
     };
   }, [doRefresh]);

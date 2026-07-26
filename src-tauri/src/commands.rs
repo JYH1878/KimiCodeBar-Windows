@@ -134,7 +134,8 @@ impl DeviceLoginState {
 }
 
 /// 更新检查结果（与 src/types.ts 的 UpdateInfo 一一对应，snake_case 序列化）。
-/// 每次进程运行只在首次调用时真正走网络，之后返回内存缓存（失败结果同样缓存）。
+/// 进程级时间缓存：上次成功 6 小时 / 上次错误 10 分钟内复用旧结果，
+/// force 参数可强制走网络（见 check_update）
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateInfo {
     /// 当前版本，如 0.1.0
@@ -272,7 +273,8 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
     panel
 }
 
-/// 面板即将由隐藏变显示时调用：无缓存或数据陈旧（>60s）则后台刷新
+/// 面板即将由隐藏变显示时调用：无缓存或数据陈旧（>60s）则后台刷新；
+/// 距上次成功更新检查 ≥6 小时时顺带后台查一次更新
 pub fn refresh_if_stale(app: &AppHandle) {
     let stale = {
         let state = app.state::<AppState>();
@@ -288,6 +290,32 @@ pub fn refresh_if_stale(app: &AppHandle) {
             do_refresh(&app).await;
         });
     }
+    check_update_if_stale(app);
+}
+
+/// 距上次成功更新检查 ≥6 小时则后台查一次，完成后广播 update-info 事件。
+/// 上次是错误结果也视为到期（其 10 分钟防刷窗口由 check_update 自身缓存兜底）。
+fn check_update_if_stale(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // 持锁期间不 await：只读缓存判断是否到期，网络检查在放锁后进行
+        let due = {
+            let cache = UPDATE_CACHE.lock().await;
+            match &*cache {
+                // 上次成功且未满 6 小时：不必查
+                Some((info, at)) if info.error.is_none() => {
+                    at.elapsed().as_secs() >= UPDATE_CACHE_OK_SECS
+                }
+                // 从未查过或上次是错误：到期
+                _ => true,
+            }
+        };
+        if !due {
+            return;
+        }
+        let info = check_update(app.clone(), Some(false)).await;
+        let _ = app.emit("update-info", &info);
+    });
 }
 
 /// 托盘 tooltip / 通知正文共用的窗口摘要，如 "7天剩余 87% · 5h剩余 36%"
@@ -312,24 +340,49 @@ pub async fn refresh_now(app: AppHandle) -> PanelState {
     do_refresh(&app).await
 }
 
-/// 检查应用更新。同一进程只真正请求一次网络：首次结果（含失败）缓存进
-/// UPDATE_CACHE，之后调用直接命中缓存，避免设置页反复打开时反复打 GitHub API。
+/// 检查应用更新。时间缓存策略（进程级静态缓存，见 UPDATE_CACHE）：
+/// 上次成功 6 小时内、上次错误 10 分钟内（防刷）直接返回缓存；
+/// force == Some(true)（设置页"检查更新"按钮）无条件走网络。
+/// 新鲜结果会广播 update-info 事件，面板据此更新版本徽标。
 #[tauri::command]
-pub async fn check_update() -> UpdateInfo {
-    UPDATE_CACHE.get_or_init(fetch_update_info).await.clone()
+pub async fn check_update(app: AppHandle, force: Option<bool>) -> UpdateInfo {
+    if force != Some(true) {
+        // 持锁期间不 await：命中 TTL 即返回，未命中先放锁再走网络
+        let cache = UPDATE_CACHE.lock().await;
+        if let Some((info, at)) = &*cache {
+            let ttl_secs = if info.error.is_none() {
+                UPDATE_CACHE_OK_SECS
+            } else {
+                UPDATE_CACHE_ERR_SECS
+            };
+            if at.elapsed().as_secs() < ttl_secs {
+                return info.clone();
+            }
+        }
+    }
+    // 并发未命中时各自打一次网络（旧 OnceCell 是单航班）：压力可忽略，
+    // 成功 6h / 错误 10min 的缓存窗口已限频
+    let info = fetch_update_info().await;
+    *UPDATE_CACHE.lock().await = Some((info.clone(), std::time::Instant::now()));
+    // 只广播新鲜结果：缓存命中不重复广播（面板挂载时本就会主动查一次）
+    let _ = app.emit("update-info", &info);
+    info
 }
 
-/// 进程级更新检查缓存（tokio OnceCell：并发首调也只发出一次请求）
-static UPDATE_CACHE: tokio::sync::OnceCell<UpdateInfo> = tokio::sync::OnceCell::const_new();
+/// 进程级更新检查缓存：上次结果 + 完成时刻
+static UPDATE_CACHE: tokio::sync::Mutex<Option<(UpdateInfo, std::time::Instant)>> =
+    tokio::sync::Mutex::const_new(None);
 
-/// 真正走网络的更新检查：拉取 GitHub 最新 Release，与内置版本号比较
+/// 成功结果缓存时长（秒）：6 小时
+const UPDATE_CACHE_OK_SECS: u64 = 6 * 3600;
+/// 错误结果缓存时长（秒）：10 分钟，限流期防刷
+const UPDATE_CACHE_ERR_SECS: u64 = 10 * 60;
+
+/// 真正走网络的更新检查：拉取最新 Release（重定向路径优先，API 兜底），与内置版本号比较
 async fn fetch_update_info() -> UpdateInfo {
     let current = env!("CARGO_PKG_VERSION").to_string();
-    // UA / 10s 超时由 update::fetch_latest_release 逐请求设置，client 无需特化配置
-    let http = reqwest::Client::builder()
-        .build()
-        .expect("构建 reqwest::Client 失败");
-    match update::fetch_latest_release(&http).await {
+    // UA / 10s 超时 / 不跟随重定向由 update::fetch_latest 统一配置
+    match update::fetch_latest().await {
         Ok(release) => {
             let latest = release.tag;
             UpdateInfo {
@@ -340,7 +393,7 @@ async fn fetch_update_info() -> UpdateInfo {
                 error: None,
             }
         }
-        // 失败结果同样会被 OnceCell 缓存，本进程内不再重试
+        // 错误结果同样进缓存（10 分钟 TTL），避免限流期反复打 GitHub
         Err(message) => UpdateInfo {
             current,
             latest: None,

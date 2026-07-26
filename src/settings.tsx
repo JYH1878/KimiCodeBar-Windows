@@ -122,7 +122,8 @@ function SettingsApp() {
     setUpdateFound(null);
     setUpdateMsg(null);
     try {
-      const info = await checkUpdate();
+      // force=true：手动点击无条件走网络，绕过后端 6h/10min 缓存
+      const info = await checkUpdate(true);
       if (info.error !== null) {
         showUpdateMsg("err", info.error, 3000);
       } else if (info.has_update && info.latest !== null) {

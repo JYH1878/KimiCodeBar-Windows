@@ -1,6 +1,8 @@
 //! 应用更新检查：查询 GitHub Releases 最新版本，并做语义化版本比较。
 //!
 //! 更新源是作者自己的仓库（JYH1878/KimiCodeBar-Windows）的 GitHub Releases。
+//! 查询主路径是 releases/latest 短链的 302 Location 头（网页路由，不受匿名
+//! API 60 次/小时/IP 限流影响，共享代理出口下 API 路径常被限流），API 作回退。
 //! 版本比较语义参照 `KimiCodeBar-Mac/Windows/src/KimiCodeBar.Core/Services/VersionComparer.cs`。
 
 use std::time::Duration;
@@ -9,13 +11,22 @@ use serde::Deserialize;
 
 use crate::kimi::USER_AGENT;
 
-/// GitHub API「最新 Release」接口（固定指向作者仓库）
+/// GitHub API「最新 Release」接口（固定指向作者仓库），回退路径
 const LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/JYH1878/KimiCodeBar-Windows/releases/latest";
+/// 「最新 Release」网页短链（主路径）：302 跳转到 tag 页，走网页路由而非 REST API
+const LATEST_RELEASE_PAGE_URL: &str =
+    "https://github.com/JYH1878/KimiCodeBar-Windows/releases/latest";
+/// 302 Location 中 tag 页的路径前缀，如 /releases/tag/v0.1.1
+const TAG_PATH_PREFIX: &str = "/releases/tag/";
 /// 更新检查超时（秒）：独立于配额查询的 30s，设置页不应为更新检查久等
 const UPDATE_TIMEOUT_SECS: u64 = 10;
 /// Release notes 截断长度（字符数），避免 UI 塞入过长文本
 const NOTES_MAX_CHARS: usize = 500;
+/// GitHub 限流提示（403/429；共享代理出口常见，两条查询路径共用同一文案）
+const RATE_LIMIT_MESSAGE: &str = "GitHub 限流，请稍后再试";
+/// 302 跳转地址不符合 .../releases/tag/<tag> 形态时的错误文案
+const INVALID_LOCATION_MESSAGE: &str = "发布页地址格式异常";
 
 /// 远端最新 Release 信息
 #[derive(Debug, Clone)]
@@ -28,8 +39,99 @@ pub struct ReleaseInfo {
     pub notes: Option<String>,
 }
 
-/// GET GitHub 最新 Release 并解析。UA 用 crate::kimi::USER_AGENT（GitHub API 强制要求 UA），
-/// 超时 10s；非 2xx / 网络失败 / 解析失败均返回中文错误文案。
+/// 更新检查编排入口：先走 302 重定向路径（不受 API 限流影响），失败再回退
+/// GitHub API；两者都失败时返回重定向路径的错误——限流场景下 API 几乎必然
+/// 同样失败，其错误对用户没有额外信息量。
+pub async fn fetch_latest() -> Result<ReleaseInfo, String> {
+    // 不自动跟随重定向：302 的 Location 头本身携带版本信息。
+    // 对 API 路径无副作用（成功时 200 直达，不涉重定向），两条路径共用一个 client
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("检查更新失败：{e}"))?;
+    match fetch_latest_via_redirect(&http).await {
+        Ok(info) => Ok(info),
+        Err(redirect_err) => match fetch_latest_release(&http).await {
+            Ok(info) => Ok(info),
+            // 回主路径错误：它是用户实际需要看到的诊断（如限流提示）
+            Err(_) => Err(redirect_err),
+        },
+    }
+}
+
+/// 主路径：GET releases/latest 短链，从 302 的 Location 头解析最新 tag。
+/// 网页路由拿不到 Release 正文，notes 置 None。
+///
+/// 注意：传入的 client 必须配置 redirect::Policy::none()，否则 302 被透明
+/// 跟随、Location 头丢失，本函数只能拿到 200 的 HTML 而报状态码错误。
+pub async fn fetch_latest_via_redirect(http: &reqwest::Client) -> Result<ReleaseInfo, String> {
+    let resp = http
+        .get(LATEST_RELEASE_PAGE_URL)
+        // 与 API 路径一致：逐请求设置 UA / 超时（GitHub 强制要求 UA）
+        .header(reqwest::header::USER_AGENT, USER_AGENT)
+        .timeout(Duration::from_secs(UPDATE_TIMEOUT_SECS))
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                "检查更新超时，请检查网络".to_string()
+            } else {
+                format!("检查更新失败：{e}")
+            }
+        })?;
+
+    let status = resp.status();
+    if status != reqwest::StatusCode::FOUND {
+        return Err(github_status_error(status));
+    }
+
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| INVALID_LOCATION_MESSAGE.to_string())?;
+
+    Ok(ReleaseInfo {
+        tag: parse_tag_from_location(location)?,
+        // Release 页面地址保留 Location 原值，点击去下载
+        url: location.to_string(),
+        notes: None,
+    })
+}
+
+/// 从 302 Location 解析版本 tag（纯函数）：剥掉 query/fragment 与末尾斜杠后，
+/// 最后一段为 tag、其前必须是 /releases/tag/ 前缀，否则视为格式异常。
+fn parse_tag_from_location(location: &str) -> Result<String, String> {
+    let path = location
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(location)
+        .trim_end_matches('/');
+    let Some(idx) = path.rfind(TAG_PATH_PREFIX) else {
+        return Err(INVALID_LOCATION_MESSAGE.to_string());
+    };
+    let tag = &path[idx + TAG_PATH_PREFIX.len()..];
+    // tag 必须非空且不含路径分隔符（挡住 .../tag/a/b 之类的异常形态）
+    if tag.is_empty() || tag.contains('/') {
+        return Err(INVALID_LOCATION_MESSAGE.to_string());
+    }
+    Ok(tag.to_string())
+}
+
+/// GitHub 非预期状态码 → 面向用户的中文错误：限流（403/429）单独提示，
+/// 避免把共享出口限流误导为应用故障
+fn github_status_error(status: reqwest::StatusCode) -> String {
+    match status {
+        reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::TOO_MANY_REQUESTS => {
+            RATE_LIMIT_MESSAGE.to_string()
+        }
+        _ => format!("GitHub 返回 {status}"),
+    }
+}
+
+/// 回退路径：GET GitHub API 最新 Release 并解析。UA 用 crate::kimi::USER_AGENT
+/// （GitHub API 强制要求 UA），超时 10s；非 2xx / 网络失败 / 解析失败均返回
+/// 中文错误文案（403/429 映射为限流提示）。
 pub async fn fetch_latest_release(http: &reqwest::Client) -> Result<ReleaseInfo, String> {
     let resp = http
         .get(LATEST_RELEASE_URL)
@@ -49,7 +151,7 @@ pub async fn fetch_latest_release(http: &reqwest::Client) -> Result<ReleaseInfo,
 
     let status = resp.status();
     if !status.is_success() {
-        return Err(format!("检查更新失败：GitHub 返回 {status}"));
+        return Err(github_status_error(status));
     }
 
     let release: GithubRelease = resp
@@ -213,5 +315,90 @@ mod tests {
     fn parse_version_rejects_non_version() {
         assert_eq!(parse_version("release-notes"), None);
         assert_eq!(parse_version(""), None);
+    }
+
+    // ---- 302 Location tag 解析（纯函数，不走网络） ----
+
+    #[test]
+    fn parse_tag_from_standard_location() {
+        assert_eq!(
+            parse_tag_from_location(
+                "https://github.com/JYH1878/KimiCodeBar-Windows/releases/tag/v0.1.1"
+            )
+            .unwrap(),
+            "v0.1.1"
+        );
+    }
+
+    #[test]
+    fn parse_tag_tolerates_query_and_fragment_tail() {
+        assert_eq!(
+            parse_tag_from_location(
+                "https://github.com/JYH1878/KimiCodeBar-Windows/releases/tag/v0.2.0?expanded=true"
+            )
+            .unwrap(),
+            "v0.2.0"
+        );
+        assert_eq!(
+            parse_tag_from_location(
+                "https://github.com/JYH1878/KimiCodeBar-Windows/releases/tag/v0.2.0#notes"
+            )
+            .unwrap(),
+            "v0.2.0"
+        );
+    }
+
+    #[test]
+    fn parse_tag_rejects_non_tag_path() {
+        // releases 列表页 / 仓库首页等非 tag 地址一律格式异常
+        assert!(
+            parse_tag_from_location("https://github.com/JYH1878/KimiCodeBar-Windows/releases")
+                .is_err()
+        );
+        assert!(parse_tag_from_location("https://github.com/JYH1878/KimiCodeBar-Windows").is_err());
+        // tag 为空或 tag 中再含路径段也是异常形态
+        assert!(
+            parse_tag_from_location(
+                "https://github.com/JYH1878/KimiCodeBar-Windows/releases/tag/"
+            )
+            .is_err()
+        );
+        assert!(
+            parse_tag_from_location(
+                "https://github.com/JYH1878/KimiCodeBar-Windows/releases/tag/a/b"
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn parse_tag_rejects_empty_location() {
+        assert_eq!(
+            parse_tag_from_location("").unwrap_err(),
+            INVALID_LOCATION_MESSAGE
+        );
+    }
+
+    // ---- 状态码 → 错误文案映射 ----
+
+    #[test]
+    fn status_error_maps_rate_limit() {
+        // 403（匿名限额耗尽）与 429 都映射为限流提示
+        assert_eq!(
+            github_status_error(reqwest::StatusCode::FORBIDDEN),
+            RATE_LIMIT_MESSAGE
+        );
+        assert_eq!(
+            github_status_error(reqwest::StatusCode::TOO_MANY_REQUESTS),
+            RATE_LIMIT_MESSAGE
+        );
+    }
+
+    #[test]
+    fn status_error_falls_through_to_status_text() {
+        assert_eq!(
+            github_status_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+            "GitHub 返回 500 Internal Server Error"
+        );
     }
 }
