@@ -40,3 +40,15 @@ jobs:
           releaseBody: "见下方 Assets 下载安装包（NSIS，当前用户安装、免管理员）。"
           releaseDraft: true
           prerelease: false
+
+      # 便携版：把独立 exe 打成 zip 追加到同一 Release（草稿）里
+      - name: 打包便携版 zip
+        shell: pwsh
+        run: |
+          $ver = (Get-Content src-tauri/Cargo.toml | Select-String '^version = "(.+)"').Matches[0].Groups[1].Value
+          Compress-Archive -Path "src-tauri/target/release/kimicodebar.exe" -DestinationPath "src-tauri/target/release/KimiCodeBar_${ver}_x64-portable.zip" -Force
+
+      - name: 上传便携版到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: src-tauri/target/release/KimiCodeBar_*_x64-portable.zip
