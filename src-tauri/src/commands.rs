@@ -384,7 +384,11 @@ async fn fetch_update_info() -> UpdateInfo {
     // UA / 10s 超时 / 不跟随重定向由 update::fetch_latest 统一配置
     match update::fetch_latest().await {
         Ok(release) => {
-            let latest = release.tag;
+            // 剥掉 tag 的 v/V 前缀：前端展示统一为 "v{latest}"，避免 "vv0.1.2" 双前缀
+            let latest = release
+                .tag
+                .trim_start_matches(['v', 'V'])
+                .to_string();
             UpdateInfo {
                 has_update: update::is_newer(&latest, &current),
                 latest: Some(latest),
