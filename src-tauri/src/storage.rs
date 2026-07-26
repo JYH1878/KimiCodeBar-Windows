@@ -35,6 +35,9 @@ pub struct Settings {
     /// 开机自启动，默认关
     #[serde(default)]
     pub autostart: bool,
+    /// 全局热键（如 "Ctrl+Shift+K"），None/空串表示禁用
+    #[serde(default)]
+    pub hotkey: Option<String>,
 }
 
 const fn default_refresh_interval_min() -> u32 {
@@ -57,6 +60,7 @@ impl Default for Settings {
             low_warn_enabled: true,
             warn_threshold_pct: DEFAULT_WARN_THRESHOLD_PCT,
             autostart: false,
+            hotkey: None,
         }
     }
 }
@@ -133,7 +137,7 @@ fn save_json<T: Serialize>(path: &PathBuf, tmp_name: &str, value: &T) -> Result<
 
 /// 配置目录：KIMICODEBAR_CONFIG_DIR 覆盖，否则 %APPDATA%\KimiCodeBar
 /// （与 kimi::oauth::config_dir 保持一致，两份实现需同步修改）
-fn config_dir() -> PathBuf {
+pub fn config_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("KIMICODEBAR_CONFIG_DIR") {
         return PathBuf::from(dir);
     }
@@ -141,7 +145,10 @@ fn config_dir() -> PathBuf {
         return PathBuf::from(appdata).join("KimiCodeBar");
     }
     if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
-        return PathBuf::from(home).join("AppData").join("Roaming").join("KimiCodeBar");
+        return PathBuf::from(home)
+            .join("AppData")
+            .join("Roaming")
+            .join("KimiCodeBar");
     }
     std::env::temp_dir().join("KimiCodeBar")
 }
@@ -164,7 +171,8 @@ mod tests {
 
     /// 指向独立临时目录，避免碰真实 %APPDATA%
     fn use_temp_config_dir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("kimicodebar-storage-test-{}", uuid::Uuid::new_v4()));
+        let dir =
+            std::env::temp_dir().join(format!("kimicodebar-storage-test-{}", uuid::Uuid::new_v4()));
         std::env::set_var("KIMICODEBAR_CONFIG_DIR", &dir);
         dir
     }
@@ -195,6 +203,7 @@ mod tests {
             low_warn_enabled: false,
             warn_threshold_pct: 33.5,
             autostart: true,
+            hotkey: Some("Ctrl+Shift+K".to_string()),
         };
         save_settings(&settings).unwrap();
         assert!(dir.join("settings.json").exists());
@@ -209,7 +218,10 @@ mod tests {
             ..settings.clone()
         };
         save_settings(&updated).unwrap();
-        assert_eq!(load_settings().unwrap().login_method.as_deref(), Some("api_key"));
+        assert_eq!(
+            load_settings().unwrap().login_method.as_deref(),
+            Some("api_key")
+        );
 
         // 磁盘格式为 snake_case JSON
         let raw = std::fs::read_to_string(dir.join("settings.json")).unwrap();
@@ -247,6 +259,8 @@ mod tests {
         assert!(settings.low_warn_enabled);
         assert_eq!(settings.warn_threshold_pct, DEFAULT_WARN_THRESHOLD_PCT);
         assert!(!settings.autostart);
+        // 旧版设置文件无 hotkey 字段：#[serde(default)] 读回 None
+        assert!(settings.hotkey.is_none());
 
         cleanup(&dir);
     }

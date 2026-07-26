@@ -124,6 +124,7 @@ const mockDb = {
     low_warn_enabled: true,
     warn_threshold_pct: 20,
     autostart: false,
+    hotkey: null,
   } as AppSettings,
   // 预置一个假 Key，方便浏览器开发时看到"已配置"徽标
   apiKey: "sk-kimi-mock9f8e7d6c5b4a" as string | null,
@@ -360,4 +361,26 @@ export function onUpdateInfo(cb: (info: UpdateInfo) => void): () => void {
     cancelled = true;
     unlisten?.();
   };
+}
+
+// ============ 诊断与日志 ============
+
+/** 打开日志目录（浏览器 mock 仅打印） */
+export async function openLogDir(): Promise<void> {
+  if (!isTauri) {
+    console.info("[mock] open_log_dir");
+    return;
+  }
+  return invoke<void>("open_log_dir");
+}
+
+/**
+ * 导出诊断文件：后端写入诊断文本并自动打开所在目录，返回文件路径。
+ * 失败抛中文错误原样透传；浏览器 mock 返回固定假路径
+ */
+export async function exportDiagnostics(): Promise<string> {
+  if (!isTauri) {
+    return "C:\\Users\\demo\\AppData\\Roaming\\KimiCodeBar\\diagnostics-20260726-120000.txt";
+  }
+  return invoke<string>("export_diagnostics");
 }

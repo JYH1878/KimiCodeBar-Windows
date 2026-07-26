@@ -5,10 +5,12 @@ import "./styles.css";
 import type { AppSettings, CredentialStatus, LoginMethod, UpdateInfo } from "./types";
 import {
   checkUpdate,
+  exportDiagnostics,
   getCredentialStatus,
   getSettings,
   isTauri,
   openExternalUrl,
+  openLogDir,
   saveSettings,
 } from "./ipc";
 import { ApiKeySection } from "./components/ApiKeySection";
@@ -21,6 +23,8 @@ interface GeneralForm {
   lowWarn: boolean;
   threshold: string;
   autostart: boolean;
+  /** 全局热键文本（原样持有输入，保存时 trim，空串→null 禁用） */
+  hotkey: string;
 }
 
 /** 设置窗口主界面（settings.html 入口） */
@@ -39,12 +43,19 @@ function SettingsApp() {
     lowWarn: true,
     threshold: "20",
     autostart: false,
+    hotkey: "",
   });
   const [savingGeneral, setSavingGeneral] = useState(false);
   const [generalSaved, setGeneralSaved] = useState(false);
   const [generalError, setGeneralError] = useState<string | null>(null);
   // "已保存" 2 秒自动消失的定时器
   const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 诊断与日志：exporting=导出中；exportDone=绿色"已导出"（2 秒自动消失）
+  const [exporting, setExporting] = useState(false);
+  const [exportDone, setExportDone] = useState(false);
+  const [diagError, setDiagError] = useState<string | null>(null);
+  // "已导出" 2 秒自动消失的定时器
+  const exportTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 底栏版本号（初始值兼作浏览器 dev 的 mock 回落）
   const [version, setVersion] = useState("0.1.0");
   // 检查更新：checking=请求中；found=有新版（常驻展示，点击去下载）；msg=短时提示（自动消失）
@@ -81,6 +92,7 @@ function SettingsApp() {
           lowWarn: s.low_warn_enabled,
           threshold: String(s.warn_threshold_pct),
           autostart: s.autostart,
+          hotkey: s.hotkey ?? "",
         });
       } catch (e) {
         if (alive) setLoadError(String(e));
@@ -101,10 +113,11 @@ function SettingsApp() {
       });
   }, []);
 
-  // 卸载时清掉"已保存"与更新提示的定时器
+  // 卸载时清掉"已保存"/"已导出"与更新提示的定时器
   useEffect(
     () => () => {
       if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
+      if (exportTimerRef.current !== null) clearTimeout(exportTimerRef.current);
       if (updateTimerRef.current !== null) clearTimeout(updateTimerRef.current);
     },
     [],
@@ -167,6 +180,8 @@ function SettingsApp() {
       low_warn_enabled: form.lowWarn,
       warn_threshold_pct: threshold,
       autostart: form.autostart,
+      // 热键 trim 后提交，空串→null 禁用；后端保存时重新注册，冲突会抛中文错误
+      hotkey: form.hotkey.trim() === "" ? null : form.hotkey.trim(),
     };
     setSavingGeneral(true);
     setGeneralError(null);
@@ -182,6 +197,33 @@ function SettingsApp() {
       setGeneralError(String(e));
     } finally {
       setSavingGeneral(false);
+    }
+  };
+
+  /** 导出诊断文件：成功绿色"已导出"2 秒消失；失败红字原样展示后端错误 */
+  const doExportDiagnostics = async () => {
+    setExporting(true);
+    setDiagError(null);
+    setExportDone(false);
+    try {
+      await exportDiagnostics();
+      setExportDone(true);
+      if (exportTimerRef.current !== null) clearTimeout(exportTimerRef.current);
+      exportTimerRef.current = setTimeout(() => setExportDone(false), 2000);
+    } catch (e) {
+      setDiagError(String(e));
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  /** 打开日志目录：失败红字原样展示后端错误 */
+  const doOpenLogDir = async () => {
+    setDiagError(null);
+    try {
+      await openLogDir();
+    } catch (e) {
+      setDiagError(String(e));
     }
   };
 
@@ -300,6 +342,20 @@ function SettingsApp() {
             onChange={(e) => setForm((f) => ({ ...f, autostart: e.target.checked }))}
           />
         </div>
+        <div className="form-row">
+          <label htmlFor="hotkey">全局热键</label>
+          <input
+            id="hotkey"
+            className="input hotkey-input"
+            type="text"
+            placeholder="如 Ctrl+Shift+K，留空禁用"
+            value={form.hotkey}
+            onChange={(e) => setForm((f) => ({ ...f, hotkey: e.target.value }))}
+            spellCheck={false}
+            autoComplete="off"
+          />
+        </div>
+        <p className="hint-muted">唤起/收起面板；随“保存设置”生效</p>
         {generalError !== null && <p className="hint-err">{generalError}</p>}
         <div className="row-end">
           {generalSaved && <span className="hint-ok">已保存</span>}
@@ -314,7 +370,30 @@ function SettingsApp() {
         </div>
       </section>
 
-      {/* E. 底栏：动态版本号 + 检查更新 */}
+      {/* E. 诊断与日志 */}
+      <section className="scard">
+        <h2 className="scard-title">诊断与日志</h2>
+        <p className="hint-muted">
+          遇到问题？导出诊断文件并附到 GitHub issue，可大幅加快排查（不含任何密钥）。
+        </p>
+        {diagError !== null && <p className="hint-err">{diagError}</p>}
+        <div className="row-end">
+          {exportDone && <span className="hint-ok">已导出</span>}
+          <button
+            type="button"
+            className="btn primary"
+            onClick={() => void doExportDiagnostics()}
+            disabled={exporting}
+          >
+            {exporting ? "导出中…" : "导出诊断文件"}
+          </button>
+          <button type="button" className="btn" onClick={() => void doOpenLogDir()}>
+            打开日志目录
+          </button>
+        </div>
+      </section>
+
+      {/* F. 底栏：动态版本号 + 检查更新 */}
       <footer className="settings-footer">
         KimiCodeBar v{version}
         {" · "}

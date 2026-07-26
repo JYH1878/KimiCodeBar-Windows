@@ -1,0 +1,34 @@
+name: 🐛 Bug 报告
+description: 报告一个可复现的问题
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: 问题描述
+      description: 发生了什么？预期行为应该是什么？
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤
+      placeholder: |
+        1. 打开……
+        2. 点击……
+        3. 出现……
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 应用版本
+      description: 设置页底部可见，如 v0.2.0
+      placeholder: v0.2.0
+    validations:
+      required: true
+  - type: textarea
+    id: diag
+    attributes:
+      label: 诊断信息（可选）
+      description: 设置 → 诊断与日志 → 导出诊断文件，粘贴内容（不含密钥）

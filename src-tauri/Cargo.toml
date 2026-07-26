@@ -23,3 +23,7 @@ tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
+tauri-plugin-global-shortcut = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing-appender = "0.2"

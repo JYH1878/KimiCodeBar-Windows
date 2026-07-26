@@ -1,6 +1,9 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod commands;
+mod diagnostics;
+mod hotkey;
+mod logging;
 mod panel;
 mod polling;
 mod tray;
@@ -13,6 +16,26 @@ fn main() {
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             panel::show_panel_for_second_instance(app);
         }))
+        // 全局热键：面板可见则隐藏，不可见则按托盘定位显示（与左键点托盘一致）
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state != tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        return;
+                    }
+                    let visible = app
+                        .get_webview_window("main")
+                        .is_some_and(|w| w.is_visible().unwrap_or(false));
+                    if visible {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.hide();
+                        }
+                    } else {
+                        panel::show_panel_for_second_instance(app);
+                    }
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -36,9 +59,23 @@ fn main() {
             commands::start_device_login,
             commands::cancel_device_login,
             commands::oauth_logout,
+            commands::open_log_dir,
+            commands::export_diagnostics,
         ])
         .setup(|app| {
+            // 日志必须最先初始化：之后所有埋点才有着落；失败退回 stderr，不 panic
+            logging::init();
+            tracing::info!("KimiCodeBar 启动 v{}", env!("CARGO_PKG_VERSION"));
+
             tray::setup(app.handle())?;
+
+            // 按设置注册全局热键；被占用只告警，不阻断启动
+            {
+                let settings = kimicodebar::storage::load_settings().unwrap_or_default();
+                if let Err(e) = hotkey::apply(app.handle(), settings.hotkey.as_deref()) {
+                    tracing::warn!("{e}");
+                }
+            }
 
             // 以系统实际自启状态为准回写设置（用户可能在系统设置里手动关过）
             {

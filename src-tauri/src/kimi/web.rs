@@ -109,7 +109,10 @@ pub async fn fetch_subscription_stats(token: &str) -> Result<MonthlyInfo, WebErr
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .header(reqwest::header::ACCEPT, "application/json")
         .header(reqwest::header::ORIGIN, "https://www.kimi.com")
-        .header(reqwest::header::REFERER, "https://www.kimi.com/code/console")
+        .header(
+            reqwest::header::REFERER,
+            "https://www.kimi.com/code/console",
+        )
         .header("connect-protocol-version", "1")
         .header("x-msh-platform", "web")
         .body("{}");
@@ -118,20 +121,39 @@ pub async fn fetch_subscription_stats(token: &str) -> Result<MonthlyInfo, WebErr
         req = req.header(name, value);
     }
 
-    let resp = req.send().await.map_err(|e| WebError::Http(e.to_string()))?;
+    let resp = req.send().await.map_err(|e| {
+        tracing::warn!("月度总量请求发送失败: {e}");
+        WebError::Http(e.to_string())
+    })?;
     let status = resp.status();
-    let body = resp
-        .text()
-        .await
-        .map_err(|e| WebError::Http(e.to_string()))?;
+    let body = resp.text().await.map_err(|e| {
+        tracing::warn!("月度总量响应读取失败: {e}");
+        WebError::Http(e.to_string())
+    })?;
 
+    // 错误分支只记状态码与响应体长度，严禁记录 token / 响应原文
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        tracing::warn!(
+            "月度总量接口鉴权失败: status={}, body_len={}",
+            status.as_u16(),
+            body.len()
+        );
         return Err(WebError::Unauthorized);
     }
     if !status.is_success() {
+        tracing::warn!(
+            "月度总量接口返回非 2xx: status={}, body_len={}",
+            status.as_u16(),
+            body.len()
+        );
         return Err(WebError::Http(format!("HTTP {}", status.as_u16())));
     }
-    parse_subscription_stats(&body)
+    parse_subscription_stats(&body).map_err(|e| {
+        if matches!(e, WebError::Parse(_)) {
+            tracing::warn!("月度总量响应解析失败: body_len={}", body.len());
+        }
+        e
+    })
 }
 
 /// 解析 GetSubscriptionStats 响应为 MonthlyInfo（纯函数，便于单测）。
@@ -146,7 +168,10 @@ pub fn parse_subscription_stats(body: &str) -> Result<MonthlyInfo, WebError> {
     let value: serde_json::Value =
         serde_json::from_str(body).map_err(|e| WebError::Parse(e.to_string()))?;
     // 容忍 data 包裹
-    let root = value.get("data").filter(|d| d.is_object()).unwrap_or(&value);
+    let root = value
+        .get("data")
+        .filter(|d| d.is_object())
+        .unwrap_or(&value);
 
     let balance = pick_object(root, &["subscriptionBalance", "subscription_balance"])
         .ok_or_else(|| WebError::Parse("响应缺少 subscriptionBalance".to_string()))?;
@@ -232,10 +257,9 @@ fn base64url_decode(input: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut table = [0xFFu8; 256];
-    for (i, &b) in
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
-            .iter()
-            .enumerate()
+    for (i, &b) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        .iter()
+        .enumerate()
     {
         table[b as usize] = i as u8;
     }
@@ -281,12 +305,17 @@ fn pick_object<'a>(
     obj: &'a serde_json::Value,
     keys: &[&str],
 ) -> Option<&'a serde_json::Map<String, serde_json::Value>> {
-    keys.iter().find_map(|k| obj.get(k).and_then(|v| v.as_object()))
+    keys.iter()
+        .find_map(|k| obj.get(k).and_then(|v| v.as_object()))
 }
 
 /// 从对象里按候选键名取第一个字符串值
-fn pick_str<'a>(obj: &'a serde_json::Map<String, serde_json::Value>, keys: &[&str]) -> Option<&'a str> {
-    keys.iter().find_map(|k| obj.get(*k).and_then(|v| v.as_str()))
+fn pick_str<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    keys: &[&str],
+) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|k| obj.get(*k).and_then(|v| v.as_str()))
 }
 
 /// 从对象里按候选键名取第一个比例值：数字或数字字符串均可，负数视为缺失
@@ -328,7 +357,10 @@ mod tests {
             "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.Zm9vLWJhcg"
         );
         // 大小写不敏感
-        assert_eq!(normalize_web_token("bearer  abc.def.ghi").unwrap(), "abc.def.ghi");
+        assert_eq!(
+            normalize_web_token("bearer  abc.def.ghi").unwrap(),
+            "abc.def.ghi"
+        );
     }
 
     #[test]
@@ -360,15 +392,27 @@ mod tests {
 
     #[test]
     fn normalize_strips_surrounding_quotes() {
-        assert_eq!(normalize_web_token("\"abc.def.ghi\"").unwrap(), "abc.def.ghi");
+        assert_eq!(
+            normalize_web_token("\"abc.def.ghi\"").unwrap(),
+            "abc.def.ghi"
+        );
         assert_eq!(normalize_web_token("'abc.def.ghi'").unwrap(), "abc.def.ghi");
     }
 
     #[test]
     fn normalize_rejects_blank() {
-        assert_eq!(normalize_web_token("").unwrap_err(), INVALID_WEB_TOKEN_MESSAGE);
-        assert_eq!(normalize_web_token("   \n ").unwrap_err(), INVALID_WEB_TOKEN_MESSAGE);
-        assert_eq!(normalize_web_token("\"\"").unwrap_err(), INVALID_WEB_TOKEN_MESSAGE);
+        assert_eq!(
+            normalize_web_token("").unwrap_err(),
+            INVALID_WEB_TOKEN_MESSAGE
+        );
+        assert_eq!(
+            normalize_web_token("   \n ").unwrap_err(),
+            INVALID_WEB_TOKEN_MESSAGE
+        );
+        assert_eq!(
+            normalize_web_token("\"\"").unwrap_err(),
+            INVALID_WEB_TOKEN_MESSAGE
+        );
     }
 
     #[test]

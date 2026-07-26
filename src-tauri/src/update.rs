@@ -162,7 +162,9 @@ pub async fn fetch_latest_release(http: &reqwest::Client) -> Result<ReleaseInfo,
     Ok(ReleaseInfo {
         tag: release.tag_name,
         url: release.html_url,
-        notes: release.body.map(|body| truncate_chars(&body, NOTES_MAX_CHARS)),
+        notes: release
+            .body
+            .map(|body| truncate_chars(&body, NOTES_MAX_CHARS)),
     })
 }
 
@@ -357,18 +359,14 @@ mod tests {
         );
         assert!(parse_tag_from_location("https://github.com/JYH1878/KimiCodeBar-Windows").is_err());
         // tag 为空或 tag 中再含路径段也是异常形态
-        assert!(
-            parse_tag_from_location(
-                "https://github.com/JYH1878/KimiCodeBar-Windows/releases/tag/"
-            )
-            .is_err()
-        );
-        assert!(
-            parse_tag_from_location(
-                "https://github.com/JYH1878/KimiCodeBar-Windows/releases/tag/a/b"
-            )
-            .is_err()
-        );
+        assert!(parse_tag_from_location(
+            "https://github.com/JYH1878/KimiCodeBar-Windows/releases/tag/"
+        )
+        .is_err());
+        assert!(parse_tag_from_location(
+            "https://github.com/JYH1878/KimiCodeBar-Windows/releases/tag/a/b"
+        )
+        .is_err());
     }
 
     #[test]

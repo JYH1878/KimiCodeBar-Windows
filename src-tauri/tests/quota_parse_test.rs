@@ -122,7 +122,8 @@ fn reset_time_parsed_and_formatted() {
 
 #[test]
 fn invalid_reset_time_tolerated_as_none() {
-    let q = parse_usage(r#"{"usage":{"limit":"100","used":"30","resetTime":"not-a-date"}}"#).unwrap();
+    let q =
+        parse_usage(r#"{"usage":{"limit":"100","used":"30","resetTime":"not-a-date"}}"#).unwrap();
     let w = q.weekly.expect("weekly 应存在");
     assert!(w.reset_time.is_none());
     assert_eq!(w.reset_time_text(), "未知");

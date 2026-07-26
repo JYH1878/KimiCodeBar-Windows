@@ -17,6 +17,8 @@ jobs:
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -25,8 +27,19 @@ jobs:
       - name: 安装前端依赖
         run: npm ci
 
+      - name: ESLint（前端）
+        run: npm run lint
+
       - name: 前端构建（tsc 类型检查 + vite build）
         run: npm run build
+
+      - name: Rust 格式检查
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: Rust Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Rust 单元/集成测试
         working-directory: src-tauri

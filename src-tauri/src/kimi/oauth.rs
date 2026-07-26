@@ -71,7 +71,12 @@ pub struct DeviceAuthInfo {
 /// POST {AUTH_BASE}/api/oauth/device_authorization
 pub async fn start_device_auth() -> Result<DeviceAuthInfo, OAuthError> {
     let client = http_client()?;
-    let (status, body) = post_form(&client, &device_authorization_url(), &[("client_id", OAUTH_CLIENT_ID)]).await?;
+    let (status, body) = post_form(
+        &client,
+        &device_authorization_url(),
+        &[("client_id", OAUTH_CLIENT_ID)],
+    )
+    .await?;
 
     if !status.is_success() {
         return Err(OAuthError::Api(
@@ -276,7 +281,10 @@ fn classify_poll_error(code: Option<&str>) -> PollAction {
 
 /// 解析 token 响应为 Credentials；fallback_refresh_token 用于刷新时沿用旧 refresh_token。
 /// expires_at = now + expires_in。
-fn credentials_from_token_body(body: &str, fallback_refresh_token: Option<&str>) -> Result<Credentials, OAuthError> {
+fn credentials_from_token_body(
+    body: &str,
+    fallback_refresh_token: Option<&str>,
+) -> Result<Credentials, OAuthError> {
     let resp: TokenResponse = serde_json::from_str(body)
         .map_err(|_| OAuthError::Api("授权服务返回了无法解析的响应".into()))?;
     if resp.access_token.is_empty() {
@@ -284,7 +292,9 @@ fn credentials_from_token_body(body: &str, fallback_refresh_token: Option<&str>)
     }
     Ok(Credentials {
         access_token: resp.access_token,
-        refresh_token: resp.refresh_token.or_else(|| fallback_refresh_token.map(str::to_string)),
+        refresh_token: resp
+            .refresh_token
+            .or_else(|| fallback_refresh_token.map(str::to_string)),
         expires_at: resp.expires_in.map(|expires_in| now_unix() + expires_in),
         scope: resp.scope,
         token_type: resp.token_type,
@@ -346,9 +356,15 @@ async fn post_form(
     for (name, value) in identity_headers() {
         request = request.header(name, value);
     }
-    let response = request.send().await.map_err(|e| OAuthError::Http(e.to_string()))?;
+    let response = request
+        .send()
+        .await
+        .map_err(|e| OAuthError::Http(e.to_string()))?;
     let status = response.status();
-    let body = response.text().await.map_err(|e| OAuthError::Http(e.to_string()))?;
+    let body = response
+        .text()
+        .await
+        .map_err(|e| OAuthError::Http(e.to_string()))?;
     Ok((status, body))
 }
 
@@ -490,10 +506,19 @@ mod tests {
 
     #[test]
     fn classify_poll_error_maps_known_codes() {
-        assert_eq!(classify_poll_error(Some("authorization_pending")), PollAction::Pending);
+        assert_eq!(
+            classify_poll_error(Some("authorization_pending")),
+            PollAction::Pending
+        );
         assert_eq!(classify_poll_error(Some("slow_down")), PollAction::SlowDown);
-        assert_eq!(classify_poll_error(Some("expired_token")), PollAction::Expired);
-        assert_eq!(classify_poll_error(Some("access_denied")), PollAction::Denied);
+        assert_eq!(
+            classify_poll_error(Some("expired_token")),
+            PollAction::Expired
+        );
+        assert_eq!(
+            classify_poll_error(Some("access_denied")),
+            PollAction::Denied
+        );
     }
 
     #[test]
@@ -583,7 +608,10 @@ mod tests {
             ..creds.clone()
         };
         save_credentials(&updated).unwrap();
-        assert_eq!(load_credentials().unwrap().unwrap().access_token, "access-789");
+        assert_eq!(
+            load_credentials().unwrap().unwrap().access_token,
+            "access-789"
+        );
 
         // 磁盘格式为 snake_case JSON
         let raw = std::fs::read_to_string(dir.join("credentials.json")).unwrap();
@@ -679,14 +707,23 @@ mod tests {
             extract_error_message(r#"{"message":"m","detail":"d","error":"e"}"#),
             Some("m".to_string())
         );
-        assert_eq!(extract_error_message(r#"{"error":"access_denied"}"#), Some("access_denied".to_string()));
-        assert_eq!(extract_error_message("plain text"), Some("plain text".to_string()));
+        assert_eq!(
+            extract_error_message(r#"{"error":"access_denied"}"#),
+            Some("access_denied".to_string())
+        );
+        assert_eq!(
+            extract_error_message("plain text"),
+            Some("plain text".to_string())
+        );
         assert_eq!(extract_error_message(""), None);
     }
 
     #[test]
     fn extract_error_code_reads_error_field() {
-        assert_eq!(extract_error_code(r#"{"error":"slow_down"}"#).as_deref(), Some("slow_down"));
+        assert_eq!(
+            extract_error_code(r#"{"error":"slow_down"}"#).as_deref(),
+            Some("slow_down")
+        );
         assert_eq!(extract_error_code(r#"{"message":"x"}"#), None);
         assert_eq!(extract_error_code("not json"), None);
     }

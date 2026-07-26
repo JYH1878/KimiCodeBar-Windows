@@ -35,6 +35,8 @@ pub struct AppSettings {
     pub warn_threshold_pct: f64,
     /// 开机自启（保存时同步注册表）
     pub autostart: bool,
+    /// 全局热键（如 "Ctrl+Shift+K"），None/空串表示禁用；保存时重新注册
+    pub hotkey: Option<String>,
 }
 
 impl From<storage::Settings> for AppSettings {
@@ -45,6 +47,7 @@ impl From<storage::Settings> for AppSettings {
             low_warn_enabled: s.low_warn_enabled,
             warn_threshold_pct: s.warn_threshold_pct,
             autostart: s.autostart,
+            hotkey: s.hotkey,
         }
     }
 }
@@ -57,6 +60,7 @@ impl From<AppSettings> for storage::Settings {
             low_warn_enabled: s.low_warn_enabled,
             warn_threshold_pct: s.warn_threshold_pct,
             autostart: s.autostart,
+            hotkey: s.hotkey,
         }
     }
 }
@@ -191,6 +195,8 @@ struct Inner {
     error: Option<String>,
     /// 最近一次成功刷新（配额, epoch 秒）；启动时由 cache.json 预热
     last_quota: Option<(KimiQuota, i64)>,
+    /// 最近一次成功的 usages 原始响应（超 20KB 截断）与时间戳；诊断导出用
+    last_raw_response: Option<(String, i64)>,
     /// 最近一次成功的月度总量；启动时由 cache.json 预热
     monthly: Option<MonthlyInfo>,
     /// 月度数据获取失败原因（如网页登录态过期）；成功为 None
@@ -216,6 +222,7 @@ impl AppState {
                 loading: false,
                 error: None,
                 last_quota,
+                last_raw_response: None,
                 monthly,
                 monthly_error: None,
             }),
@@ -229,6 +236,11 @@ impl AppState {
         let inner = self.inner.lock().unwrap();
         assemble_panel_state(&inner)
     }
+
+    /// 最近一次成功的 usages 原始响应（已截断）与时间戳；诊断导出用
+    pub fn raw_response(&self) -> Option<(String, i64)> {
+        self.inner.lock().unwrap().last_raw_response.clone()
+    }
 }
 
 /// 刷新主流程（轮询 / 托盘菜单"刷新" / 面板显示时共用）。
@@ -239,6 +251,7 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
 
     let _permit = state.refresh_lock.lock().await;
 
+    tracing::info!("开始刷新配额");
     {
         let mut inner = state.inner.lock().unwrap();
         inner.loading = true;
@@ -271,12 +284,15 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
                     None
                 };
             }
-            // 成功：清错误、更新 last_quota（缓存在下方统一落盘）
-            FetchOutcome::Success(quota, fetched_at) => {
+            // 成功：清错误、更新 last_quota 与原始响应（缓存在下方统一落盘）
+            FetchOutcome::Success(payload) => {
+                let (quota, fetched_at, raw) = *payload;
+                tracing::info!("配额已更新");
                 inner.error = None;
+                inner.last_raw_response = Some((truncate_raw_body(raw), fetched_at));
                 inner.last_quota = Some((quota, fetched_at));
             }
-            // 失败：保留旧缓存数据，仅记错误
+            // 失败：保留旧缓存数据，仅记错误（错误类型与文案已在 fetch_with_credential 记 warn）
             FetchOutcome::Failed(message) => inner.error = Some(message),
         }
 
@@ -437,12 +453,13 @@ async fn fetch_update_info() -> UpdateInfo {
     match update::fetch_latest().await {
         Ok(release) => {
             // 剥掉 tag 的 v/V 前缀：前端展示统一为 "v{latest}"，避免 "vv0.1.2" 双前缀
-            let latest = release
-                .tag
-                .trim_start_matches(['v', 'V'])
-                .to_string();
+            let latest = release.tag.trim_start_matches(['v', 'V']).to_string();
+            let has_update = update::is_newer(&latest, &current);
+            tracing::info!(
+                "更新检查完成: current={current}, latest={latest}, has_update={has_update}"
+            );
             UpdateInfo {
-                has_update: update::is_newer(&latest, &current),
+                has_update,
                 latest: Some(latest),
                 release_url: Some(release.url),
                 current,
@@ -450,13 +467,16 @@ async fn fetch_update_info() -> UpdateInfo {
             }
         }
         // 错误结果同样进缓存（10 分钟 TTL），避免限流期反复打 GitHub
-        Err(message) => UpdateInfo {
-            current,
-            latest: None,
-            has_update: false,
-            release_url: None,
-            error: Some(message),
-        },
+        Err(message) => {
+            tracing::warn!("更新检查失败: {message}");
+            UpdateInfo {
+                current,
+                latest: None,
+                has_update: false,
+                release_url: None,
+                error: Some(message),
+            }
+        }
     }
 }
 
@@ -477,7 +497,9 @@ pub fn get_settings() -> AppSettings {
 pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
     let mut settings: storage::Settings = settings.into();
     // 钳制非法值（与 load_settings 的加载钳制语义一致）
-    settings.refresh_interval_min = settings.refresh_interval_min.max(storage::MIN_REFRESH_INTERVAL_MIN);
+    settings.refresh_interval_min = settings
+        .refresh_interval_min
+        .max(storage::MIN_REFRESH_INTERVAL_MIN);
     settings.warn_threshold_pct = settings.warn_threshold_pct.clamp(1.0, 99.0);
     storage::save_settings(&settings)?;
 
@@ -490,25 +512,35 @@ pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String
             } else {
                 autostart.disable()
             };
-            if let Err(e) = result {
-                eprintln!("同步开机自启失败: {e}");
+            match result {
+                Ok(()) => tracing::info!("开机自启已同步: {}", settings.autostart),
+                Err(e) => tracing::warn!("同步开机自启失败: {e}"),
             }
         }
         Ok(_) => {}
-        Err(e) => eprintln!("读取开机自启状态失败: {e}"),
+        Err(e) => tracing::warn!("读取开机自启状态失败: {e}"),
     }
+
+    // 保存成功后重注册全局热键（先全量注销再按新值注册）；
+    // 被占用时返回中文错误（此时设置已落盘，仅热键未生效）
+    crate::hotkey::apply(&app, settings.hotkey.as_deref())?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn set_api_key(key: String) -> Result<(), String> {
     let key = validate_api_key(&key)?;
-    creds::save_api_key(key).map_err(|e| e.to_string())
+    creds::save_api_key(key).map_err(|e| e.to_string())?;
+    // 只记"已配置"，严禁记录 Key 本身
+    tracing::info!("API Key 已配置");
+    Ok(())
 }
 
 #[tauri::command]
 pub fn clear_api_key() -> Result<(), String> {
-    creds::clear_api_key().map_err(|e| e.to_string())
+    creds::clear_api_key().map_err(|e| e.to_string())?;
+    tracing::info!("API Key 已清除");
+    Ok(())
 }
 
 #[tauri::command]
@@ -532,6 +564,8 @@ pub async fn set_web_token(app: AppHandle, token: String) -> Result<MonthlyInfo,
     match web::fetch_subscription_stats(&token).await {
         Ok(info) => {
             creds::save_web_token(&token).map_err(|e| e.to_string())?;
+            // 只记"已配置"，严禁记录 token 本身
+            tracing::info!("网页 token 已配置");
             do_refresh(&app).await;
             Ok(info)
         }
@@ -548,6 +582,7 @@ pub async fn set_web_token(app: AppHandle, token: String) -> Result<MonthlyInfo,
 #[tauri::command]
 pub async fn clear_web_token(app: AppHandle) -> Result<(), String> {
     creds::clear_web_token().map_err(|e| e.to_string())?;
+    tracing::info!("网页 token 已清除");
     do_refresh(&app).await;
     Ok(())
 }
@@ -558,8 +593,12 @@ pub async fn clear_web_token(app: AppHandle) -> Result<(), String> {
 pub async fn start_device_login(app: AppHandle) -> DeviceLoginState {
     let info = match oauth::start_device_auth().await {
         Ok(info) => info,
-        Err(e) => return DeviceLoginState::error(e.to_string()),
+        Err(e) => {
+            tracing::warn!("设备码登录发起失败: {e}");
+            return DeviceLoginState::error(e.to_string());
+        }
     };
+    tracing::info!("设备码登录已发起，等待用户授权");
 
     let waiting = DeviceLoginState::waiting(&info);
     let (tx, rx) = watch::channel(false);
@@ -600,19 +639,48 @@ pub fn cancel_device_login(app: AppHandle) {
 #[tauri::command]
 pub fn oauth_logout(app: AppHandle) {
     if let Err(e) = oauth::clear_credentials() {
-        eprintln!("清除 OAuth 凭证失败: {e}");
+        tracing::warn!("清除 OAuth 凭证失败: {e}");
+    } else {
+        tracing::info!("OAuth 凭证已清除");
     }
     // 当前以 oauth 登录：回退为未显式选择（自动优先 api_key）
     let mut settings = storage::load_settings().unwrap_or_default();
     if settings.login_method.as_deref() == Some("oauth") {
         settings.login_method = None;
         if let Err(e) = storage::save_settings(&settings) {
-            eprintln!("保存登录方式失败: {e}");
+            tracing::warn!("保存登录方式失败: {e}");
         }
     }
     // 让面板回到无凭证态（do_refresh 对无凭证分支不发事件，这里手动组状态发）
     let panel = app.state::<AppState>().snapshot();
     let _ = app.emit("quota-updated", &panel);
+}
+
+/// 打开日志目录（确保存在后用系统文件管理器定位）
+#[tauri::command]
+pub fn open_log_dir(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = crate::logging::log_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建日志目录失败: {e}"))?;
+    app.opener()
+        .reveal_item_in_dir(&dir)
+        .map_err(|e| format!("打开日志目录失败: {e}"))?;
+    tracing::info!("已打开日志目录");
+    Ok(())
+}
+
+/// 导出诊断报告到配置目录并定位文件，返回诊断文件路径
+#[tauri::command]
+pub fn export_diagnostics(app: AppHandle) -> Result<String, String> {
+    use tauri_plugin_opener::OpenerExt;
+    let state = app.state::<AppState>();
+    let path = crate::diagnostics::export(&state.snapshot(), state.raw_response())?;
+    // 文件已写好；定位失败只记日志，不影响返回路径
+    if let Err(e) = app.opener().reveal_item_in_dir(&path) {
+        tracing::warn!("定位诊断文件失败: {e}");
+    }
+    tracing::info!("诊断报告已导出: {}", path.display());
+    Ok(path.to_string_lossy().to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -664,7 +732,7 @@ async fn run_device_login(
                         let mut settings = storage::load_settings().unwrap_or_default();
                         settings.login_method = Some("oauth".to_string());
                         if let Err(e) = storage::save_settings(&settings) {
-                            eprintln!("保存登录方式失败: {e}");
+                            tracing::warn!("保存登录方式失败: {e}");
                         }
                         DeviceLoginState::success()
                     }
@@ -677,12 +745,26 @@ async fn run_device_login(
         _ = cancel_rx.changed() => DeviceLoginState::idle(),
     };
 
+    // 设备码登录结果（成功/失败/取消），不记任何 token
+    match outcome.status.as_str() {
+        "success" => tracing::info!("设备码登录成功"),
+        "error" => tracing::warn!(
+            "设备码登录失败: {}",
+            outcome.error.as_deref().unwrap_or("未知错误")
+        ),
+        _ => tracing::info!("设备码登录已取消"),
+    }
+
     // 只有仍是当前登录流程才更新状态并发事件：
     // 取消（sender 已取走）或被新流程顶替（sender 已换）时静默退出
     let is_current = {
         let state = app.state::<AppState>();
         let mut dl = state.device_login.lock().unwrap();
-        if dl.cancel.as_ref().is_some_and(|tx| cancel_tx.same_channel(tx)) {
+        if dl
+            .cancel
+            .as_ref()
+            .is_some_and(|tx| cancel_tx.same_channel(tx))
+        {
             dl.cancel = None;
             dl.state = outcome.clone();
             true
@@ -708,8 +790,8 @@ async fn run_device_login(
 enum FetchOutcome {
     /// 未配置任何凭证
     NoCredential,
-    /// 拉取成功（配额, epoch 秒）
-    Success(KimiQuota, i64),
+    /// 拉取成功（配额, epoch 秒, usages 原始响应）；装箱避免撑大枚举
+    Success(Box<(KimiQuota, i64, String)>),
     /// 拉取失败（面向用户的中文错误）
     Failed(String),
 }
@@ -740,22 +822,45 @@ async fn fetch_monthly() -> MonthlyOutcome {
     }
 }
 
-/// 取 token 并拉取配额
+/// 取 token 并拉取配额；失败分支记 warn（错误类型与文案，严禁记录 token）
 async fn fetch_with_credential() -> FetchOutcome {
     let token = match creds::get_active_token().await {
         Ok(Some((_, token))) => token,
         Ok(None) => return FetchOutcome::NoCredential,
-        Err(e) => return FetchOutcome::Failed(e.to_string()),
+        Err(e) => {
+            tracing::warn!("配额刷新失败: 读取凭证失败: {e}");
+            return FetchOutcome::Failed(e.to_string());
+        }
     };
-    match KimiClient::new().fetch_quota(&token).await {
-        Ok(quota) => FetchOutcome::Success(quota, now_unix()),
+    match KimiClient::new().fetch_quota_with_raw(&token).await {
+        Ok((quota, raw)) => FetchOutcome::Success(Box::new((quota, now_unix(), raw))),
         Err(QuotaError::Unauthorized) => {
+            tracing::warn!("配额刷新失败: 凭证无效或已过期 (Unauthorized)");
             FetchOutcome::Failed("凭证无效或已过期，请在设置中重新配置".to_string())
         }
-        Err(QuotaError::Http(_)) => FetchOutcome::Failed("网络错误，展示缓存数据".to_string()),
+        Err(QuotaError::Http(e)) => {
+            tracing::warn!("配额刷新失败: 网络错误: {e}");
+            FetchOutcome::Failed("网络错误，展示缓存数据".to_string())
+        }
         // Parse / Api：展示原始错误文本
-        Err(other) => FetchOutcome::Failed(other.to_string()),
+        Err(other) => {
+            tracing::warn!("配额刷新失败: {other}");
+            FetchOutcome::Failed(other.to_string())
+        }
     }
+}
+
+/// usages 原始响应内存截断：按 char 边界截到 20KB 内（诊断导出用）
+fn truncate_raw_body(mut body: String) -> String {
+    const MAX: usize = crate::diagnostics::MAX_RAW_BODY_LEN;
+    if body.len() > MAX {
+        let mut end = MAX;
+        while !body.is_char_boundary(end) {
+            end -= 1;
+        }
+        body.truncate(end);
+    }
+    body
 }
 
 /// 由内存态 + 当前设置/凭证组装 PanelState
@@ -815,12 +920,18 @@ mod tests {
 
     #[test]
     fn validate_api_key_accepts_kimi_prefix() {
-        assert_eq!(validate_api_key("sk-kimi-abc123").unwrap(), "sk-kimi-abc123");
+        assert_eq!(
+            validate_api_key("sk-kimi-abc123").unwrap(),
+            "sk-kimi-abc123"
+        );
     }
 
     #[test]
     fn validate_api_key_trims_surrounding_whitespace() {
-        assert_eq!(validate_api_key("  sk-kimi-abc123 \n").unwrap(), "sk-kimi-abc123");
+        assert_eq!(
+            validate_api_key("  sk-kimi-abc123 \n").unwrap(),
+            "sk-kimi-abc123"
+        );
     }
 
     #[test]

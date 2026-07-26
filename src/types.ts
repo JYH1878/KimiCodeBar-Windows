@@ -73,6 +73,8 @@ export interface AppSettings {
   warn_threshold_pct: number;
   /** 开机自启（默认 false，保存时同步注册表） */
   autostart: boolean;
+  /** 全局热键（如 "Ctrl+Shift+K"），null/空串 = 禁用；保存时后端重新注册 */
+  hotkey?: string | null;
 }
 
 /** 凭证配置状态：get_credential_status 的返回 */

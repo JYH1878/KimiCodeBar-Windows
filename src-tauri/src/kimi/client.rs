@@ -15,6 +15,12 @@ pub struct KimiClient {
     base_url: String,
 }
 
+impl Default for KimiClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl KimiClient {
     /// 30s 超时、UA `KimiCodeBar/1.0`（常量见 crate::kimi）
     pub fn new() -> Self {
@@ -41,12 +47,24 @@ impl KimiClient {
 
     /// fetch_usages + 解析为领域模型的便捷方法。
     pub async fn fetch_quota(&self, token: &str) -> Result<KimiQuota, QuotaError> {
+        // 原始响应只用于诊断导出，常规刷新直接丢弃
+        self.fetch_quota_with_raw(token)
+            .await
+            .map(|(quota, _)| quota)
+    }
+
+    /// 与 fetch_quota 相同，但同时返回响应原文（诊断导出用）。
+    pub async fn fetch_quota_with_raw(
+        &self,
+        token: &str,
+    ) -> Result<(KimiQuota, String), QuotaError> {
         // 只请求一次：拿到原始文本后先做 wire 层反序列化校验
         //（与 fetch_usages 的 Parse 错误语义一致），再解析为领域模型。
         let body = self.get_usages_body(token).await?;
         serde_json::from_str::<UsageResponse>(&body)
             .map_err(|e| QuotaError::Parse(e.to_string()))?;
-        quota::parse_usage(&body)
+        let quota = quota::parse_usage(&body)?;
+        Ok((quota, body))
     }
 
     /// 实际发起 GET 请求并完成状态码映射，2xx 时返回响应原文。
@@ -57,17 +75,26 @@ impl KimiClient {
             .bearer_auth(token)
             .send()
             .await
-            .map_err(|e| QuotaError::Http(e.to_string()))?;
+            .map_err(|e| {
+                tracing::warn!("usages 请求发送失败: {e}");
+                QuotaError::Http(e.to_string())
+            })?;
 
         let status = resp.status();
-        let body = resp
-            .text()
-            .await
-            .map_err(|e| QuotaError::Http(e.to_string()))?;
+        let body = resp.text().await.map_err(|e| {
+            tracing::warn!("usages 响应读取失败: {e}");
+            QuotaError::Http(e.to_string())
+        })?;
 
         if status.is_success() {
             return Ok(body);
         }
+        // 错误分支只记状态码与响应体长度，严禁记录 token / 响应原文
+        tracing::warn!(
+            "usages 接口返回非 2xx: status={}, body_len={}",
+            status.as_u16(),
+            body.len()
+        );
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(QuotaError::Unauthorized);
         }

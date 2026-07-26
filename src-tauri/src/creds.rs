@@ -120,17 +120,22 @@ async fn oauth_token() -> Result<Option<(CredentialKind, String)>, CredError> {
     let creds = if oauth::is_expiring_soon(&creds, REFRESH_MARGIN_SECS) {
         match oauth::refresh_token(&creds).await {
             Ok(new_creds) => {
+                tracing::info!("OAuth token 刷新成功");
                 oauth::save_credentials(&new_creds)?;
                 new_creds
             }
             Err(OAuthError::NotAuthorized) => {
                 // 授权已被吊销：清掉本地凭证，让上层提示重新登录
+                tracing::warn!("OAuth 授权已被吊销，已清除本地凭证");
                 oauth::clear_credentials()?;
                 return Ok(None);
             }
             // 其余刷新失败（网络抖动等）：token 未必真的失效，先继续用旧的，
             // 真失效时 usages 接口会返回 401，由上层按"凭证无效"提示
-            Err(_) => creds,
+            Err(e) => {
+                tracing::warn!("OAuth token 刷新失败，暂用旧 token: {e}");
+                creds
+            }
         }
     } else {
         creds

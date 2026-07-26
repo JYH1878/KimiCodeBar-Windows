@@ -398,6 +398,11 @@ body,
   text-align: right;
 }
 
+/* 全局热键文本输入框（表单行右侧，比数字框宽） */
+.hotkey-input {
+  width: 190px;
+}
+
 .input-row {
   display: flex;
   gap: 8px;
