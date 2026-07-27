@@ -4,6 +4,7 @@
 pub mod creds;
 pub mod history;
 pub mod kimi;
+pub mod local_usage;
 pub mod quota;
 pub mod storage;
 pub mod update;

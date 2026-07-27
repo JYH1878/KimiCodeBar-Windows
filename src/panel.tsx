@@ -3,11 +3,13 @@ import { createRoot } from "react-dom/client";
 import { useTranslation } from "react-i18next";
 import "./styles.css";
 import i18n, { resolveLang } from "./i18n";
-import type { HistoryPoint, PanelState, QuotaDetail, UpdateInfo } from "./types";
-import { checkUpdate, getPanelState, getSettings, getUsageHistory, refreshNow, openSettings, openExternalUrl, onQuotaUpdated, onSettingsChanged, onUpdateInfo } from "./ipc";
+import { useTheme } from "./theme";
+import type { HistoryPoint, LocalUsageStats, PanelState, QuotaDetail, UpdateInfo } from "./types";
+import { checkUpdate, getLocalUsage, getPanelState, getSettings, getUsageHistory, refreshNow, openSettings, openExternalUrl, onQuotaUpdated, onSettingsChanged, onUpdateInfo } from "./ipc";
 import { UsageCard } from "./components/UsageCard";
 import { MonthlyCard } from "./components/MonthlyCard";
 import { TrendCard } from "./components/TrendCard";
+import { LocalUsageCard } from "./components/LocalUsageCard";
 import { MembershipCard } from "./components/MembershipCard";
 import { BoosterCard } from "./components/BoosterCard";
 import { ErrorBanner } from "./components/ErrorBanner";
@@ -23,12 +25,16 @@ function formatFetchedAt(epochSec: number): string {
 /** 用量面板主界面（index.html 入口） */
 function PanelApp() {
   const { t } = useTranslation();
+  // 主题：读设置 + 跟随 settings-changed + system 模式跟随系统明暗
+  useTheme();
   const [state, setState] = useState<PanelState | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   // 更新检查结果（仅 has_update 时有值，驱动底栏徽标）
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   // 历史采样点（趋势卡用）；null = 尚未加载
   const [history, setHistory] = useState<HistoryPoint[] | null>(null);
+  // 本地 token 消耗统计（本地统计卡用）；null = 尚未加载
+  const [localUsage, setLocalUsage] = useState<LocalUsageStats | null>(null);
   // 每分钟触发一次重渲染，让重置倒计时保持新鲜
   const [, setTick] = useState(0);
 
@@ -83,11 +89,21 @@ function PanelApp() {
       getUsageHistory()
         .then((h) => setHistory(h))
         .catch(() => {});
+      // 本地 token 统计也随之可能有新扫描结果，同步重拉（失败静默）
+      getLocalUsage()
+        .then((u) => setLocalUsage(u))
+        .catch(() => {});
     });
     // 与首屏状态并行拉一次历史采样（趋势卡用）；失败静默，卡片显示"数据积累中…"
     getUsageHistory()
       .then((h) => {
         if (alive) setHistory(h);
+      })
+      .catch(() => {});
+    // 与首屏状态并行拉一次本地 token 统计（失败静默，卡片不渲染）
+    getLocalUsage()
+      .then((u) => {
+        if (alive) setLocalUsage(u);
       })
       .catch(() => {});
     // 与首屏状态并行检查一次更新；失败（含 error 字段）静默，不打扰用户
@@ -153,8 +169,11 @@ function PanelApp() {
       {/* 月度总量（网页 token 可选增强）：monthly 与 monthly_error 都为空时整卡不渲染 */}
       {state.monthly && <MonthlyCard monthly={state.monthly} />}
       {state.monthly_error && <p className="monthly-error">{state.monthly_error}</p>}
-      {/* 用量趋势（本地历史采样，纯事实不预测）：月度总量卡之后、会员/Booster 行之前 */}
+      {/* 用量趋势（本地历史采样，纯事实不预测）：月度总量卡之后、本地统计卡之前 */}
       <TrendCard points={history} />
+      {/* 本地 Token 消耗（扫描 wire.jsonl）：趋势卡之后、会员/Booster 行之前；
+          未扫描过（last_scan_at 为空）时整卡不渲染 */}
+      <LocalUsageCard stats={localUsage} />
       {totalDetail && <UsageCard title={t("panel.totalQuota")} detail={totalDetail} />}
       {quota && (
         <div className="mini-row">

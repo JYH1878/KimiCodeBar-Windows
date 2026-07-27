@@ -41,6 +41,9 @@ pub struct Settings {
     /// 界面语言："system" / "zh" / "en"；None 等同 "system"（跟随系统区域）
     #[serde(default)]
     pub language: Option<String>,
+    /// 主题模式："system" / "dark" / "light"；None 等同 "system"（跟随系统明暗）
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 const fn default_refresh_interval_min() -> u32 {
@@ -65,6 +68,7 @@ impl Default for Settings {
             autostart: false,
             hotkey: None,
             language: None,
+            theme: None,
         }
     }
 }
@@ -209,6 +213,7 @@ mod tests {
             autostart: true,
             hotkey: Some("Ctrl+Shift+K".to_string()),
             language: Some("zh".to_string()),
+            theme: Some("light".to_string()),
         };
         save_settings(&settings).unwrap();
         assert!(dir.join("settings.json").exists());
@@ -268,6 +273,8 @@ mod tests {
         assert!(settings.hotkey.is_none());
         // 旧版设置文件无 language 字段：读回 None（等同 "system" 跟随系统）
         assert!(settings.language.is_none());
+        // 旧版设置文件无 theme 字段：读回 None（等同 "system" 跟随系统明暗）
+        assert!(settings.theme.is_none());
 
         cleanup(&dir);
     }

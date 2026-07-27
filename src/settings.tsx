@@ -4,10 +4,12 @@ import { getVersion } from "@tauri-apps/api/app";
 import { useTranslation } from "react-i18next";
 import "./styles.css";
 import i18n, { resolveLang } from "./i18n";
-import type { AppSettings, CredentialStatus, LoginMethod, UpdateInfo } from "./types";
+import { applyTheme, useTheme } from "./theme";
+import type { AppSettings, CredentialStatus, LoginMethod, ThemeMode, UpdateInfo } from "./types";
 import {
   checkUpdate,
   exportDiagnostics,
+  exportUsageReport,
   getCredentialStatus,
   getSettings,
   isTauri,
@@ -30,11 +32,15 @@ interface GeneralForm {
   hotkey: string;
   /** 界面语言（"system"/"zh"/"en"，改动立即本地预览，随保存持久化） */
   language: string;
+  /** 主题模式（"system"/"dark"/"light"，改动立即本地预览，随保存持久化） */
+  theme: string;
 }
 
 /** 设置窗口主界面（settings.html 入口） */
 function SettingsApp() {
   const { t } = useTranslation();
+  // 主题：读设置 + 跟随 settings-changed + system 模式跟随系统明暗
+  useTheme();
   // settings = 最近一次从后端读到/保存成功的设置；status = 凭证配置状态
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [status, setStatus] = useState<CredentialStatus | null>(null);
@@ -51,6 +57,7 @@ function SettingsApp() {
     autostart: false,
     hotkey: "",
     language: "system",
+    theme: "system",
   });
   const [savingGeneral, setSavingGeneral] = useState(false);
   const [generalSaved, setGeneralSaved] = useState(false);
@@ -63,6 +70,10 @@ function SettingsApp() {
   const [diagError, setDiagError] = useState<string | null>(null);
   // "已导出" 2 秒自动消失的定时器
   const exportTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 导出用量记录：独立的进行中/完成态与定时器（与诊断导出互不干扰）
+  const [exportingUsage, setExportingUsage] = useState(false);
+  const [usageExported, setUsageExported] = useState(false);
+  const usageTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 底栏版本号（初始值兼作浏览器 dev 的 mock 回落）
   const [version, setVersion] = useState("0.1.0");
   // 检查更新：checking=请求中；found=有新版（常驻展示，点击去下载）；msg=短时提示（自动消失）
@@ -101,6 +112,7 @@ function SettingsApp() {
           autostart: s.autostart,
           hotkey: s.hotkey ?? "",
           language: s.language ?? "system",
+          theme: s.theme ?? "system",
         });
         // 应用持久化的语言（初始渲染用的是系统语言兜底）
         void i18n.changeLanguage(resolveLang(s.language));
@@ -133,6 +145,7 @@ function SettingsApp() {
     () => () => {
       if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
       if (exportTimerRef.current !== null) clearTimeout(exportTimerRef.current);
+      if (usageTimerRef.current !== null) clearTimeout(usageTimerRef.current);
       if (updateTimerRef.current !== null) clearTimeout(updateTimerRef.current);
     },
     [],
@@ -199,6 +212,8 @@ function SettingsApp() {
       hotkey: form.hotkey.trim() === "" ? null : form.hotkey.trim(),
       // 语言随通用设置一起持久化；保存成功后后端广播 settings-changed
       language: form.language,
+      // 主题随通用设置一起持久化；保存成功后后端广播 settings-changed，两个窗口即时切换
+      theme: form.theme as ThemeMode,
     };
     setSavingGeneral(true);
     setGeneralError(null);
@@ -221,6 +236,12 @@ function SettingsApp() {
   const changeLanguagePreview = (lang: string) => {
     setForm((f) => ({ ...f, language: lang }));
     void i18n.changeLanguage(resolveLang(lang));
+  };
+
+  /** 主题下拉改动：本地立即应用预览，持久化随"保存设置"一起提交 */
+  const changeThemePreview = (theme: string) => {
+    setForm((f) => ({ ...f, theme }));
+    applyTheme(theme as ThemeMode);
   };
 
   /** 导出诊断文件：成功绿色"已导出"2 秒消失；失败红字原样展示后端错误 */
@@ -246,6 +267,23 @@ function SettingsApp() {
       await openLogDir();
     } catch (e) {
       setDiagError(String(e));
+    }
+  };
+
+  /** 导出用量记录：成功绿色"已导出并打开目录"2 秒消失；失败红字原样展示后端错误 */
+  const doExportUsage = async () => {
+    setExportingUsage(true);
+    setDiagError(null);
+    setUsageExported(false);
+    try {
+      await exportUsageReport();
+      setUsageExported(true);
+      if (usageTimerRef.current !== null) clearTimeout(usageTimerRef.current);
+      usageTimerRef.current = setTimeout(() => setUsageExported(false), 2000);
+    } catch (e) {
+      setDiagError(String(e));
+    } finally {
+      setExportingUsage(false);
     }
   };
 
@@ -391,6 +429,19 @@ function SettingsApp() {
             <option value="en">{t("settings.general.langEn")}</option>
           </select>
         </div>
+        <div className="form-row">
+          <label htmlFor="theme">{t("settings.general.theme")}</label>
+          <select
+            id="theme"
+            className="input"
+            value={form.theme}
+            onChange={(e) => changeThemePreview(e.target.value)}
+          >
+            <option value="system">{t("settings.general.themeSystem")}</option>
+            <option value="dark">{t("settings.general.themeDark")}</option>
+            <option value="light">{t("settings.general.themeLight")}</option>
+          </select>
+        </div>
         {generalError !== null && <p className="hint-err">{generalError}</p>}
         <div className="row-end">
           {generalSaved && <span className="hint-ok">{t("settings.general.saved")}</span>}
@@ -422,6 +473,21 @@ function SettingsApp() {
           </button>
           <button type="button" className="btn" onClick={() => void doOpenLogDir()}>
             {t("settings.diagnostics.openLogDir")}
+          </button>
+        </div>
+        <div className="row-end">
+          {usageExported && (
+            <span className="hint-ok">{t("settings.diagnostics.usageExported")}</span>
+          )}
+          <button
+            type="button"
+            className="btn"
+            onClick={() => void doExportUsage()}
+            disabled={exportingUsage}
+          >
+            {exportingUsage
+              ? t("settings.diagnostics.exporting")
+              : t("settings.diagnostics.exportUsage")}
           </button>
         </div>
       </section>

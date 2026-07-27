@@ -10,9 +10,9 @@ const PLOT_R = 272;
 const PLOT_T = 4;
 const PLOT_B = 84;
 
-/** 折线配色（Tokyo Night）：7 天窗口蓝 / 5 小时窗口紫 */
-const WEEKLY_COLOR = "#7aa2f7";
-const FIVE_HOUR_COLOR = "#bb9af7";
+/** 折线配色（引用 CSS 变量，随主题切换）：7 天窗口蓝 / 5 小时窗口紫 */
+const WEEKLY_COLOR = "var(--accent)";
+const FIVE_HOUR_COLOR = "var(--accent-2)";
 
 /** 单个可绘制点（SVG 坐标） */
 interface PlotPoint {

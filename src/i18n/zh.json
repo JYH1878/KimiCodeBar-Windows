@@ -33,6 +33,12 @@
     "legend7d": "7天",
     "legend5h": "5h"
   },
+  "localUsage": {
+    "title": "本地 Token 消耗",
+    "today": "今日",
+    "yesterday": "昨日 {{tokens}}",
+    "ariaLabel": "近 7 天每日 Token 消耗柱状图"
+  },
   "membership": {
     "title": "会员等级",
     "unknown": "未知"
@@ -72,6 +78,10 @@
       "langSystem": "跟随系统",
       "langZh": "中文",
       "langEn": "English",
+      "theme": "主题",
+      "themeSystem": "跟随系统",
+      "themeDark": "深色",
+      "themeLight": "浅色",
       "saved": "已保存",
       "save": "保存设置"
     },
@@ -81,6 +91,8 @@
       "exported": "已导出",
       "exporting": "导出中…",
       "export": "导出诊断文件",
+      "exportUsage": "导出用量记录",
+      "usageExported": "已导出并打开目录",
       "openLogDir": "打开日志目录"
     },
     "footer": {

@@ -77,6 +77,8 @@ export interface AppSettings {
   hotkey?: string | null;
   /** 界面语言："system"（跟随系统）/ "zh" / "en"，默认 system */
   language?: string | null;
+  /** 主题模式："system" / "dark" / "light"，默认 system */
+  theme?: ThemeMode | null;
 }
 
 /** 凭证配置状态：get_credential_status 的返回 */
@@ -104,6 +106,40 @@ export interface HistoryPoint {
   /** 月度总量已用百分比（缺失为 null） */
   monthly?: number | null;
 }
+
+// ============ 本地 Token 消耗统计（扫描 wire.jsonl，不依赖 API）============
+
+/** 某一天的消耗 */
+export interface DailyUsage {
+  /** 本地日期 YYYY-MM-DD */
+  date: string;
+  tokens: number;
+}
+
+/** 某模型的累计消耗 */
+export interface ModelUsage {
+  model: string;
+  tokens: number;
+}
+
+/** get_local_usage 的返回：本地 token 消耗统计 */
+export interface LocalUsageStats {
+  /** 今日总消耗 */
+  today_tokens: number;
+  /** 昨日总消耗 */
+  yesterday_tokens: number;
+  /** 最近 7 天逐日消耗（升序） */
+  daily: DailyUsage[];
+  /** 按模型累计（全部时间，降序 top 5） */
+  by_model: ModelUsage[];
+  /** 上次扫描时间（epoch 秒），未扫过为 null */
+  last_scan_at: number | null;
+}
+
+// ============ 主题 ============
+
+/** 主题模式："system"（跟随系统）/ "dark" / "light"，默认 system */
+export type ThemeMode = "system" | "dark" | "light";
 
 // ============ 月度总量（网页 token，可选增强）============
 

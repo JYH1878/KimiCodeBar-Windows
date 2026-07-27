@@ -36,6 +36,12 @@
     "legend7d": "7d",
     "legend5h": "5h"
   },
+  "localUsage": {
+    "title": "Local token usage",
+    "today": "today",
+    "yesterday": "Yesterday {{tokens}}",
+    "ariaLabel": "Bar chart of daily token usage over the last 7 days"
+  },
   "membership": {
     "title": "Membership",
     "unknown": "Unknown"
@@ -75,6 +81,10 @@
       "langSystem": "System",
       "langZh": "中文",
       "langEn": "English",
+      "theme": "Theme",
+      "themeSystem": "System",
+      "themeDark": "Dark",
+      "themeLight": "Light",
       "saved": "Saved",
       "save": "Save settings"
     },
@@ -84,6 +94,8 @@
       "exported": "Exported",
       "exporting": "Exporting…",
       "export": "Export diagnostics",
+      "exportUsage": "Export usage report",
+      "usageExported": "Exported and opened the folder",
       "openLogDir": "Open log folder"
     },
     "footer": {

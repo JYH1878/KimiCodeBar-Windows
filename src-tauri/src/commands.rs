@@ -41,6 +41,10 @@ pub struct AppSettings {
     pub hotkey: Option<String>,
     /// 界面语言："system" / "zh" / "en"；None 等同 "system"（跟随系统区域）
     pub language: Option<String>,
+    /// 主题模式："system" / "dark" / "light"；None 等同 "system"（跟随系统明暗）
+    /// （types.ts 标为可选，反序列化容忍缺省）
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 impl From<storage::Settings> for AppSettings {
@@ -53,6 +57,7 @@ impl From<storage::Settings> for AppSettings {
             autostart: s.autostart,
             hotkey: s.hotkey,
             language: s.language,
+            theme: s.theme,
         }
     }
 }
@@ -67,6 +72,7 @@ impl From<AppSettings> for storage::Settings {
             autostart: s.autostart,
             hotkey: s.hotkey,
             language: s.language,
+            theme: s.theme,
         }
     }
 }
@@ -350,6 +356,11 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
                     tracing::warn!("保存用量历史失败: {e}");
                 }
             }
+            // 顺手增量扫一次本地 token 统计（扫描自带 180s 节流与增量续读，
+            // 开销可忽略；派生数据，失败不影响刷新主流程）
+            tauri::async_runtime::spawn(async move {
+                let _ = tokio::task::spawn_blocking(kimicodebar::local_usage::scan).await;
+            });
         }
 
         assemble_panel_state(&inner)
@@ -432,6 +443,16 @@ pub fn get_panel_state(state: State<'_, AppState>) -> PanelState {
 #[tauri::command]
 pub fn get_usage_history() -> Vec<history::HistoryPoint> {
     history::HistoryStore::load().into_points()
+}
+
+/// 本地 token 消耗统计（扫描 wire.jsonl，不依赖 API）：
+/// 增量扫描 + 180s 节流在 local_usage::scan 内部生效
+#[tauri::command]
+pub async fn get_local_usage() -> kimicodebar::local_usage::LocalUsageStats {
+    // 首次全扫可能读几十 MB jsonl，放阻塞线程池，不占 async runtime worker
+    tokio::task::spawn_blocking(kimicodebar::local_usage::scan)
+        .await
+        .unwrap_or_default()
 }
 
 #[tauri::command]
@@ -716,6 +737,20 @@ pub fn export_diagnostics(app: AppHandle) -> Result<String, String> {
     }
     tracing::info!("诊断报告已导出: {}", path.display());
     Ok(path.to_string_lossy().to_string())
+}
+
+/// 导出用量报告：history.json 采样点写为 CSV（附 history.json 原文）到
+/// {config_dir}/exports/，用系统文件管理器定位目录，返回目录路径
+#[tauri::command]
+pub fn export_usage_report(app: AppHandle) -> Result<String, String> {
+    use tauri_plugin_opener::OpenerExt;
+    let dir = kimicodebar::local_usage::export_usage_report()?;
+    // 目录已写好；定位失败只记日志，不影响返回路径
+    if let Err(e) = app.opener().reveal_item_in_dir(&dir) {
+        tracing::warn!("定位导出目录失败: {e}");
+    }
+    tracing::info!("用量报告已导出: {}", dir.display());
+    Ok(dir.to_string_lossy().to_string())
 }
 
 // ---------------------------------------------------------------------------

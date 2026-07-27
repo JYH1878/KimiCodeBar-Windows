@@ -55,6 +55,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::get_panel_state,
             commands::get_usage_history,
+            commands::get_local_usage,
             commands::refresh_now,
             commands::check_update,
             commands::open_settings,
@@ -70,6 +71,7 @@ fn main() {
             commands::oauth_logout,
             commands::open_log_dir,
             commands::export_diagnostics,
+            commands::export_usage_report,
         ])
         .setup(|app| {
             // 日志必须最先初始化：之后所有埋点才有着落；失败退回 stderr，不 panic

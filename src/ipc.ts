@@ -9,8 +9,10 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
   AppSettings,
   CredentialStatus,
+  DailyUsage,
   DeviceLoginState,
   HistoryPoint,
+  LocalUsageStats,
   MonthlyInfo,
   PanelState,
   UpdateInfo,
@@ -144,6 +146,51 @@ export async function getUsageHistory(): Promise<HistoryPoint[]> {
   return invoke<HistoryPoint[]>("get_usage_history");
 }
 
+// ============ 本地 Token 消耗统计（扫描 wire.jsonl，不依赖 API）============
+
+/**
+ * 浏览器 mock 的本地 token 统计：今日 128.4K / 昨日 96.2K / 近 7 天逐日 / 两个模型。
+ * daily 日期按本地时区生成（与后端 YYYY-MM-DD 契约一致），末位即今日。
+ */
+function mockLocalUsage(): LocalUsageStats {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const amounts = [42300, 58700, 31200, 88900, 76400, 96200, 128400];
+  const daily: DailyUsage[] = amounts.map((tokens, i) => {
+    const d = new Date(Date.now() - (6 - i) * 24 * 3600 * 1000);
+    return {
+      date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
+      tokens,
+    };
+  });
+  return {
+    today_tokens: 128400,
+    yesterday_tokens: 96200,
+    daily,
+    by_model: [
+      { model: "kimi-code/k3", tokens: 406000 },
+      { model: "kimi-code/other", tokens: 89000 },
+    ],
+    last_scan_at: Math.floor(Date.now() / 1000),
+  };
+}
+
+/** 获取本地 token 消耗统计（后端增量扫描 sessions 目录的 wire.jsonl 汇总） */
+export async function getLocalUsage(): Promise<LocalUsageStats> {
+  if (!isTauri) return mockLocalUsage();
+  return invoke<LocalUsageStats>("get_local_usage");
+}
+
+/**
+ * 导出用量报告：后端汇总本地统计与历史采样写入文件并自动打开所在目录，返回目录路径。
+ * 失败抛中文错误原样透传；浏览器 mock 返回固定假路径
+ */
+export async function exportUsageReport(): Promise<string> {
+  if (!isTauri) {
+    return "C:\\Users\\demo\\AppData\\Roaming\\KimiCodeBar\\usage-report";
+  }
+  return invoke<string>("export_usage_report");
+}
+
 // ============ 第 5 步：设置与凭证 ============
 
 /** 浏览器 mock 的可变"数据库"：让设置页在纯浏览器下也能走完整交互 */
@@ -156,6 +203,7 @@ const mockDb = {
     autostart: false,
     hotkey: null,
     language: "system",
+    theme: "system",
   } as AppSettings,
   // 预置一个假 Key，方便浏览器开发时看到"已配置"徽标
   apiKey: "sk-kimi-mock9f8e7d6c5b4a" as string | null,

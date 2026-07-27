@@ -1,8 +1,55 @@
+/* ===== 主题变量 =====
+   所有颜色集中在 :root 变量（深色现值，Tokyo Night）；
+   根节点 data-theme="light" 时由下方覆盖块切换为浅色。
+   data-theme 由 src/theme.ts 按 AppSettings.theme 解析写入。 */
 :root {
   color-scheme: dark;
+  --bg: #1a1b26;
+  --card-bg: #24283b;
+  --card-hover: #292e42;
+  --text: #c0caf5;
+  --text-2: #a9b1d6;
+  --muted: #7982a9;
+  --faint: #565f89;
+  --border: #3b4261;
+  --border-hover: #565f89;
+  --accent: #7aa2f7;
+  --accent-hover: #89b4fa;
+  --accent-2: #bb9af7;
+  --accent-bg: rgba(122, 162, 247, 0.08);
+  --on-accent: #1a1b26;
+  --track: #1a1b26;
+  --seg-kimi: #3b4261;
+  --danger: #f7768e;
+  --danger-2: #ff9e64;
+  --danger-border: rgba(247, 118, 142, 0.45);
+  --danger-bg: rgba(247, 118, 142, 0.12);
+  --ok: #9ece6a;
+  --ok-border: rgba(158, 206, 106, 0.4);
+  --ok-bg: rgba(158, 206, 106, 0.12);
+  --warn: #e0af68;
+  --shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+
   font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
-  background-color: #1a1b26;
-  color: #c0caf5;
+  background-color: var(--bg);
+  color: var(--text);
+}
+
+/* 浅色主题：背景 #f5f6fa / 卡片 #ffffff / 文字 #1f2328，边框与次要色配套 */
+[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f5f6fa;
+  --card-bg: #ffffff;
+  --card-hover: #eef0f6;
+  --text: #1f2328;
+  --text-2: #4b5563;
+  --muted: #6e7781;
+  --faint: #8b949e;
+  --border: #d0d7de;
+  --border-hover: #afb8c1;
+  --track: #e5e7eb;
+  --seg-kimi: #9aa8bd;
+  --shadow: 0 2px 8px rgba(31, 35, 40, 0.08);
 }
 
 * {
@@ -31,25 +78,25 @@ body,
   gap: 10px;
   overflow-y: auto;
   overflow-x: hidden;
-  background-color: #1a1b26;
+  background-color: var(--bg);
 }
 
 /* 面板通用卡片（与设置页 .card 区分，左对齐、内边距更紧凑） */
 .pcard {
   padding: 12px 14px;
   border-radius: 10px;
-  background-color: #24283b;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  background-color: var(--card-bg);
+  box-shadow: var(--shadow);
   transition: background-color 0.15s ease;
 }
 
 .pcard:hover {
-  background-color: #292e42;
+  background-color: var(--card-hover);
 }
 
 .muted-text {
   font-size: 13px;
-  color: #7982a9;
+  color: var(--muted);
 }
 
 /* --- 用量卡 --- */
@@ -62,37 +109,37 @@ body,
 
 .usage-title {
   font-size: 13px;
-  color: #a9b1d6;
+  color: var(--text-2);
 }
 
 .usage-pct {
   font-size: 26px;
   font-weight: 700;
-  color: #7aa2f7;
+  color: var(--accent);
 }
 
 /* 剩余低于 20%：整体标红 */
 .usage-card.low .usage-pct {
-  color: #f7768e;
+  color: var(--danger);
 }
 
 .progress {
   margin-top: 8px;
   height: 8px;
   border-radius: 4px;
-  background-color: #1a1b26;
+  background-color: var(--track);
   overflow: hidden;
 }
 
 .progress-fill {
   height: 100%;
   border-radius: 4px;
-  background: linear-gradient(90deg, #7aa2f7, #bb9af7);
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
   transition: width 0.3s ease;
 }
 
 .usage-card.low .progress-fill {
-  background: linear-gradient(90deg, #f7768e, #ff9e64);
+  background: linear-gradient(90deg, var(--danger), var(--danger-2));
 }
 
 .usage-foot {
@@ -100,7 +147,7 @@ body,
   display: flex;
   justify-content: space-between;
   font-size: 11px;
-  color: #7982a9;
+  color: var(--muted);
 }
 
 /* --- 月度总量卡 --- */
@@ -112,13 +159,13 @@ body,
 
 .monthly-progress .seg-kimi {
   height: 100%;
-  background-color: #3b4261;
+  background-color: var(--seg-kimi);
   transition: width 0.3s ease;
 }
 
 .monthly-progress .seg-code {
   height: 100%;
-  background-color: #7aa2f7;
+  background-color: var(--accent);
   transition: width 0.3s ease;
 }
 
@@ -127,7 +174,7 @@ body,
   margin-top: -4px;
   padding: 0 4px;
   font-size: 11px;
-  color: #f7768e;
+  color: var(--danger);
   word-break: break-all;
 }
 
@@ -143,7 +190,7 @@ body,
 
 /* 0%/50%/100% 三条参考虚线（浅灰，不画刻度数字） */
 .trend-ref {
-  stroke: #3b4261;
+  stroke: var(--border);
   stroke-width: 0.6;
   stroke-dasharray: 3 3;
 }
@@ -151,7 +198,7 @@ body,
 /* 右端图例小字（"7天"/"5h"） */
 .trend-legend-text {
   font-size: 9px;
-  fill: #a9b1d6;
+  fill: var(--text-2);
 }
 
 /* 历史数据不足 2 点时的占位文案（高度接近图表，避免卡片跳动） */
@@ -160,7 +207,59 @@ body,
   padding: 28px 0;
   text-align: center;
   font-size: 12px;
-  color: #7982a9;
+  color: var(--muted);
+}
+
+/* --- 本地 Token 消耗卡 --- */
+
+/* 今日消耗大字行：数字与"今日"标签基线对齐 */
+.local-today-row {
+  margin-top: 4px;
+  display: flex;
+  align-items: baseline;
+}
+
+.local-tokens {
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.local-today-label {
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 头部右侧"昨日 X"小字 */
+.local-yesterday {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 近 7 天迷你柱状图 SVG：占满卡宽，高度按 viewBox 比例自适应 */
+.local-bars {
+  display: block;
+  width: 100%;
+  height: auto;
+  margin-top: 8px;
+}
+
+/* 普通柱：主题蓝 45% 不透明；今日柱满不透明高亮 */
+.usage-bar {
+  fill: var(--accent);
+  opacity: 0.45;
+}
+
+.usage-bar.today {
+  opacity: 1;
+}
+
+/* 按模型占比一行小字 */
+.local-models {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--muted);
 }
 
 /* --- 会员等级 / Booster 一行两小卡 --- */
@@ -177,20 +276,20 @@ body,
 
 .mini-title {
   font-size: 11px;
-  color: #7982a9;
+  color: var(--muted);
 }
 
 .mini-value {
   margin-top: 4px;
   font-size: 16px;
   font-weight: 600;
-  color: #c0caf5;
+  color: var(--text);
 }
 
 .mini-sub {
   margin-top: 2px;
   font-size: 11px;
-  color: #7982a9;
+  color: var(--muted);
 }
 
 /* --- 错误横幅（非阻断） --- */
@@ -201,10 +300,10 @@ body,
   gap: 8px;
   padding: 8px 12px;
   border-radius: 8px;
-  border: 1px solid rgba(247, 118, 142, 0.45);
-  background-color: rgba(247, 118, 142, 0.12);
+  border: 1px solid var(--danger-border);
+  background-color: var(--danger-bg);
   font-size: 12px;
-  color: #f7768e;
+  color: var(--danger);
 }
 
 .error-text {
@@ -217,10 +316,10 @@ body,
 
 .btn {
   padding: 4px 10px;
-  border: 1px solid #3b4261;
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background-color: #24283b;
-  color: #c0caf5;
+  background-color: var(--card-bg);
+  color: var(--text);
   font-size: 12px;
   cursor: pointer;
   white-space: nowrap;
@@ -230,8 +329,8 @@ body,
 }
 
 .btn:hover:not(:disabled) {
-  background-color: #292e42;
-  border-color: #7aa2f7;
+  background-color: var(--card-hover);
+  border-color: var(--accent);
 }
 
 .btn:disabled {
@@ -240,14 +339,14 @@ body,
 }
 
 .btn.primary {
-  border-color: #7aa2f7;
-  background-color: #7aa2f7;
-  color: #1a1b26;
+  border-color: var(--accent);
+  background-color: var(--accent);
+  color: var(--on-accent);
   font-weight: 600;
 }
 
 .btn.primary:hover:not(:disabled) {
-  background-color: #89b4fa;
+  background-color: var(--accent-hover);
 }
 
 /* --- 空状态 --- */
@@ -273,8 +372,8 @@ body,
 .spinner {
   width: 28px;
   height: 28px;
-  border: 3px solid #3b4261;
-  border-top-color: #7aa2f7;
+  border: 3px solid var(--border);
+  border-top-color: var(--accent);
   border-radius: 50%;
   animation: rotate 0.8s linear infinite;
 }
@@ -302,9 +401,9 @@ body,
   align-items: center;
   justify-content: space-between;
   padding: 6px 2px 2px;
-  background-color: #1a1b26;
+  background-color: var(--bg);
   font-size: 11px;
-  color: #7982a9;
+  color: var(--muted);
 }
 
 .footer-actions {
@@ -324,8 +423,8 @@ body,
   padding: 1px 7px;
   border: none;
   border-radius: 999px;
-  background-color: #7aa2f7;
-  color: #1a1b26;
+  background-color: var(--accent);
+  color: var(--on-accent);
   font-size: 10px;
   font-weight: 600;
   cursor: pointer;
@@ -334,7 +433,7 @@ body,
 }
 
 .update-badge:hover {
-  background-color: #89b4fa;
+  background-color: var(--accent-hover);
 }
 
 /* ===== 设置窗口 ===== */
@@ -351,13 +450,13 @@ body,
   gap: 12px;
   overflow-y: auto;
   overflow-x: hidden;
-  background-color: #1a1b26;
+  background-color: var(--bg);
 }
 
 .settings-title {
   font-size: 16px;
   font-weight: 600;
-  color: #7aa2f7;
+  color: var(--accent);
   padding: 0 2px;
 }
 
@@ -365,8 +464,8 @@ body,
 .scard {
   padding: 12px 14px;
   border-radius: 10px;
-  background-color: #24283b;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  background-color: var(--card-bg);
+  box-shadow: var(--shadow);
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -375,7 +474,7 @@ body,
 .scard-title {
   font-size: 13px;
   font-weight: 600;
-  color: #c0caf5;
+  color: var(--text);
 }
 
 /* --- 登录方式单选 --- */
@@ -385,7 +484,7 @@ body,
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  border: 1px solid #3b4261;
+  border: 1px solid var(--border);
   border-radius: 8px;
   font-size: 13px;
   cursor: pointer;
@@ -395,34 +494,34 @@ body,
 }
 
 .radio-row:hover {
-  border-color: #565f89;
+  border-color: var(--border-hover);
 }
 
 .radio-row.active {
-  border-color: #7aa2f7;
-  background-color: rgba(122, 162, 247, 0.08);
+  border-color: var(--accent);
+  background-color: var(--accent-bg);
 }
 
 .radio-row input[type="radio"] {
   margin: 0;
-  accent-color: #7aa2f7;
+  accent-color: var(--accent);
 }
 
 /* --- 输入框 / 表单行 --- */
 
 .input {
   padding: 6px 10px;
-  border: 1px solid #3b4261;
+  border: 1px solid var(--border);
   border-radius: 6px;
-  background-color: #1a1b26;
-  color: #c0caf5;
+  background-color: var(--bg);
+  color: var(--text);
   font-size: 13px;
   outline: none;
   transition: border-color 0.15s ease;
 }
 
 .input:focus {
-  border-color: #7aa2f7;
+  border-color: var(--accent);
 }
 
 .input.grow {
@@ -452,24 +551,24 @@ body,
   justify-content: space-between;
   gap: 12px;
   font-size: 13px;
-  color: #a9b1d6;
+  color: var(--text-2);
 }
 
 .form-row input[type="checkbox"] {
   margin: 0;
   width: 15px;
   height: 15px;
-  accent-color: #7aa2f7;
+  accent-color: var(--accent);
 }
 
 /* --- 徽标 / 脱敏凭证 --- */
 
 .badge {
   padding: 2px 8px;
-  border: 1px solid rgba(158, 206, 106, 0.4);
+  border: 1px solid var(--ok-border);
   border-radius: 999px;
-  background-color: rgba(158, 206, 106, 0.12);
-  color: #9ece6a;
+  background-color: var(--ok-bg);
+  color: var(--ok);
   font-size: 11px;
   white-space: nowrap;
 }
@@ -483,7 +582,7 @@ body,
 .mono-text {
   font-family: Consolas, "Cascadia Mono", monospace;
   font-size: 12px;
-  color: #a9b1d6;
+  color: var(--text-2);
   word-break: break-all;
 }
 
@@ -492,10 +591,10 @@ body,
 .user-code {
   width: 100%;
   padding: 10px;
-  border: 1px solid #3b4261;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  background-color: #1a1b26;
-  color: #e0af68;
+  background-color: var(--bg);
+  color: var(--warn);
   font-family: Consolas, "Cascadia Mono", monospace;
   font-size: 24px;
   letter-spacing: 3px;
@@ -505,25 +604,25 @@ body,
 }
 
 .user-code:hover {
-  border-color: #7aa2f7;
+  border-color: var(--accent);
 }
 
 /* --- 提示行 --- */
 
 .hint-muted {
   font-size: 12px;
-  color: #7982a9;
+  color: var(--muted);
   line-height: 1.6;
 }
 
 .hint-ok {
   font-size: 12px;
-  color: #9ece6a;
+  color: var(--ok);
 }
 
 .hint-err {
   font-size: 12px;
-  color: #f7768e;
+  color: var(--danger);
   word-break: break-all;
 }
 
@@ -532,7 +631,7 @@ body,
   padding: 0;
   border: none;
   background: none;
-  color: #7aa2f7;
+  color: var(--accent);
   font-size: 12px;
   cursor: pointer;
 }
@@ -558,13 +657,13 @@ body,
 /* --- 按钮补充 --- */
 
 .btn.danger {
-  border-color: rgba(247, 118, 142, 0.5);
-  color: #f7768e;
+  border-color: var(--danger-border);
+  color: var(--danger);
 }
 
 .btn.danger:hover:not(:disabled) {
-  background-color: rgba(247, 118, 142, 0.12);
-  border-color: #f7768e;
+  background-color: var(--danger-bg);
+  border-color: var(--danger);
 }
 
 .btn.wide {
@@ -609,7 +708,7 @@ body,
 
 /* 折叠箭头：展开时旋转 90° */
 .chevron {
-  color: #7982a9;
+  color: var(--muted);
   font-size: 12px;
   transition: transform 0.15s ease;
 }
@@ -622,7 +721,7 @@ body,
 .steps {
   margin-left: 18px;
   font-size: 12px;
-  color: #7982a9;
+  color: var(--muted);
   line-height: 1.8;
 }
 
@@ -646,7 +745,7 @@ body,
   padding: 2px 2px 0;
   text-align: center;
   font-size: 11px;
-  color: #565f89;
+  color: var(--faint);
 }
 
 /* 底栏内的文字按钮/提示与版本号保持同字号 */
