@@ -1,7 +1,7 @@
 # KimiCodeBar-Windows 交接记录（HANDOFF）
 
 > 写给完全不了解背景的新会话。读这一篇就能无缝接手。
-> 最后更新：2026-07-27（v0.5.0 构建完成待发布时）
+> 最后更新：2026-07-27（v0.5.0 已发布）
 
 ## 1. 这个项目是什么
 
@@ -33,25 +33,19 @@ Kimi Code（月之暗面的 CLI 编程助手）用量监控的 **Windows 系统�
 
 ## 3. 正在推进的任务（精确状态）
 
-### 3.1 v0.5.0 发布 —— 就差用户点一下
-
-- CI 构建已成功（run id `30258806484`，800px 面板版，commit `70f881b`）
-- Releases 页草稿已生成，**用户尚未点 Publish**
-- 新会话动作：提醒用户去 https://github.com/JYH1878/KimiCodeBar-Windows/releases 发布 v0.5.0 草稿；发布后旧版进程开面板应冒"⬆ v0.5.0"徽标
-
-### 3.2 SignPath 开源签名 —— 等审核（约 1 周）
+### 3.1 SignPath 开源签名 —— 等审核（约 1 周）
 
 - 2026-07-26 通过 https://signpath.org 提交了 SignPath Foundation 开源签名申请（组织 KimiCodeBar，项目指到本仓库），审核结果发邮件
 - **获批后要做**：① 用户把 API token 存到仓库 Secrets（`Settings → Secrets and variables → Actions`，名 `SIGNPATH_API_TOKEN`）；② 把 `signpath/github-action` 集成进 `.github/workflows/release.yml`（对 NSIS 产物签名）；③ README/Release 页补 "Code signing provided by SignPath Foundation"（申请条款要求）
 - 集成后 SmartScreen 蓝色拦截消失，这是 v1.0.0 的门槛之一
 
-### 3.3 网页 token 寿命观察 —— 被动等结果
+### 3.2 网页 token 寿命观察 —— 被动等结果
 
 - 月度总量用的 `kimi-auth` cookie 于 2026-07-26 上午粘贴
 - 判定规则：月度卡报"网页登录态已过期"时记录间隔天数。**活 ≥7 天 → 功能转正（README 推）；活 <3 天 → 冷藏（保持可选不宣传）**
 - 到现在（07-27 晚）尚未过期，暂时是好迹象
 
-### 3.4 v1.0.0 的四个门槛
+### 3.3 v1.0.0 的四个门槛
 
 1. SignPath 签名集成（见 3.2）
 2. cookie 寿命有结论（见 3.3）
