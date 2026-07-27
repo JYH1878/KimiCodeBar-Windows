@@ -10,3 +10,6 @@ target/
 
 # Logs
 *.log
+
+# 本地交接笔记（不进仓库）
+HANDOFF.md
