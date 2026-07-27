@@ -49,6 +49,6 @@ jobs:
           Compress-Archive -Path "src-tauri/target/release/kimicodebar.exe" -DestinationPath "src-tauri/target/release/KimiCodeBar_${ver}_x64-portable.zip" -Force
 
       - name: 上传便携版到 Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: src-tauri/target/release/KimiCodeBar_*_x64-portable.zip
