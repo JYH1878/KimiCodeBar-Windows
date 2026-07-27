@@ -15,7 +15,7 @@
         "label": "main",
         "title": "KimiCodeBar",
         "width": 360,
-        "height": 600,
+        "height": 700,
         "url": "index.html",
         "decorations": false,
         "alwaysOnTop": true,
