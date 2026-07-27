@@ -19,7 +19,9 @@ Built with **Tauri 2 + Rust + React**: installer under 3 MB, ~30–60 MB RAM in 
 - **Dual quota windows**: used percentage, remaining amount and reset countdown for both the 7-day and 5-hour rolling windows
 - **Membership & wallet**: shows membership tier (Andante / Moderato / Allegretto / Allegro), Booster wallet balance and monthly usage
 - **Monthly totals (optional)**: combined Kimi + Code monthly usage from the web console (requires a one-time web token paste)
+- **Local token stats**: scans local `wire.jsonl` session logs for per-day token consumption (today/yesterday + 7-day bar chart + model breakdown) — no API needed
 - **Usage trend chart**: 24-hour dual-line history (7-day / 5-hour), recorded locally — facts only, no prediction
+- **Light / dark theme**: follows the system or switch manually
 - **Two sign-in methods**
   - **API Key**: paste a `sk-kimi-` key, stored in Windows Credential Manager
   - **Account authorization**: OAuth device flow (same as the Kimi Code CLI), one-click browser authorization with automatic token refresh
@@ -29,6 +31,7 @@ Built with **Tauri 2 + Rust + React**: installer under 3 MB, ~30–60 MB RAM in 
 - **Auto update**: silently checks GitHub Releases; an update badge appears in the panel when a new version is available
 - **Global hotkey**: summon/dismiss the panel anywhere (e.g. `Ctrl+Shift+K`, configurable, off by default)
 - **CLI mode**: `kimicodebar.exe --status` prints quota JSON for scripts and CI (exit codes 0/1/2)
+- **Usage export**: one-click CSV/JSON export of your usage history for expense reports and reviews
 - **Launch at login**: optional, one toggle in Settings
 
 ## Screenshots
