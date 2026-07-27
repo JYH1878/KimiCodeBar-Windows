@@ -1,0 +1,147 @@
+{
+  "panel": {
+    "loading": "Loading…",
+    "weeklyUsage": "7-day usage",
+    "fiveHourUsage": "5-hour usage",
+    "totalQuota": "Total quota",
+    "updatedAt": "Updated {{time}}",
+    "noData": "No data yet",
+    "refresh": "Refresh",
+    "refreshTitle": "Refresh now",
+    "settings": "Settings",
+    "settingsTitle": "Open settings",
+    "updateBadgeTitle": "New version available — click to open the release page"
+  },
+  "usage": {
+    "remaining": "{{remaining}}/{{limit}} left",
+    "reset": "Resets {{text}}",
+    "countdown": {
+      "unknown": "unknown",
+      "soon": "soon",
+      "minutes_one": "in {{count}} minute",
+      "minutes_other": "in {{count}} minutes",
+      "hours_one": "in {{count}} hour",
+      "hours_other": "in {{count}} hours",
+      "days_one": "in {{count}} day",
+      "days_other": "in {{count}} days"
+    }
+  },
+  "monthly": {
+    "title": "Monthly total"
+  },
+  "trend": {
+    "title": "Usage trend (last 24 hours)",
+    "empty": "Collecting data…",
+    "ariaLabel": "Line chart of usage over the last 24 hours",
+    "legend7d": "7d",
+    "legend5h": "5h"
+  },
+  "membership": {
+    "title": "Membership",
+    "unknown": "Unknown"
+  },
+  "booster": {
+    "title": "Booster",
+    "notEnabled": "Not activated",
+    "balanceTitle": "Booster balance",
+    "monthly": "Monthly {{used}}/{{limit}}"
+  },
+  "empty": {
+    "noCredential": "No credentials configured",
+    "openSettings": "Open settings"
+  },
+  "error": {
+    "retry": "Retry"
+  },
+  "settings": {
+    "title": "KimiCodeBar Settings",
+    "loading": "Loading…",
+    "loginMethod": {
+      "title": "Sign-in method",
+      "apiKey": "Method A: API Key",
+      "oauth": "Method B: Sign in with account",
+      "switched": "Sign-in method switched; takes effect on next refresh"
+    },
+    "general": {
+      "title": "General",
+      "refreshInterval": "Refresh interval (minutes, ≥1)",
+      "lowWarn": "Low quota alert",
+      "warnThreshold": "Alert threshold (% left)",
+      "autostart": "Launch at startup",
+      "hotkey": "Global hotkey",
+      "hotkeyPlaceholder": "e.g. Ctrl+Shift+K; leave empty to disable",
+      "hotkeyHint": "Show/hide the panel; takes effect after saving settings",
+      "language": "Language",
+      "langSystem": "System",
+      "langZh": "中文",
+      "langEn": "English",
+      "saved": "Saved",
+      "save": "Save settings"
+    },
+    "diagnostics": {
+      "title": "Diagnostics & logs",
+      "hint": "Running into issues? Export a diagnostics file and attach it to a GitHub issue to speed up troubleshooting (contains no secrets).",
+      "exported": "Exported",
+      "exporting": "Exporting…",
+      "export": "Export diagnostics",
+      "openLogDir": "Open log folder"
+    },
+    "footer": {
+      "checking": "Checking…",
+      "checkUpdate": "Check for updates",
+      "foundVersion": "v{{version}} available — click to download",
+      "upToDate": "Up to date"
+    }
+  },
+  "apiKey": {
+    "title": "Method A: API Key",
+    "configured": "Configured",
+    "showKey": "Show key",
+    "hideKey": "Hide key",
+    "hint": "Keys start with sk-kimi- and are not interchangeable with sk- keys from the platform.moonshot.cn open platform.",
+    "getKey": "Get one at kimi.com/code/console",
+    "errEmpty": "Please enter an API Key",
+    "saved": "API Key saved",
+    "cleared": "API Key cleared",
+    "clear": "Clear",
+    "save": "Save"
+  },
+  "deviceLogin": {
+    "title": "Method B: Sign in with account",
+    "signedIn": "Signed in",
+    "logout": "Sign out",
+    "waitingHint": "Open the authorization page in your browser and enter or confirm this code:",
+    "copyTitle": "Click to copy the code",
+    "copied": "Copied",
+    "openBrowser": "Open browser to authorize",
+    "waiting": "Waiting for authorization…",
+    "remainAbout": "(~{{remain}} left)",
+    "expired": "(code expired — cancel and try again)",
+    "cancel": "Cancel",
+    "failed": "Authorization failed",
+    "retry": "Retry",
+    "introHint": "Authorize your kimi.com account in the browser — no manual key required.",
+    "starting": "Requesting code…",
+    "start": "Start authorization",
+    "remainMinSec": "{{m}}m {{s}}s",
+    "remainMin": "{{m}}m",
+    "remainSec": "{{s}}s"
+  },
+  "webToken": {
+    "title": "Advanced: Monthly total (optional)",
+    "configured": "Configured",
+    "hint": "Shows your Kimi web monthly total usage (Kimi + Code). Requires copying the web token from your browser once; paste it again after it expires.",
+    "step1pre": "Open",
+    "step1post": "in your browser and sign in",
+    "step2": "Press F12 to open DevTools → Application → Cookies → https://www.kimi.com",
+    "step3": "Copy the Value of kimi-auth and paste it below",
+    "placeholder": "Paste the kimi-auth value; a full cookie string is auto-detected",
+    "errEmpty": "Please paste the kimi-auth value",
+    "saved": "Verified and saved: total usage {{total}}% (Kimi {{kimi}}% · Code {{code}}%)",
+    "cleared": "Web token cleared",
+    "clearing": "Clearing…",
+    "clear": "Clear",
+    "saving": "Verifying…",
+    "save": "Verify & save"
+  }
+}

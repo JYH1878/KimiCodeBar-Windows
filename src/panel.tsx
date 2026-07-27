@@ -1,8 +1,10 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { useTranslation } from "react-i18next";
 import "./styles.css";
+import i18n, { resolveLang } from "./i18n";
 import type { HistoryPoint, PanelState, QuotaDetail, UpdateInfo } from "./types";
-import { checkUpdate, getPanelState, getUsageHistory, refreshNow, openSettings, openExternalUrl, onQuotaUpdated, onUpdateInfo } from "./ipc";
+import { checkUpdate, getPanelState, getSettings, getUsageHistory, refreshNow, openSettings, openExternalUrl, onQuotaUpdated, onSettingsChanged, onUpdateInfo } from "./ipc";
 import { UsageCard } from "./components/UsageCard";
 import { MonthlyCard } from "./components/MonthlyCard";
 import { TrendCard } from "./components/TrendCard";
@@ -20,6 +22,7 @@ function formatFetchedAt(epochSec: number): string {
 
 /** 用量面板主界面（index.html 入口） */
 function PanelApp() {
+  const { t } = useTranslation();
   const [state, setState] = useState<PanelState | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   // 更新检查结果（仅 has_update 时有值，驱动底栏徽标）
@@ -28,6 +31,16 @@ function PanelApp() {
   const [history, setHistory] = useState<HistoryPoint[] | null>(null);
   // 每分钟触发一次重渲染，让重置倒计时保持新鲜
   const [, setTick] = useState(0);
+
+  // 语言：挂载时读设置应用一次，之后跟随 settings-changed 广播即时切换
+  useEffect(() => {
+    getSettings()
+      .then((s) => void i18n.changeLanguage(resolveLang(s.language)))
+      .catch(() => {
+        // 设置读取失败保持系统语言，不影响面板功能
+      });
+    return onSettingsChanged((s) => void i18n.changeLanguage(resolveLang(s.language)));
+  }, []);
 
   // 手动刷新：成功用返回值整体替换；失败把错误写进横幅，保留已有缓存
   const doRefresh = useCallback(async () => {
@@ -101,7 +114,7 @@ function PanelApp() {
     return (
       <div className="panel loading-center">
         <div className="spinner" />
-        <p className="muted-text">加载中…</p>
+        <p className="muted-text">{t("panel.loading")}</p>
       </div>
     );
   }
@@ -135,14 +148,14 @@ function PanelApp() {
       {state.error !== null && (
         <ErrorBanner error={state.error} onRetry={() => void doRefresh()} />
       )}
-      {quota?.weekly && <UsageCard title="7 天用量" detail={quota.weekly} />}
-      {quota?.five_hour && <UsageCard title="5 小时用量" detail={quota.five_hour} />}
+      {quota?.weekly && <UsageCard title={t("panel.weeklyUsage")} detail={quota.weekly} />}
+      {quota?.five_hour && <UsageCard title={t("panel.fiveHourUsage")} detail={quota.five_hour} />}
       {/* 月度总量（网页 token 可选增强）：monthly 与 monthly_error 都为空时整卡不渲染 */}
       {state.monthly && <MonthlyCard monthly={state.monthly} />}
       {state.monthly_error && <p className="monthly-error">{state.monthly_error}</p>}
       {/* 用量趋势（本地历史采样，纯事实不预测）：月度总量卡之后、会员/Booster 行之前 */}
       <TrendCard points={history} />
-      {totalDetail && <UsageCard title="总额度" detail={totalDetail} />}
+      {totalDetail && <UsageCard title={t("panel.totalQuota")} detail={totalDetail} />}
       {quota && (
         <div className="mini-row">
           <MembershipCard level={quota.membership_level} />
@@ -156,24 +169,26 @@ function PanelApp() {
               type="button"
               className="update-badge"
               onClick={() => void openExternalUrl(updateUrl)}
-              title="发现新版本，点击打开发布页"
+              title={t("panel.updateBadgeTitle")}
             >
               ⬆ v{update.latest}
             </button>
           )}
-          {state.fetched_at ? `更新于 ${formatFetchedAt(state.fetched_at)}` : "暂无数据"}
+          {state.fetched_at
+            ? t("panel.updatedAt", { time: formatFetchedAt(state.fetched_at) })
+            : t("panel.noData")}
         </span>
         <div className="footer-actions">
           <button
             className="btn"
             onClick={() => void doRefresh()}
             disabled={busy}
-            title="立即刷新"
+            title={t("panel.refreshTitle")}
           >
-            <span className={busy ? "spin" : ""}>⟳</span> 刷新
+            <span className={busy ? "spin" : ""}>⟳</span> {t("panel.refresh")}
           </button>
-          <button className="btn" onClick={() => void openSettings()} title="打开设置">
-            设置
+          <button className="btn" onClick={() => void openSettings()} title={t("panel.settingsTitle")}>
+            {t("panel.settings")}
           </button>
         </div>
       </div>

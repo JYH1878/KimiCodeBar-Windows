@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 /** 会员等级枚举 → 官方档位名（音乐速度记号，由慢到快对应由低到高）；未知等级原样显示 */
 const LEVEL_NAMES: Record<string, string> = {
   LEVEL_FREE: "Andante",
@@ -11,12 +13,13 @@ interface MembershipCardProps {
   level?: string;
 }
 
-/** 会员等级小卡 */
+/** 会员等级小卡（档位名 Andante 等为官方名称，不翻译） */
 export function MembershipCard({ level }: MembershipCardProps) {
-  const name = level ? (LEVEL_NAMES[level] ?? level) : "未知";
+  const { t } = useTranslation();
+  const name = level ? (LEVEL_NAMES[level] ?? level) : t("membership.unknown");
   return (
     <div className="pcard mini-card">
-      <div className="mini-title">会员等级</div>
+      <div className="mini-title">{t("membership.title")}</div>
       <div className="mini-value">{name}</div>
     </div>
   );

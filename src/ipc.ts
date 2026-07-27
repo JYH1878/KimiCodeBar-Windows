@@ -155,6 +155,7 @@ const mockDb = {
     warn_threshold_pct: 20,
     autostart: false,
     hotkey: null,
+    language: "system",
   } as AppSettings,
   // 预置一个假 Key，方便浏览器开发时看到"已配置"徽标
   apiKey: "sk-kimi-mock9f8e7d6c5b4a" as string | null,
@@ -219,6 +220,29 @@ export async function saveSettings(settings: AppSettings): Promise<void> {
     return;
   }
   return invoke<void>("save_settings", { settings });
+}
+
+/**
+ * 订阅后端广播的设置变更（settings-changed 事件，payload 为 AppSettings；
+ * save_settings 成功后触发，两个窗口据此即时切换语言）。
+ * 返回反注册函数，供组件卸载时调用。
+ */
+export function onSettingsChanged(cb: (settings: AppSettings) => void): () => void {
+  if (!isTauri) {
+    // 浏览器 mock 没有跨窗口广播，返回空的反注册函数
+    return () => {};
+  }
+  let unlisten: (() => void) | null = null;
+  // 与 onQuotaUpdated 相同的兜底：注册完成前卸载也能正确反注册
+  let cancelled = false;
+  listen<AppSettings>("settings-changed", (event) => cb(event.payload)).then((fn) => {
+    if (cancelled) fn();
+    else unlisten = fn;
+  });
+  return () => {
+    cancelled = true;
+    unlisten?.();
+  };
 }
 
 /** 保存 API Key（写入系统钥匙串）；后端校验失败会抛中文错误，原样透传 */

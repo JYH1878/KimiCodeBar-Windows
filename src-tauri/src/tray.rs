@@ -66,7 +66,8 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 }
 
 /// 按告警状态切换托盘图标，并更新 tooltip（"KimiCodeBar" + 可选的额度摘要行）。
-/// tooltip_extra 形如 "\n7天剩余 87% · 5h剩余 36%"（由 do_refresh 组装）。
+/// tooltip_extra 形如 "\n7天剩余 87% · 5h剩余 36%"（英文 "\n7D left 87% · 5H left 36%"，
+/// 由 do_refresh 按语言设置组装）。
 pub fn update_tray_state(app: &AppHandle, low_warning: bool, tooltip_extra: Option<String>) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;

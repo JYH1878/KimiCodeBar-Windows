@@ -4,6 +4,7 @@ mod cli;
 mod commands;
 mod diagnostics;
 mod hotkey;
+mod i18n;
 mod logging;
 mod panel;
 mod polling;

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import type { CredentialStatus } from "../types";
 import { clearApiKey, openExternalUrl, setApiKey } from "../ipc";
 
@@ -54,6 +55,7 @@ interface ApiKeySectionProps {
 
 /** 设置页"方式A：API Key"分区 */
 export function ApiKeySection({ status, onChanged }: ApiKeySectionProps) {
+  const { t } = useTranslation();
   const [keyInput, setKeyInput] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -66,7 +68,7 @@ export function ApiKeySection({ status, onChanged }: ApiKeySectionProps) {
   const save = async () => {
     const key = keyInput.trim();
     if (key === "") {
-      setErrMsg("请输入 API Key");
+      setErrMsg(t("apiKey.errEmpty"));
       setOkMsg(null);
       return;
     }
@@ -76,7 +78,7 @@ export function ApiKeySection({ status, onChanged }: ApiKeySectionProps) {
     try {
       await setApiKey(key);
       setKeyInput("");
-      setOkMsg("API Key 已保存");
+      setOkMsg(t("apiKey.saved"));
       onChanged();
     } catch (e) {
       // 后端中文报错原样展示
@@ -92,7 +94,7 @@ export function ApiKeySection({ status, onChanged }: ApiKeySectionProps) {
     setOkMsg(null);
     try {
       await clearApiKey();
-      setOkMsg("API Key 已清除");
+      setOkMsg(t("apiKey.cleared"));
       onChanged();
     } catch (e) {
       setErrMsg(String(e));
@@ -103,11 +105,11 @@ export function ApiKeySection({ status, onChanged }: ApiKeySectionProps) {
 
   return (
     <section className="scard">
-      <h2 className="scard-title">方式A：API Key</h2>
+      <h2 className="scard-title">{t("apiKey.title")}</h2>
       {configured && masked !== null && (
         <div className="cred-row">
           <span className="mono-text">{masked}</span>
-          <span className="badge">已配置</span>
+          <span className="badge">{t("apiKey.configured")}</span>
         </div>
       )}
       <div className="input-row">
@@ -124,16 +126,16 @@ export function ApiKeySection({ status, onChanged }: ApiKeySectionProps) {
           type="button"
           className="btn icon-btn"
           onClick={() => setShowKey((v) => !v)}
-          title={showKey ? "隐藏明文" : "显示明文"}
+          title={showKey ? t("apiKey.hideKey") : t("apiKey.showKey")}
         >
           {showKey ? <EyeOffIcon /> : <EyeIcon />}
         </button>
       </div>
       <p className="hint-muted">
-        Key 以 sk-kimi- 开头，与开放平台 platform.moonshot.cn 的 sk- Key 不通用。
+        {t("apiKey.hint")}
         <br />
         <button type="button" className="link" onClick={() => void openExternalUrl(CONSOLE_URL)}>
-          前往 kimi.com/code/console 获取
+          {t("apiKey.getKey")}
         </button>
       </p>
       {errMsg !== null && <p className="hint-err">{errMsg}</p>}
@@ -145,7 +147,7 @@ export function ApiKeySection({ status, onChanged }: ApiKeySectionProps) {
           onClick={() => void clear()}
           disabled={busy || !configured}
         >
-          清除
+          {t("apiKey.clear")}
         </button>
         <button
           type="button"
@@ -153,7 +155,7 @@ export function ApiKeySection({ status, onChanged }: ApiKeySectionProps) {
           onClick={() => void save()}
           disabled={busy || keyInput.trim() === ""}
         >
-          保存
+          {t("apiKey.save")}
         </button>
       </div>
     </section>

@@ -18,6 +18,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 use tokio::sync::watch;
 
+use crate::i18n;
 use crate::tray;
 
 /// 面板距上次成功刷新超过该秒数，再次显示时触发后台刷新
@@ -38,6 +39,8 @@ pub struct AppSettings {
     pub autostart: bool,
     /// 全局热键（如 "Ctrl+Shift+K"），None/空串表示禁用；保存时重新注册
     pub hotkey: Option<String>,
+    /// 界面语言："system" / "zh" / "en"；None 等同 "system"（跟随系统区域）
+    pub language: Option<String>,
 }
 
 impl From<storage::Settings> for AppSettings {
@@ -49,6 +52,7 @@ impl From<storage::Settings> for AppSettings {
             warn_threshold_pct: s.warn_threshold_pct,
             autostart: s.autostart,
             hotkey: s.hotkey,
+            language: s.language,
         }
     }
 }
@@ -62,6 +66,7 @@ impl From<AppSettings> for storage::Settings {
             warn_threshold_pct: s.warn_threshold_pct,
             autostart: s.autostart,
             hotkey: s.hotkey,
+            language: s.language,
         }
     }
 }
@@ -350,8 +355,19 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
         assemble_panel_state(&inner)
     };
 
-    // 更新托盘（图标 + tooltip 摘要）；失败时 quota 未变，属幂等重刷
-    tray::update_tray_state(app, panel.low_warning, tooltip_extra(panel.quota.as_ref()));
+    // 更新托盘（图标 + tooltip 摘要）；失败时 quota 未变，属幂等重刷。
+    // tooltip 文案语言随设置现读现解析，与 assemble_panel_state 的"设置现读"语义一致
+    let lang = i18n::resolve(
+        storage::load_settings()
+            .unwrap_or_default()
+            .language
+            .as_deref(),
+    );
+    tray::update_tray_state(
+        app,
+        panel.low_warning,
+        tooltip_extra(panel.quota.as_ref(), lang),
+    );
 
     // 通知前端状态已变化
     let _ = app.emit("quota-updated", &panel);
@@ -404,17 +420,7 @@ fn check_update_if_stale(app: &AppHandle) {
     });
 }
 
-/// 托盘 tooltip / 通知正文共用的窗口摘要，如 "7天剩余 87% · 5h剩余 36%"
-pub fn quota_summary(quota: &KimiQuota) -> String {
-    let mut parts = Vec::new();
-    if let Some(weekly) = &quota.weekly {
-        parts.push(format!("7天剩余 {:.0}%", weekly.percent_remaining));
-    }
-    if let Some(five_hour) = &quota.five_hour {
-        parts.push(format!("5h剩余 {:.0}%", five_hour.percent_remaining));
-    }
-    parts.join(" · ")
-}
+// 托盘 tooltip / 通知正文共用的窗口摘要已移至 crate::i18n::quota_summary（按语言出中英文案）
 
 #[tauri::command]
 pub fn get_panel_state(state: State<'_, AppState>) -> PanelState {
@@ -549,6 +555,10 @@ pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String
     // 保存成功后重注册全局热键（先全量注销再按新值注册）；
     // 被占用时返回中文错误（此时设置已落盘，仅热键未生效）
     crate::hotkey::apply(&app, settings.hotkey.as_deref())?;
+
+    // 全部生效后广播 settings-changed（payload 为钳制后的完整设置），
+    // 前端两窗口监听后即时切换语言等；热键失败走 ? 提前返回，不会广播半成品
+    let _ = app.emit("settings-changed", AppSettings::from(settings));
     Ok(())
 }
 
@@ -923,9 +933,10 @@ fn has_any_credential() -> bool {
     matches!(oauth::load_credentials(), Ok(Some(_)))
 }
 
-/// 托盘 tooltip 的附加行："\n7天剩余 87% · 5h剩余 36%"（无数据时为 None）
-fn tooltip_extra(quota: Option<&KimiQuota>) -> Option<String> {
-    let summary = quota.map(quota_summary)?;
+/// 托盘 tooltip 的附加行："\n7天剩余 87% · 5h剩余 36%"（英文 "\n7D left 87% · 5H left 36%"，
+/// 无数据时为 None）；摘要文案按 lang 由 i18n::quota_summary 生成
+fn tooltip_extra(quota: Option<&KimiQuota>, lang: i18n::Lang) -> Option<String> {
+    let summary = quota.map(|q| i18n::quota_summary(lang, q))?;
     if summary.is_empty() {
         None
     } else {

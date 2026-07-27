@@ -29,11 +29,13 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2"
 
 # credentials.json 的 DPAPI 加密（CryptProtectData / CryptUnprotectData，CurrentUser 作用域），
-# 以及 CLI 模式的 AttachConsole / FreeConsole（Win32_System_Console，见 cli.rs）。
+# CLI 模式的 AttachConsole / FreeConsole（Win32_System_Console，见 cli.rs），
+# 以及系统区域探测 GetUserDefaultLocaleName（Win32_Globalization，见 i18n.rs）。
 # 复用依赖树中已有的 windows-sys，仅启用所需 feature。
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Security_Cryptography",
     "Win32_System_Console",
 ] }

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { clearWebToken, openExternalUrl, setWebToken } from "../ipc";
 
 /** Kimi 网页版地址（步骤引导里引导用户登录） */
@@ -13,6 +14,7 @@ interface WebTokenSectionProps {
 
 /** 设置页"高级：月度总量（可选）"折叠分区：网页 token 的粘贴校验、保存与清除 */
 export function WebTokenSection({ configured, onChanged }: WebTokenSectionProps) {
+  const { t } = useTranslation();
   // 默认收起，点击标题行展开/收起
   const [open, setOpen] = useState(false);
   const [input, setInput] = useState("");
@@ -27,7 +29,7 @@ export function WebTokenSection({ configured, onChanged }: WebTokenSectionProps)
   const save = async () => {
     const token = input.trim();
     if (token === "") {
-      setErrMsg("请粘贴 kimi-auth 的值");
+      setErrMsg(t("webToken.errEmpty"));
       setOkMsg(null);
       return;
     }
@@ -38,8 +40,11 @@ export function WebTokenSection({ configured, onChanged }: WebTokenSectionProps)
       const info = await setWebToken(token);
       setInput("");
       setOkMsg(
-        `已验证并保存：总用量已用 ${info.total_pct.toFixed(1)}%` +
-          `（Kimi ${info.kimi_pct.toFixed(1)}% · Code ${info.code_pct.toFixed(1)}%）`,
+        t("webToken.saved", {
+          total: info.total_pct.toFixed(1),
+          kimi: info.kimi_pct.toFixed(1),
+          code: info.code_pct.toFixed(1),
+        }),
       );
       onChanged();
     } catch (e) {
@@ -56,7 +61,7 @@ export function WebTokenSection({ configured, onChanged }: WebTokenSectionProps)
     setOkMsg(null);
     try {
       await clearWebToken();
-      setOkMsg("网页 token 已清除");
+      setOkMsg(t("webToken.cleared"));
       onChanged();
     } catch (e) {
       setErrMsg(String(e));
@@ -73,19 +78,16 @@ export function WebTokenSection({ configured, onChanged }: WebTokenSectionProps)
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
       >
-        <span className="scard-title">高级：月度总量（可选）</span>
-        {configured && <span className="badge">已配置</span>}
+        <span className="scard-title">{t("webToken.title")}</span>
+        {configured && <span className="badge">{t("webToken.configured")}</span>}
         <span className={`chevron${open ? " open" : ""}`}>▸</span>
       </button>
       {open && (
         <>
-          <p className="hint-muted">
-            用于显示 Kimi 网页版的每月总用量（Kimi + Code）。需要在浏览器里复制一次网页
-            token，过期后需重新粘贴。
-          </p>
+          <p className="hint-muted">{t("webToken.hint")}</p>
           <ol className="steps">
             <li>
-              浏览器打开{" "}
+              {t("webToken.step1pre")}{" "}
               <button
                 type="button"
                 className="link"
@@ -93,17 +95,15 @@ export function WebTokenSection({ configured, onChanged }: WebTokenSectionProps)
               >
                 https://www.kimi.com
               </button>{" "}
-              并登录
+              {t("webToken.step1post")}
             </li>
-            <li>
-              按 F12 打开开发者工具 → Application（应用程序）→ Cookies → https://www.kimi.com
-            </li>
-            <li>复制 kimi-auth 这一项的 Value 粘贴到下方</li>
+            <li>{t("webToken.step2")}</li>
+            <li>{t("webToken.step3")}</li>
           </ol>
           <textarea
             className="input textarea"
             rows={3}
-            placeholder="粘贴 kimi-auth 的值，支持整串 cookie 自动识别"
+            placeholder={t("webToken.placeholder")}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             spellCheck={false}
@@ -119,7 +119,7 @@ export function WebTokenSection({ configured, onChanged }: WebTokenSectionProps)
                 onClick={() => void clear()}
                 disabled={busy}
               >
-                {clearing ? "清除中…" : "清除"}
+                {clearing ? t("webToken.clearing") : t("webToken.clear")}
               </button>
             )}
             <button
@@ -128,7 +128,7 @@ export function WebTokenSection({ configured, onChanged }: WebTokenSectionProps)
               onClick={() => void save()}
               disabled={busy || input.trim() === ""}
             >
-              {saving ? "校验中…" : "校验并保存"}
+              {saving ? t("webToken.saving") : t("webToken.save")}
             </button>
           </div>
         </>

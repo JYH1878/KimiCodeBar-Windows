@@ -10,7 +10,8 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tokio::time::{interval, MissedTickBehavior};
 
-use crate::commands::{do_refresh, quota_summary, AppState, PanelState};
+use crate::commands::{do_refresh, AppState, PanelState};
+use crate::i18n;
 
 /// 重置提醒提前量：进入重置前 15 分钟窗口才提醒
 const RESET_REMIND_WINDOW_MIN: i64 = 15;
@@ -62,7 +63,7 @@ pub fn start(app: AppHandle) {
     });
 }
 
-/// low_warn_enabled 且配额存在时发系统通知，正文为各窗口剩余百分比
+/// low_warn_enabled 且配额存在时发系统通知，正文为各窗口剩余百分比（语言随设置）
 fn notify_low_warning(app: &AppHandle, panel: &crate::commands::PanelState) {
     let settings = storage::load_settings().unwrap_or_default();
     if !settings.low_warn_enabled {
@@ -71,15 +72,16 @@ fn notify_low_warning(app: &AppHandle, panel: &crate::commands::PanelState) {
     let Some(quota) = &panel.quota else {
         return;
     };
-    let summary = quota_summary(quota);
+    let lang = i18n::resolve(settings.language.as_deref());
+    let summary = i18n::quota_summary(lang, quota);
     if summary.is_empty() {
         return;
     }
     let _ = app
         .notification()
         .builder()
-        .title("KimiCodeBar 额度预警")
-        .body(summary)
+        .title(i18n::low_warning_title(lang))
+        .body(i18n::low_warning_body(lang, &summary))
         .show();
 }
 
@@ -131,16 +133,18 @@ fn notify_reset_reminder(
     let mins = ((reset_time - now).num_seconds() as f64 / 60.0)
         .round()
         .max(1.0) as i64;
-    let body = format!(
-        "5h 剩余 {:.0}/{:.0}，{mins} 分钟后重置（{}），建议把剩余额度用完",
+    let lang = i18n::resolve(settings.language.as_deref());
+    let body = i18n::reset_reminder_body(
+        lang,
         five_hour.remaining,
         five_hour.limit,
-        five_hour.reset_time_text()
+        mins,
+        &five_hour.reset_time_text(),
     );
     let _ = app
         .notification()
         .builder()
-        .title("KimiCodeBar 重置提醒")
+        .title(i18n::reset_reminder_title(lang))
         .body(body)
         .show();
     // 无论系统通知是否真正弹出都记为已提醒：通知服务异常时不应每个 tick 重试

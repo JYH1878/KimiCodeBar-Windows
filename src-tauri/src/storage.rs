@@ -38,6 +38,9 @@ pub struct Settings {
     /// 全局热键（如 "Ctrl+Shift+K"），None/空串表示禁用
     #[serde(default)]
     pub hotkey: Option<String>,
+    /// 界面语言："system" / "zh" / "en"；None 等同 "system"（跟随系统区域）
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 const fn default_refresh_interval_min() -> u32 {
@@ -61,6 +64,7 @@ impl Default for Settings {
             warn_threshold_pct: DEFAULT_WARN_THRESHOLD_PCT,
             autostart: false,
             hotkey: None,
+            language: None,
         }
     }
 }
@@ -204,6 +208,7 @@ mod tests {
             warn_threshold_pct: 33.5,
             autostart: true,
             hotkey: Some("Ctrl+Shift+K".to_string()),
+            language: Some("zh".to_string()),
         };
         save_settings(&settings).unwrap();
         assert!(dir.join("settings.json").exists());
@@ -261,6 +266,8 @@ mod tests {
         assert!(!settings.autostart);
         // 旧版设置文件无 hotkey 字段：#[serde(default)] 读回 None
         assert!(settings.hotkey.is_none());
+        // 旧版设置文件无 language 字段：读回 None（等同 "system" 跟随系统）
+        assert!(settings.language.is_none());
 
         cleanup(&dir);
     }

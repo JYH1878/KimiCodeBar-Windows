@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import type { HistoryPoint } from "../types";
 
 /** 趋势窗口：近 24 小时（秒） */
@@ -33,6 +34,7 @@ interface TrendCardProps {
  * 可见数据点不足 2 个时不渲染图表，只显示"数据积累中…"占位。
  */
 export function TrendCard({ points }: TrendCardProps) {
+  const { t } = useTranslation();
   // 只取最近 24 小时内的采样（纯事实：窗口外的一律不画）
   const nowSec = Math.floor(Date.now() / 1000);
   const startSec = nowSec - WINDOW_SEC;
@@ -97,16 +99,16 @@ export function TrendCard({ points }: TrendCardProps) {
   return (
     <div className="pcard trend-card">
       <div className="usage-head">
-        <span className="usage-title">用量趋势（近 24 小时）</span>
+        <span className="usage-title">{t("trend.title")}</span>
       </div>
       {visible.length < 2 ? (
-        <p className="trend-empty">数据积累中…</p>
+        <p className="trend-empty">{t("trend.empty")}</p>
       ) : (
         <svg
           className="trend-chart"
           viewBox="0 0 320 90"
           role="img"
-          aria-label="近 24 小时用量趋势折线图"
+          aria-label={t("trend.ariaLabel")}
         >
           {/* 0% / 50% / 100% 三条参考虚线（不画刻度数字） */}
           {[0, 50, 100].map((pct) => (
@@ -124,11 +126,11 @@ export function TrendCard({ points }: TrendCardProps) {
           {/* 右端两行图例：色块 + 小字 */}
           <rect x={280} y={27} width={8} height={8} rx={2} fill={WEEKLY_COLOR} />
           <text className="trend-legend-text" x={292} y={34}>
-            7天
+            {t("trend.legend7d")}
           </text>
           <rect x={280} y={51} width={8} height={8} rx={2} fill={FIVE_HOUR_COLOR} />
           <text className="trend-legend-text" x={292} y={58}>
-            5h
+            {t("trend.legend5h")}
           </text>
         </svg>
       )}

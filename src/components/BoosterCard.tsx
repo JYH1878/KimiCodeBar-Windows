@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import type { BoosterInfo } from "../types";
 
 interface BoosterCardProps {
@@ -6,11 +7,12 @@ interface BoosterCardProps {
 
 /** Booster 小卡：未开通显示提示；已开通显示余额与月度已用/限额（字段存在时） */
 export function BoosterCard({ booster }: BoosterCardProps) {
+  const { t } = useTranslation();
   if (!booster || !booster.enabled) {
     return (
       <div className="pcard mini-card">
-        <div className="mini-title">Booster</div>
-        <div className="mini-value muted-text">未开通</div>
+        <div className="mini-title">{t("booster.title")}</div>
+        <div className="mini-value muted-text">{t("booster.notEnabled")}</div>
       </div>
     );
   }
@@ -18,12 +20,14 @@ export function BoosterCard({ booster }: BoosterCardProps) {
   const limit = booster.monthly_charge_limit_yuan;
   return (
     <div className="pcard mini-card">
-      <div className="mini-title">Booster 余额</div>
+      <div className="mini-title">{t("booster.balanceTitle")}</div>
       <div className="mini-value">¥{booster.balance_yuan.toFixed(2)}</div>
       {(used != null || limit != null) && (
         <div className="mini-sub">
-          月度 {used != null ? `¥${used.toFixed(2)}` : "—"}/
-          {limit != null ? `¥${limit.toFixed(2)}` : "—"}
+          {t("booster.monthly", {
+            used: used != null ? `¥${used.toFixed(2)}` : "—",
+            limit: limit != null ? `¥${limit.toFixed(2)}` : "—",
+          })}
         </div>
       )}
     </div>

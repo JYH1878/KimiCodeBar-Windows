@@ -75,6 +75,8 @@ export interface AppSettings {
   autostart: boolean;
   /** 全局热键（如 "Ctrl+Shift+K"），null/空串 = 禁用；保存时后端重新注册 */
   hotkey?: string | null;
+  /** 界面语言："system"（跟随系统）/ "zh" / "en"，默认 system */
+  language?: string | null;
 }
 
 /** 凭证配置状态：get_credential_status 的返回 */

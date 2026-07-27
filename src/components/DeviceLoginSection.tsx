@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import type { DeviceLoginState } from "../types";
 import {
   cancelDeviceLogin,
@@ -10,12 +12,14 @@ import {
   startDeviceLogin,
 } from "../ipc";
 
-/** 剩余秒数 → "X 分 Y 秒" / "X 分钟" / "Y 秒" */
-function formatRemain(sec: number): string {
+/** 剩余秒数 → "X 分 Y 秒" / "X 分钟" / "Y 秒"（英文为 "Xm Ys" / "Xm" / "Ys"） */
+function formatRemain(sec: number, t: TFunction): string {
   const m = Math.floor(sec / 60);
   const s = sec % 60;
-  if (m > 0) return s > 0 ? `${m} 分 ${s} 秒` : `${m} 分钟`;
-  return `${s} 秒`;
+  if (m > 0) {
+    return s > 0 ? t("deviceLogin.remainMinSec", { m, s }) : t("deviceLogin.remainMin", { m });
+  }
+  return t("deviceLogin.remainSec", { s });
 }
 
 interface DeviceLoginSectionProps {
@@ -27,6 +31,7 @@ interface DeviceLoginSectionProps {
 
 /** 设置页"方式B：账号授权登录"分区（设备码流程状态机） */
 export function DeviceLoginSection({ oauthConfigured, onChanged }: DeviceLoginSectionProps) {
+  const { t } = useTranslation();
   // 设备码流程状态：null/idle=未开始，waiting=等待授权，success/error=终态
   const [deviceLogin, setDeviceLogin] = useState<DeviceLoginState | null>(null);
   const [busy, setBusy] = useState(false);
@@ -152,9 +157,9 @@ export function DeviceLoginSection({ oauthConfigured, onChanged }: DeviceLoginSe
   if (loggedIn) {
     return (
       <section className="scard">
-        <h2 className="scard-title">方式B：账号授权登录</h2>
+        <h2 className="scard-title">{t("deviceLogin.title")}</h2>
         <div className="cred-row">
-          <span className="badge">已授权登录</span>
+          <span className="badge">{t("deviceLogin.signedIn")}</span>
         </div>
         {actionError !== null && <p className="hint-err">{actionError}</p>}
         <div className="row-end">
@@ -164,7 +169,7 @@ export function DeviceLoginSection({ oauthConfigured, onChanged }: DeviceLoginSe
             onClick={() => void logout()}
             disabled={busy}
           >
-            退出登录
+            {t("deviceLogin.logout")}
           </button>
         </div>
       </section>
@@ -176,31 +181,33 @@ export function DeviceLoginSection({ oauthConfigured, onChanged }: DeviceLoginSe
     const url = dl.verification_uri_complete ?? dl.verification_uri;
     return (
       <section className="scard">
-        <h2 className="scard-title">方式B：账号授权登录</h2>
-        <p className="hint-muted">请在浏览器中打开授权页面，输入或确认以下授权码：</p>
+        <h2 className="scard-title">{t("deviceLogin.title")}</h2>
+        <p className="hint-muted">{t("deviceLogin.waitingHint")}</p>
         <button
           type="button"
           className="user-code"
           onClick={() => void copyCode()}
-          title="点击复制授权码"
+          title={t("deviceLogin.copyTitle")}
         >
           {dl.user_code ?? "—"}
         </button>
-        {copied && <p className="hint-ok">已复制</p>}
+        {copied && <p className="hint-ok">{t("deviceLogin.copied")}</p>}
         {url !== null && (
           <button type="button" className="btn primary wide" onClick={() => void openExternalUrl(url)}>
-            打开浏览器授权
+            {t("deviceLogin.openBrowser")}
           </button>
         )}
         <p className="hint-muted waiting-line">
           <span className="spinner small" />
-          等待授权中…
-          {remainSec !== null && remainSec > 0 && <span>（剩余约 {formatRemain(remainSec)}）</span>}
-          {remainSec === 0 && <span>（授权码已过期，请取消后重试）</span>}
+          {t("deviceLogin.waiting")}
+          {remainSec !== null && remainSec > 0 && (
+            <span>{t("deviceLogin.remainAbout", { remain: formatRemain(remainSec, t) })}</span>
+          )}
+          {remainSec === 0 && <span>{t("deviceLogin.expired")}</span>}
         </p>
         <div className="row-end">
           <button type="button" className="btn" onClick={() => void cancel()}>
-            取消
+            {t("deviceLogin.cancel")}
           </button>
         </div>
       </section>
@@ -211,11 +218,11 @@ export function DeviceLoginSection({ oauthConfigured, onChanged }: DeviceLoginSe
   if (dl !== null && dl.status === "error") {
     return (
       <section className="scard">
-        <h2 className="scard-title">方式B：账号授权登录</h2>
-        <p className="hint-err">{dl.error ?? "授权登录失败"}</p>
+        <h2 className="scard-title">{t("deviceLogin.title")}</h2>
+        <p className="hint-err">{dl.error ?? t("deviceLogin.failed")}</p>
         <div className="row-end">
           <button type="button" className="btn primary" onClick={() => void start()} disabled={busy}>
-            重试
+            {t("deviceLogin.retry")}
           </button>
         </div>
       </section>
@@ -225,12 +232,12 @@ export function DeviceLoginSection({ oauthConfigured, onChanged }: DeviceLoginSe
   // 默认（未登录）：引导文案 + 开始授权
   return (
     <section className="scard">
-      <h2 className="scard-title">方式B：账号授权登录</h2>
-      <p className="hint-muted">通过浏览器完成 kimi.com 账号授权，无需手动填写 Key。</p>
+      <h2 className="scard-title">{t("deviceLogin.title")}</h2>
+      <p className="hint-muted">{t("deviceLogin.introHint")}</p>
       {actionError !== null && <p className="hint-err">{actionError}</p>}
       <div className="row-end">
         <button type="button" className="btn primary" onClick={() => void start()} disabled={busy}>
-          {busy ? "正在获取授权码…" : "开始授权登录"}
+          {busy ? t("deviceLogin.starting") : t("deviceLogin.start")}
         </button>
       </div>
     </section>

@@ -1,0 +1,144 @@
+{
+  "panel": {
+    "loading": "加载中…",
+    "weeklyUsage": "7 天用量",
+    "fiveHourUsage": "5 小时用量",
+    "totalQuota": "总额度",
+    "updatedAt": "更新于 {{time}}",
+    "noData": "暂无数据",
+    "refresh": "刷新",
+    "refreshTitle": "立即刷新",
+    "settings": "设置",
+    "settingsTitle": "打开设置",
+    "updateBadgeTitle": "发现新版本，点击打开发布页"
+  },
+  "usage": {
+    "remaining": "剩余 {{remaining}}/{{limit}}",
+    "reset": "重置：{{text}}",
+    "countdown": {
+      "unknown": "未知",
+      "soon": "即将重置",
+      "minutes_other": "{{count}}分钟后重置",
+      "hours_other": "{{count}}小时后重置",
+      "days_other": "{{count}}天后重置"
+    }
+  },
+  "monthly": {
+    "title": "月度总量"
+  },
+  "trend": {
+    "title": "用量趋势（近 24 小时）",
+    "empty": "数据积累中…",
+    "ariaLabel": "近 24 小时用量趋势折线图",
+    "legend7d": "7天",
+    "legend5h": "5h"
+  },
+  "membership": {
+    "title": "会员等级",
+    "unknown": "未知"
+  },
+  "booster": {
+    "title": "Booster",
+    "notEnabled": "未开通",
+    "balanceTitle": "Booster 余额",
+    "monthly": "月度 {{used}}/{{limit}}"
+  },
+  "empty": {
+    "noCredential": "尚未配置凭证",
+    "openSettings": "打开设置"
+  },
+  "error": {
+    "retry": "重试"
+  },
+  "settings": {
+    "title": "KimiCodeBar 设置",
+    "loading": "加载中…",
+    "loginMethod": {
+      "title": "登录方式",
+      "apiKey": "方式A：API Key",
+      "oauth": "方式B：账号授权登录",
+      "switched": "已切换登录方式，下次刷新生效"
+    },
+    "general": {
+      "title": "通用设置",
+      "refreshInterval": "刷新间隔（分钟，≥1）",
+      "lowWarn": "低额度告警",
+      "warnThreshold": "告警阈值（剩余 %）",
+      "autostart": "开机自启",
+      "hotkey": "全局热键",
+      "hotkeyPlaceholder": "如 Ctrl+Shift+K，留空禁用",
+      "hotkeyHint": "唤起/收起面板；随“保存设置”生效",
+      "language": "语言",
+      "langSystem": "跟随系统",
+      "langZh": "中文",
+      "langEn": "English",
+      "saved": "已保存",
+      "save": "保存设置"
+    },
+    "diagnostics": {
+      "title": "诊断与日志",
+      "hint": "遇到问题？导出诊断文件并附到 GitHub issue，可大幅加快排查（不含任何密钥）。",
+      "exported": "已导出",
+      "exporting": "导出中…",
+      "export": "导出诊断文件",
+      "openLogDir": "打开日志目录"
+    },
+    "footer": {
+      "checking": "检查中…",
+      "checkUpdate": "检查更新",
+      "foundVersion": "发现 v{{version}}，点击下载",
+      "upToDate": "已是最新"
+    }
+  },
+  "apiKey": {
+    "title": "方式A：API Key",
+    "configured": "已配置",
+    "showKey": "显示明文",
+    "hideKey": "隐藏明文",
+    "hint": "Key 以 sk-kimi- 开头，与开放平台 platform.moonshot.cn 的 sk- Key 不通用。",
+    "getKey": "前往 kimi.com/code/console 获取",
+    "errEmpty": "请输入 API Key",
+    "saved": "API Key 已保存",
+    "cleared": "API Key 已清除",
+    "clear": "清除",
+    "save": "保存"
+  },
+  "deviceLogin": {
+    "title": "方式B：账号授权登录",
+    "signedIn": "已授权登录",
+    "logout": "退出登录",
+    "waitingHint": "请在浏览器中打开授权页面，输入或确认以下授权码：",
+    "copyTitle": "点击复制授权码",
+    "copied": "已复制",
+    "openBrowser": "打开浏览器授权",
+    "waiting": "等待授权中…",
+    "remainAbout": "（剩余约 {{remain}}）",
+    "expired": "（授权码已过期，请取消后重试）",
+    "cancel": "取消",
+    "failed": "授权登录失败",
+    "retry": "重试",
+    "introHint": "通过浏览器完成 kimi.com 账号授权，无需手动填写 Key。",
+    "starting": "正在获取授权码…",
+    "start": "开始授权登录",
+    "remainMinSec": "{{m}} 分 {{s}} 秒",
+    "remainMin": "{{m}} 分钟",
+    "remainSec": "{{s}} 秒"
+  },
+  "webToken": {
+    "title": "高级：月度总量（可选）",
+    "configured": "已配置",
+    "hint": "用于显示 Kimi 网页版的每月总用量（Kimi + Code）。需要在浏览器里复制一次网页 token，过期后需重新粘贴。",
+    "step1pre": "浏览器打开",
+    "step1post": "并登录",
+    "step2": "按 F12 打开开发者工具 → Application（应用程序）→ Cookies → https://www.kimi.com",
+    "step3": "复制 kimi-auth 这一项的 Value 粘贴到下方",
+    "placeholder": "粘贴 kimi-auth 的值，支持整串 cookie 自动识别",
+    "errEmpty": "请粘贴 kimi-auth 的值",
+    "saved": "已验证并保存：总用量已用 {{total}}%（Kimi {{kimi}}% · Code {{code}}%）",
+    "cleared": "网页 token 已清除",
+    "clearing": "清除中…",
+    "clear": "清除",
+    "saving": "校验中…",
+    "save": "校验并保存"
+  }
+}

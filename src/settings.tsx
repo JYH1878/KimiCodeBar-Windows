@@ -1,7 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { getVersion } from "@tauri-apps/api/app";
+import { useTranslation } from "react-i18next";
 import "./styles.css";
+import i18n, { resolveLang } from "./i18n";
 import type { AppSettings, CredentialStatus, LoginMethod, UpdateInfo } from "./types";
 import {
   checkUpdate,
@@ -9,6 +11,7 @@ import {
   getCredentialStatus,
   getSettings,
   isTauri,
+  onSettingsChanged,
   openExternalUrl,
   openLogDir,
   saveSettings,
@@ -25,10 +28,13 @@ interface GeneralForm {
   autostart: boolean;
   /** 全局热键文本（原样持有输入，保存时 trim，空串→null 禁用） */
   hotkey: string;
+  /** 界面语言（"system"/"zh"/"en"，改动立即本地预览，随保存持久化） */
+  language: string;
 }
 
 /** 设置窗口主界面（settings.html 入口） */
 function SettingsApp() {
+  const { t } = useTranslation();
   // settings = 最近一次从后端读到/保存成功的设置；status = 凭证配置状态
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [status, setStatus] = useState<CredentialStatus | null>(null);
@@ -44,6 +50,7 @@ function SettingsApp() {
     threshold: "20",
     autostart: false,
     hotkey: "",
+    language: "system",
   });
   const [savingGeneral, setSavingGeneral] = useState(false);
   const [generalSaved, setGeneralSaved] = useState(false);
@@ -93,13 +100,21 @@ function SettingsApp() {
           threshold: String(s.warn_threshold_pct),
           autostart: s.autostart,
           hotkey: s.hotkey ?? "",
+          language: s.language ?? "system",
         });
+        // 应用持久化的语言（初始渲染用的是系统语言兜底）
+        void i18n.changeLanguage(resolveLang(s.language));
       } catch (e) {
         if (alive) setLoadError(String(e));
       }
     })();
+    // 跟随后端 save_settings 广播的设置变更即时切换语言
+    const unlistenSettings = onSettingsChanged((s) =>
+      void i18n.changeLanguage(resolveLang(s.language)),
+    );
     return () => {
       alive = false;
+      unlistenSettings();
     };
   }, []);
 
@@ -143,7 +158,7 @@ function SettingsApp() {
       } else if (info.has_update && info.latest !== null) {
         setUpdateFound(info);
       } else {
-        showUpdateMsg("ok", "已是最新", 2000);
+        showUpdateMsg("ok", t("settings.footer.upToDate"), 2000);
       }
     } catch (e) {
       // invoke 本身抛错（命令未注册等）也按检查失败展示
@@ -163,7 +178,7 @@ function SettingsApp() {
       const next: AppSettings = { ...settings, login_method: m };
       await saveSettings(next);
       setSettings(next);
-      setMethodMsg("已切换登录方式，下次刷新生效");
+      setMethodMsg(t("settings.loginMethod.switched"));
     } catch (e) {
       setMethodError(String(e));
     }
@@ -182,6 +197,8 @@ function SettingsApp() {
       autostart: form.autostart,
       // 热键 trim 后提交，空串→null 禁用；后端保存时重新注册，冲突会抛中文错误
       hotkey: form.hotkey.trim() === "" ? null : form.hotkey.trim(),
+      // 语言随通用设置一起持久化；保存成功后后端广播 settings-changed
+      language: form.language,
     };
     setSavingGeneral(true);
     setGeneralError(null);
@@ -200,9 +217,14 @@ function SettingsApp() {
     }
   };
 
+  /** 语言下拉改动：本地立即切换预览，持久化随"保存设置"一起提交 */
+  const changeLanguagePreview = (lang: string) => {
+    setForm((f) => ({ ...f, language: lang }));
+    void i18n.changeLanguage(resolveLang(lang));
+  };
+
   /** 导出诊断文件：成功绿色"已导出"2 秒消失；失败红字原样展示后端错误 */
-  const doExportDiagnostics = async () => {
-    setExporting(true);
+  const doExportDiagnostics = async () => {    setExporting(true);
     setDiagError(null);
     setExportDone(false);
     try {
@@ -232,7 +254,7 @@ function SettingsApp() {
     return (
       <div className="settings loading-center">
         <div className="spinner" />
-        <p className="muted-text">加载中…</p>
+        <p className="muted-text">{t("settings.loading")}</p>
       </div>
     );
   }
@@ -253,11 +275,11 @@ function SettingsApp() {
 
   return (
     <div className="settings">
-      <h1 className="settings-title">KimiCodeBar 设置</h1>
+      <h1 className="settings-title">{t("settings.title")}</h1>
 
       {/* A. 登录方式 */}
       <section className="scard">
-        <h2 className="scard-title">登录方式</h2>
+        <h2 className="scard-title">{t("settings.loginMethod.title")}</h2>
         <label className={`radio-row${method === "api_key" ? " active" : ""}`}>
           <input
             type="radio"
@@ -265,7 +287,7 @@ function SettingsApp() {
             checked={method === "api_key"}
             onChange={() => void switchMethod("api_key")}
           />
-          <span>方式A：API Key</span>
+          <span>{t("settings.loginMethod.apiKey")}</span>
         </label>
         <label className={`radio-row${method === "oauth" ? " active" : ""}`}>
           <input
@@ -274,7 +296,7 @@ function SettingsApp() {
             checked={method === "oauth"}
             onChange={() => void switchMethod("oauth")}
           />
-          <span>方式B：账号授权登录</span>
+          <span>{t("settings.loginMethod.oauth")}</span>
         </label>
         {methodMsg !== null && <p className="hint-ok">{methodMsg}</p>}
         {methodError !== null && <p className="hint-err">{methodError}</p>}
@@ -298,9 +320,9 @@ function SettingsApp() {
 
       {/* D. 通用设置 */}
       <section className="scard">
-        <h2 className="scard-title">通用设置</h2>
+        <h2 className="scard-title">{t("settings.general.title")}</h2>
         <div className="form-row">
-          <label htmlFor="refresh-interval">刷新间隔（分钟，≥1）</label>
+          <label htmlFor="refresh-interval">{t("settings.general.refreshInterval")}</label>
           <input
             id="refresh-interval"
             className="input num-input"
@@ -312,7 +334,7 @@ function SettingsApp() {
           />
         </div>
         <div className="form-row">
-          <label htmlFor="low-warn">低额度告警</label>
+          <label htmlFor="low-warn">{t("settings.general.lowWarn")}</label>
           <input
             id="low-warn"
             type="checkbox"
@@ -321,7 +343,7 @@ function SettingsApp() {
           />
         </div>
         <div className="form-row">
-          <label htmlFor="warn-threshold">告警阈值（剩余 %）</label>
+          <label htmlFor="warn-threshold">{t("settings.general.warnThreshold")}</label>
           <input
             id="warn-threshold"
             className="input num-input"
@@ -334,7 +356,7 @@ function SettingsApp() {
           />
         </div>
         <div className="form-row">
-          <label htmlFor="autostart">开机自启</label>
+          <label htmlFor="autostart">{t("settings.general.autostart")}</label>
           <input
             id="autostart"
             type="checkbox"
@@ -343,52 +365,63 @@ function SettingsApp() {
           />
         </div>
         <div className="form-row">
-          <label htmlFor="hotkey">全局热键</label>
+          <label htmlFor="hotkey">{t("settings.general.hotkey")}</label>
           <input
             id="hotkey"
             className="input hotkey-input"
             type="text"
-            placeholder="如 Ctrl+Shift+K，留空禁用"
+            placeholder={t("settings.general.hotkeyPlaceholder")}
             value={form.hotkey}
             onChange={(e) => setForm((f) => ({ ...f, hotkey: e.target.value }))}
             spellCheck={false}
             autoComplete="off"
           />
         </div>
-        <p className="hint-muted">唤起/收起面板；随“保存设置”生效</p>
+        <p className="hint-muted">{t("settings.general.hotkeyHint")}</p>
+        <div className="form-row">
+          <label htmlFor="language">{t("settings.general.language")}</label>
+          <select
+            id="language"
+            className="input"
+            value={form.language}
+            onChange={(e) => changeLanguagePreview(e.target.value)}
+          >
+            <option value="system">{t("settings.general.langSystem")}</option>
+            <option value="zh">{t("settings.general.langZh")}</option>
+            <option value="en">{t("settings.general.langEn")}</option>
+          </select>
+        </div>
         {generalError !== null && <p className="hint-err">{generalError}</p>}
         <div className="row-end">
-          {generalSaved && <span className="hint-ok">已保存</span>}
+          {generalSaved && <span className="hint-ok">{t("settings.general.saved")}</span>}
           <button
             type="button"
             className="btn primary"
             onClick={() => void saveGeneral()}
             disabled={savingGeneral}
           >
-            保存设置
+            {t("settings.general.save")}
           </button>
         </div>
       </section>
 
       {/* E. 诊断与日志 */}
       <section className="scard">
-        <h2 className="scard-title">诊断与日志</h2>
-        <p className="hint-muted">
-          遇到问题？导出诊断文件并附到 GitHub issue，可大幅加快排查（不含任何密钥）。
-        </p>
+        <h2 className="scard-title">{t("settings.diagnostics.title")}</h2>
+        <p className="hint-muted">{t("settings.diagnostics.hint")}</p>
         {diagError !== null && <p className="hint-err">{diagError}</p>}
         <div className="row-end">
-          {exportDone && <span className="hint-ok">已导出</span>}
+          {exportDone && <span className="hint-ok">{t("settings.diagnostics.exported")}</span>}
           <button
             type="button"
             className="btn primary"
             onClick={() => void doExportDiagnostics()}
             disabled={exporting}
           >
-            {exporting ? "导出中…" : "导出诊断文件"}
+            {exporting ? t("settings.diagnostics.exporting") : t("settings.diagnostics.export")}
           </button>
           <button type="button" className="btn" onClick={() => void doOpenLogDir()}>
-            打开日志目录
+            {t("settings.diagnostics.openLogDir")}
           </button>
         </div>
       </section>
@@ -403,7 +436,7 @@ function SettingsApp() {
           onClick={() => void doCheckUpdate()}
           disabled={updateChecking}
         >
-          {updateChecking ? "检查中…" : "检查更新"}
+          {updateChecking ? t("settings.footer.checking") : t("settings.footer.checkUpdate")}
         </button>
         {foundUrl !== null && (
           <>
@@ -413,7 +446,7 @@ function SettingsApp() {
               className="link"
               onClick={() => void openExternalUrl(foundUrl)}
             >
-              发现 v{updateFound?.latest}，点击下载
+              {t("settings.footer.foundVersion", { version: updateFound?.latest })}
             </button>
           </>
         )}
