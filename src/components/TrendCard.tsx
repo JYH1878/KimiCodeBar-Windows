@@ -28,7 +28,8 @@ interface TrendCardProps {
  * 用量趋势卡：纯手写 SVG 折线图（不引任何图表库，内存红线）。
  * 画近 24 小时内 7 天窗口（蓝）与 5 小时窗口（紫）两条"已用百分比"折线：
  * x 轴按时间线性映射（右端即"现在"），y 轴 0-100%，只画 0%/50%/100%
- * 三条参考虚线不画刻度数字；缺失点在折线上断开分段，不做任何插值或预测。
+ * 三条参考虚线不画刻度数字；缺失点与离线空档（相邻采样 >30 分钟）
+ * 在折线上断开分段，不做任何插值或预测。
  * 可见数据点不足 2 个时不渲染图表，只显示"数据积累中…"占位。
  */
 export function TrendCard({ points }: TrendCardProps) {
@@ -48,20 +49,28 @@ export function TrendCard({ points }: TrendCardProps) {
     return PLOT_B - (clamped / 100) * (PLOT_B - PLOT_T);
   };
 
-  /** 把一条序列按缺失点（null/undefined）切成若干连续段，段内保持时间顺序 */
+  /** 断线阈值：相邻采样间隔超过 30 分钟视为离线空档（轮询间隔为分钟级）。
+   *  空档两端不连线——没数据的地方就不该有线（纯事实，不做任何插值） */
+  const GAP_SEC = 30 * 60;
+
+  /** 把一条序列按缺失点（null/undefined）与离线空档切成若干连续段，段内保持时间顺序 */
   const buildSegments = (
     pick: (p: HistoryPoint) => number | null | undefined,
   ): PlotPoint[][] => {
     const segs: PlotPoint[][] = [];
     let current: PlotPoint[] = [];
+    let prevT: number | null = null;
     for (const p of visible) {
       const v = pick(p);
-      if (v === null || v === undefined) {
+      const isGap = prevT !== null && p.t - prevT > GAP_SEC;
+      if (v === null || v === undefined || isGap) {
         if (current.length > 0) segs.push(current);
         current = [];
-      } else {
+      }
+      if (v !== null && v !== undefined) {
         current.push({ x: toX(p.t), y: toY(v) });
       }
+      prevT = p.t;
     }
     if (current.length > 0) segs.push(current);
     return segs;
