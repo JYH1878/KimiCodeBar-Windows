@@ -37,12 +37,14 @@ Built with **Tauri 2 + Rust + React**: installer under 3 MB, ~30–60 MB RAM in 
 ## Screenshots
 
 <p>
-  <img src="docs/screenshots/panel.png" width="280" alt="Usage panel">
+  <img src="docs/screenshots/panel.png" width="230" alt="Usage panel">
   &nbsp;&nbsp;
-  <img src="docs/screenshots/settings.png" width="405" alt="Settings">
+  <img src="docs/screenshots/settings1.png" width="330" alt="Settings (sign-in & general)">
+  &nbsp;&nbsp;
+  <img src="docs/screenshots/settings2.png" width="330" alt="Settings (diagnostics & logs)">
 </p>
 
-*(Screenshots show the Chinese UI; English is available in Settings → Language.)*
+*(Screenshots show the light theme; dark theme and English UI are available in Settings.)*
 
 ## Install
 
