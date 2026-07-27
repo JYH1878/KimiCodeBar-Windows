@@ -1,5 +1,7 @@
 # KimiCodeBar for Windows
 
+**中文 | [English](README_EN.md)**
+
 [![GitHub release](https://img.shields.io/github/v/release/JYH1878/KimiCodeBar-Windows)](https://github.com/JYH1878/KimiCodeBar-Windows/releases)
 [![CI](https://github.com/JYH1878/KimiCodeBar-Windows/actions/workflows/ci.yml/badge.svg)](https://github.com/JYH1878/KimiCodeBar-Windows/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
