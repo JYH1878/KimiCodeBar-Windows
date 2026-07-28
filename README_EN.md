@@ -29,7 +29,7 @@ Built with **Tauri 2 + Rust + React**: installer under 3 MB, ~30–60 MB RAM in 
 - **Low-quota alerts**: tray icon turns red and a system notification fires when any window drops below the threshold (default 20%, configurable)
 - **Works offline**: last successful result is cached locally and shown without errors when the network is down
 - **Auto update**: silently checks GitHub Releases; an update badge appears in the panel when a new version is available
-- **Global hotkey**: summon/dismiss the panel anywhere (e.g. `Ctrl+Shift+K`, configurable, off by default)
+- **Global hotkey**: summon/dismiss the panel anywhere (e.g. `Ctrl+Shift+K`, record it by pressing the combo in Settings, off by default)
 - **CLI mode**: `kimicodebar.exe --status` prints quota JSON for scripts and CI (exit codes 0/1/2)
 - **Usage export**: one-click CSV/JSON export of your usage history for expense reports and reviews
 - **Launch at login**: optional, one toggle in Settings
