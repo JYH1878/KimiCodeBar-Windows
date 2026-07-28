@@ -153,7 +153,7 @@ Issues and PRs are welcome — please read [CONTRIBUTING.md](CONTRIBUTING.md) fi
 
 This project's behavior and API details (device flow, edge cases in usage parsing) were informed by:
 
-- [xifandev/KimiCodeBar](https://github.com/xifandev/KimiCodeBar) — the original macOS app (MIT license) and the inspiration for this project; its author is also building an official WinUI 3 Windows version with a different technical approach
+- [xifandev/KimiCodeBar](https://github.com/xifandev/KimiCodeBar) — the original macOS app (MIT license) and the inspiration for this project
 - [Golden0Voyager/kimi-code-usage](https://github.com/Golden0Voyager/kimi-code-usage) — Kimi Code usage CLI (Python), used as a reference
 - [Javis603/token-monitor](https://github.com/Javis603/token-monitor) — reference for the web console's monthly usage API
 
