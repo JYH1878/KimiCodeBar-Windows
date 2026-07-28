@@ -9,7 +9,7 @@
 
 A Windows system tray monitor for Kimi Code usage quotas. Sits quietly in the tray; one left-click shows your quota, and it turns red to warn you before you run out.
 
-Built with **Tauri 2 + Rust + React**: installer under 3 MB, ~30–60 MB RAM in daily use. **Bilingual UI (Chinese / English)** since v0.4.0.
+Built with **Tauri 2 + Rust + React**: installer under 3 MB, ~10–20 MB RAM in daily use. **Bilingual UI (Chinese / English)** since v0.4.0.
 
 > Community project, not an official Kimi product.
 
