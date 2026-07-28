@@ -79,6 +79,10 @@ export interface AppSettings {
   language?: string | null;
   /** 主题模式："system" / "dark" / "light"，默认 system */
   theme?: ThemeMode | null;
+  /** 面板背景图片文件名（后端配置目录内），null = 无自定义背景 */
+  background_image?: string | null;
+  /** 预设背景 id（night / aurora / violet / ember），null = 未选；生效时优先于 background_image */
+  background_preset?: string | null;
 }
 
 /** 凭证配置状态：get_credential_status 的返回 */

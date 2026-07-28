@@ -22,6 +22,7 @@ Built with **Tauri 2 + Rust + React**: installer under 3 MB, ~30–60 MB RAM in 
 - **Local token stats**: scans local `wire.jsonl` session logs for per-day token consumption (today/yesterday + 7-day bar chart + model breakdown) — no API needed
 - **Usage trend chart**: 24-hour dual-line history (7-day / 5-hour), recorded locally — facts only, no prediction
 - **Light / dark theme**: follows the system or switch manually
+- **Panel background**: preset gradients (Night / Aurora / Violet / Ember, each adapted to light & dark themes) or a custom image (PNG / JPG / WebP, ≤10MB), with translucent frosted cards
 - **Two sign-in methods**
   - **API Key**: paste a `sk-kimi-` key, stored in Windows Credential Manager
   - **Account authorization**: OAuth device flow (same as the Kimi Code CLI), one-click browser authorization with automatic token refresh

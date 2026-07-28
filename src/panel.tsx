@@ -1,11 +1,12 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { useTranslation } from "react-i18next";
 import "./styles.css";
 import i18n, { resolveLang } from "./i18n";
 import { useTheme } from "./theme";
 import type { HistoryPoint, LocalUsageStats, PanelState, QuotaDetail, UpdateInfo } from "./types";
-import { checkUpdate, getLocalUsage, getPanelState, getSettings, getUsageHistory, refreshNow, openSettings, openExternalUrl, onQuotaUpdated, onSettingsChanged, onUpdateInfo } from "./ipc";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { checkUpdate, getLocalUsage, getPanelState, getSettings, getUsageHistory, isTauri, refreshNow, openSettings, openExternalUrl, onQuotaUpdated, onSettingsChanged, onUpdateInfo } from "./ipc";
 import { UsageCard } from "./components/UsageCard";
 import { MonthlyCard } from "./components/MonthlyCard";
 import { TrendCard } from "./components/TrendCard";
@@ -22,6 +23,9 @@ function formatFetchedAt(epochSec: number): string {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
+/** 预设背景白名单（与后端 background.rs PRESETS / styles.css .bg-<id> 渐变一致；非法 id 按无背景处理） */
+const BG_PRESETS = ["night", "aurora", "violet", "ember"];
+
 /** 用量面板主界面（index.html 入口） */
 function PanelApp() {
   const { t } = useTranslation();
@@ -35,18 +39,45 @@ function PanelApp() {
   const [history, setHistory] = useState<HistoryPoint[] | null>(null);
   // 本地 token 消耗统计（本地统计卡用）；null = 尚未加载
   const [localUsage, setLocalUsage] = useState<LocalUsageStats | null>(null);
+  // 预设背景 id（纯 CSS 渐变 class）；null = 未选预设
+  const [bgPreset, setBgPreset] = useState<string | null>(null);
+  // 自定义背景图（kimibg:// 协议 URL）；null = 无图
+  const [bgImage, setBgImage] = useState<string | null>(null);
+  // 当前已加载背景（预设 + 文件名）：settings-changed 时按它判断要不要换（防每次保存都重拉图片）
+  const bgRef = useRef<{ preset: string | null; image: string | null }>({ preset: null, image: null });
   // 每分钟触发一次重渲染，让重置倒计时保持新鲜
   const [, setTick] = useState(0);
+
+  /** 按设置同步背景：预设（白名单校验，纯 CSS class）+ 自定义图（协议 URL，加版本 query 强制重拉） */
+  const syncBackground = useCallback((preset: string | null | undefined, filename: string | null | undefined) => {
+    const p = preset && BG_PRESETS.includes(preset) ? preset : null;
+    const name = filename ?? null;
+    if (p === bgRef.current.preset && name === bgRef.current.image) return;
+    bgRef.current = { preset: p, image: name };
+    setBgPreset(p);
+    if (name === null || !isTauri) {
+      setBgImage(null);
+      return;
+    }
+    // 同格式换图文件名不变，靠版本 query 让 webview 重新拉取（协议侧已 no-store）
+    setBgImage(`${convertFileSrc("bg", "kimibg")}?v=${Date.now()}`);
+  }, []);
 
   // 语言：挂载时读设置应用一次，之后跟随 settings-changed 广播即时切换
   useEffect(() => {
     getSettings()
-      .then((s) => void i18n.changeLanguage(resolveLang(s.language)))
+      .then((s) => {
+        void i18n.changeLanguage(resolveLang(s.language));
+        syncBackground(s.background_preset, s.background_image);
+      })
       .catch(() => {
         // 设置读取失败保持系统语言，不影响面板功能
       });
-    return onSettingsChanged((s) => void i18n.changeLanguage(resolveLang(s.language)));
-  }, []);
+    return onSettingsChanged((s) => {
+      void i18n.changeLanguage(resolveLang(s.language));
+      syncBackground(s.background_preset, s.background_image);
+    });
+  }, [syncBackground]);
 
   // 手动刷新：成功用返回值整体替换；失败把错误写进横幅，保留已有缓存
   const doRefresh = useCallback(async () => {
@@ -125,10 +156,17 @@ function PanelApp() {
     };
   }, [doRefresh]);
 
+  // 背景：预设为纯 CSS 渐变 class（底色干净，不压遮罩）；自定义图压固定浓度遮罩。预设优先于图片
+  const bgStyle =
+    bgPreset === null && bgImage !== null
+      ? { backgroundImage: `linear-gradient(var(--bg-scrim), var(--bg-scrim)), url("${bgImage}")` }
+      : undefined;
+  const panelCls = `panel${bgPreset !== null || bgImage !== null ? " has-bg" : ""}${bgPreset !== null ? ` bg-${bgPreset}` : ""}`;
+
   // 首屏：状态未返回，或后端加载中且没有缓存/错误可展示 → 居中加载动画
   if (state === null || (state.quota === null && state.error === null && state.loading)) {
     return (
-      <div className="panel loading-center">
+      <div className={`${panelCls} loading-center`} style={bgStyle}>
         <div className="spinner" />
         <p className="muted-text">{t("panel.loading")}</p>
       </div>
@@ -138,7 +176,7 @@ function PanelApp() {
   // 未配置凭证：只显示引导
   if (!state.credential) {
     return (
-      <div className="panel">
+      <div className={panelCls} style={bgStyle}>
         <EmptyState onOpenSettings={() => void openSettings()} />
       </div>
     );
@@ -160,7 +198,7 @@ function PanelApp() {
   const updateUrl = update?.has_update ? update.release_url : null;
 
   return (
-    <div className="panel">
+    <div className={panelCls} style={bgStyle}>
       {state.error !== null && (
         <ErrorBanner error={state.error} onRetry={() => void doRefresh()} />
       )}

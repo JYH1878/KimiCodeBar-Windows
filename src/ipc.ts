@@ -204,6 +204,8 @@ const mockDb = {
     hotkey: null,
     language: "system",
     theme: "system",
+    background_image: null,
+    background_preset: null,
   } as AppSettings,
   // 预置一个假 Key，方便浏览器开发时看到"已配置"徽标
   apiKey: "sk-kimi-mock9f8e7d6c5b4a" as string | null,
@@ -286,6 +288,44 @@ export async function resumeGlobalHotkey(): Promise<void> {
     return;
   }
   return invoke<void>("resume_global_hotkey");
+}
+
+// ============ 面板背景图片（静态图，PNG/JPG/WebP ≤10MB）============
+// 供图走后端 kimibg:// 自定义协议（面板用 convertFileSrc 取 URL），不经 IPC 搬字节
+
+/**
+ * 上传面板背景图（base64，不含 "data:..." 前缀）。
+ * 后端嗅探格式（GIF 拒绝）与大小（≤10MB），失败抛中文错误原样透传
+ */
+export async function setBackgroundImage(dataBase64: string): Promise<void> {
+  if (!isTauri) {
+    mockDb.settings.background_image = "background.png";
+    mockDb.settings.background_preset = null;
+    return;
+  }
+  return invoke<void>("set_background_image", { dataBase64 });
+}
+
+/** 清除面板背景（图片文件与预设都清掉，= 无背景；未设置过为空操作） */
+export async function clearBackgroundImage(): Promise<void> {
+  if (!isTauri) {
+    mockDb.settings.background_image = null;
+    mockDb.settings.background_preset = null;
+    return;
+  }
+  return invoke<void>("clear_background_image");
+}
+
+/**
+ * 选择预设背景（id 限 night / aurora / violet / ember；null = 取消预设，切回自定义图/无背景）。
+ * 不影响已上传的图片文件，失败抛中文错误原样透传
+ */
+export async function setBackgroundPreset(preset: string | null): Promise<void> {
+  if (!isTauri) {
+    mockDb.settings.background_preset = preset;
+    return;
+  }
+  return invoke<void>("set_background_preset", { preset });
 }
 
 /**

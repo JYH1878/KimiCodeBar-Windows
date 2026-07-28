@@ -50,6 +50,22 @@ fn main() {
             None,
         ))
         .plugin(tauri_plugin_opener::init())
+        // 自定义协议供面板背景图：大图（MB 级）走 IPC+CSS data URL 会断，
+        // 协议零拷贝直出。处理器忽略请求路径、只服务 settings 里配置的那张图（无路径穿越面）
+        .register_uri_scheme_protocol("kimibg", |_ctx, _req| {
+            match kimicodebar::background::load() {
+                Some((bytes, mime)) => tauri::http::Response::builder()
+                    .header("Content-Type", mime)
+                    // 同格式换图文件名不变，靠前端 URL 加版本 query 强制重拉，这里禁缓存兜底
+                    .header("Cache-Control", "no-store")
+                    .body(bytes)
+                    .unwrap_or_else(|_| tauri::http::Response::new(Vec::new())),
+                None => tauri::http::Response::builder()
+                    .status(404)
+                    .body(Vec::new())
+                    .unwrap_or_else(|_| tauri::http::Response::new(Vec::new())),
+            }
+        })
         // 启动时从 cache.json 预热最近一次配额（断网/未刷新也能展示）
         .manage(commands::AppState::new())
         .invoke_handler(tauri::generate_handler![
@@ -63,6 +79,9 @@ fn main() {
             commands::save_settings,
             commands::pause_global_hotkey,
             commands::resume_global_hotkey,
+            commands::set_background_image,
+            commands::clear_background_image,
+            commands::set_background_preset,
             commands::set_api_key,
             commands::clear_api_key,
             commands::get_credential_status,

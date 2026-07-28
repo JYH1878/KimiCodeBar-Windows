@@ -45,6 +45,12 @@ pub struct AppSettings {
     /// （types.ts 标为可选，反序列化容忍缺省）
     #[serde(default)]
     pub theme: Option<String>,
+    /// 面板背景图片文件名（存于配置目录），None 表示无自定义背景
+    #[serde(default)]
+    pub background_image: Option<String>,
+    /// 预设背景 id（night / aurora / violet / ember），None 表示未选；生效时优先于 image
+    #[serde(default)]
+    pub background_preset: Option<String>,
 }
 
 impl From<storage::Settings> for AppSettings {
@@ -58,6 +64,8 @@ impl From<storage::Settings> for AppSettings {
             hotkey: s.hotkey,
             language: s.language,
             theme: s.theme,
+            background_image: s.background_image,
+            background_preset: s.background_preset,
         }
     }
 }
@@ -73,6 +81,8 @@ impl From<AppSettings> for storage::Settings {
             hotkey: s.hotkey,
             language: s.language,
             theme: s.theme,
+            background_image: s.background_image,
+            background_preset: s.background_preset,
         }
     }
 }
@@ -598,6 +608,35 @@ pub fn resume_global_hotkey(app: AppHandle) {
     if let Err(e) = crate::hotkey::resume(&app) {
         tracing::warn!("恢复全局热键失败: {e}");
     }
+}
+
+/// 保存面板背景图片（base64 静态图）：后端嗅探校验格式与大小后写入配置目录，
+/// 成功后广播 settings-changed，面板即时换背景
+#[tauri::command]
+pub fn set_background_image(app: AppHandle, data_base64: String) -> Result<(), String> {
+    kimicodebar::background::set_base64(&data_base64)?;
+    let settings = storage::load_settings().unwrap_or_default();
+    let _ = app.emit("settings-changed", AppSettings::from(settings));
+    Ok(())
+}
+
+/// 清除面板背景图片并广播 settings-changed（未设置过为空操作）
+#[tauri::command]
+pub fn clear_background_image(app: AppHandle) -> Result<(), String> {
+    kimicodebar::background::clear()?;
+    let settings = storage::load_settings().unwrap_or_default();
+    let _ = app.emit("settings-changed", AppSettings::from(settings));
+    Ok(())
+}
+
+/// 选择预设背景（preset 为 None 表示取消预设，切回自定义图/无背景），
+/// 后端白名单校验后落盘并广播 settings-changed，面板即时换背景
+#[tauri::command]
+pub fn set_background_preset(app: AppHandle, preset: Option<String>) -> Result<(), String> {
+    kimicodebar::background::set_preset(preset.as_deref())?;
+    let settings = storage::load_settings().unwrap_or_default();
+    let _ = app.emit("settings-changed", AppSettings::from(settings));
+    Ok(())
 }
 
 #[tauri::command]

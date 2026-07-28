@@ -29,6 +29,8 @@
   --ok-bg: rgba(158, 206, 106, 0.12);
   --warn: #e0af68;
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+  /* 自定义背景图上的遮罩（深色：主题底色 45% 透明），压图保卡片文字可读 */
+  --bg-scrim: rgba(26, 27, 38, 0.45);
 
   font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
   background-color: var(--bg);
@@ -50,6 +52,8 @@
   --track: #e5e7eb;
   --seg-kimi: #9aa8bd;
   --shadow: 0 2px 8px rgba(31, 35, 40, 0.08);
+  /* 浅色主题对应的背景遮罩（浅色底 45% 透明） */
+  --bg-scrim: rgba(245, 246, 250, 0.45);
 }
 
 * {
@@ -79,6 +83,117 @@ body,
   overflow-y: auto;
   overflow-x: hidden;
   background-color: var(--bg);
+}
+
+/* 有自定义背景时：铺满居中（background-image 由面板内联样式注入：遮罩渐变 + 图片）。
+   卡片/底栏按钮改半透明 + 毛玻璃，让背景图透出来（无背景时保持实色，设置页不受影响） */
+.panel.has-bg {
+  background-size: cover;
+  background-position: center;
+  --card-bg: rgba(36, 40, 59, 0.35);
+  --card-hover: rgba(41, 46, 66, 0.5);
+}
+
+[data-theme="light"] .panel.has-bg {
+  --card-bg: rgba(255, 255, 255, 0.35);
+  --card-hover: rgba(238, 240, 246, 0.5);
+}
+
+/* 卡片毛玻璃（半透明度由上方 --card-bg 覆盖驱动，按钮用同一变量自动跟随） */
+.panel.has-bg .pcard {
+  backdrop-filter: blur(16px);
+}
+
+/* 底栏去掉垫底卡片，文字与按钮直接浮在背景上 */
+.panel.has-bg .footer {
+  background-color: transparent;
+}
+
+/* 预设渐变背景（面板根与设置页色卡预览共用同一 class；深浅主题各自适配一套色），
+   与后端 background.rs 的 PRESETS 白名单一一对应 */
+.bg-night {
+  background-image: linear-gradient(160deg, #161722, #232741);
+}
+
+.bg-aurora {
+  background-image: linear-gradient(160deg, #14201f, #1c3345);
+}
+
+.bg-violet {
+  background-image: linear-gradient(160deg, #1e1a2e, #32224a);
+}
+
+.bg-ember {
+  background-image: linear-gradient(160deg, #241a18, #412721);
+}
+
+[data-theme="light"] .bg-night {
+  background-image: linear-gradient(160deg, #eef1f8, #dde3f0);
+}
+
+[data-theme="light"] .bg-aurora {
+  background-image: linear-gradient(160deg, #e4f3ef, #d9ebf5);
+}
+
+[data-theme="light"] .bg-violet {
+  background-image: linear-gradient(160deg, #f2edfa, #e4daf5);
+}
+
+[data-theme="light"] .bg-ember {
+  background-image: linear-gradient(160deg, #faf0e9, #f5ded2);
+}
+
+/* 设置页背景选择色卡：36×28 预览块，选中态 accent 描边 */
+.bg-swatches {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.bg-swatch {
+  width: 36px;
+  height: 28px;
+  padding: 0;
+  border-radius: 6px;
+  border: 2px solid var(--border);
+  background-color: var(--card-bg);
+  cursor: pointer;
+  overflow: hidden;
+  transition: border-color 0.15s ease;
+}
+
+.bg-swatch:hover {
+  border-color: var(--border-hover);
+}
+
+.bg-swatch.selected {
+  border-color: var(--accent);
+}
+
+/* "无背景"色卡：卡片底色 + 斜杠 */
+.bg-swatch.bg-none {
+  background-image: linear-gradient(
+    to top right,
+    transparent 46%,
+    var(--faint) 46%,
+    var(--faint) 54%,
+    transparent 54%
+  );
+}
+
+/* 自定义图片色卡里的缩略图 */
+.bg-swatch img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* 未上传图片时自定义色卡的 "+" 占位 */
+.bg-plus {
+  color: var(--muted);
+  font-size: 16px;
+  line-height: 24px;
 }
 
 /* 面板通用卡片（与设置页 .card 区分，左对齐、内边距更紧凑） */
@@ -539,6 +654,13 @@ body,
   width: 190px;
   cursor: pointer;
   caret-color: transparent;
+}
+
+/* 面板背景行的按钮组（徽标 + 选择/清除按钮右对齐） */
+.bg-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .input-row {

@@ -18,6 +18,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 urlencoding = "2"
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
+base64 = "0.22"
 keyring = { version = "3", features = ["windows-native"] }
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"

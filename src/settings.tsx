@@ -19,6 +19,7 @@ import {
   saveSettings,
 } from "./ipc";
 import { ApiKeySection } from "./components/ApiKeySection";
+import { BackgroundRow } from "./components/BackgroundRow";
 import { DeviceLoginSection } from "./components/DeviceLoginSection";
 import { HotkeyInput } from "./components/HotkeyInput";
 import { WebTokenSection } from "./components/WebTokenSection";
@@ -89,6 +90,15 @@ function SettingsApp() {
       setStatus(await getCredentialStatus());
     } catch {
       // 状态拉取失败不打断设置页，下次操作时再试
+    }
+  }, []);
+
+  /** 背景图上传/清除后重拉设置：保持 settings 状态新鲜，保存通用设置时原样透传不丢字段 */
+  const reloadSettings = useCallback(async () => {
+    try {
+      setSettings(await getSettings());
+    } catch {
+      // 拉取失败不打断设置页，下次操作时再试
     }
   }, []);
 
@@ -215,6 +225,9 @@ function SettingsApp() {
       language: form.language,
       // 主题随通用设置一起持久化；保存成功后后端广播 settings-changed，两个窗口即时切换
       theme: form.theme as ThemeMode,
+      // 背景（预设/图片）由专属命令直写（BackgroundRow 成功后已 reloadSettings），此处原样透传
+      background_image: settings.background_image ?? null,
+      background_preset: settings.background_preset ?? null,
     };
     setSavingGeneral(true);
     setGeneralError(null);
@@ -434,6 +447,11 @@ function SettingsApp() {
             <option value="light">{t("settings.general.themeLight")}</option>
           </select>
         </div>
+        <BackgroundRow
+          preset={settings.background_preset ?? null}
+          imageSet={settings.background_image != null}
+          onChanged={() => void reloadSettings()}
+        />
         {generalError !== null && <p className="hint-err">{generalError}</p>}
         <div className="row-end">
           {generalSaved && <span className="hint-ok">{t("settings.general.saved")}</span>}

@@ -46,6 +46,13 @@ pub struct Settings {
     /// 主题模式："system" / "dark" / "light"；None 等同 "system"（跟随系统明暗）
     #[serde(default)]
     pub theme: Option<String>,
+    /// 面板背景图片文件名（如 "background.png"，存于配置目录），None 表示无自定义背景
+    #[serde(default)]
+    pub background_image: Option<String>,
+    /// 预设背景 id（night / aurora / violet / ember），None 表示未选预设。
+    /// 生效规则：preset 优先于 image；两者皆 None 为无背景（background.rs 注释有完整互斥说明）
+    #[serde(default)]
+    pub background_preset: Option<String>,
 }
 
 const fn default_refresh_interval_min() -> u32 {
@@ -71,6 +78,8 @@ impl Default for Settings {
             hotkey: None,
             language: None,
             theme: None,
+            background_image: None,
+            background_preset: None,
         }
     }
 }
@@ -217,6 +226,8 @@ mod tests {
             hotkey: Some("Ctrl+Shift+K".to_string()),
             language: Some("zh".to_string()),
             theme: Some("light".to_string()),
+            background_image: Some("background.png".to_string()),
+            background_preset: None,
         };
         save_settings(&settings).unwrap();
         assert!(dir.join("settings.json").exists());
@@ -278,6 +289,10 @@ mod tests {
         assert!(settings.language.is_none());
         // 旧版设置文件无 theme 字段：读回 None（等同 "system" 跟随系统明暗）
         assert!(settings.theme.is_none());
+        // 旧版设置文件无 background_image 字段：读回 None（无自定义背景）
+        assert!(settings.background_image.is_none());
+        // 旧版设置文件无 background_preset 字段：读回 None（未选预设背景）
+        assert!(settings.background_preset.is_none());
 
         cleanup(&dir);
     }
