@@ -534,9 +534,11 @@ body,
   text-align: right;
 }
 
-/* 全局热键文本输入框（表单行右侧，比数字框宽） */
+/* 全局热键录制输入框（表单行右侧，比数字框宽；只读录制，隐藏文本光标） */
 .hotkey-input {
   width: 190px;
+  cursor: pointer;
+  caret-color: transparent;
 }
 
 .input-row {

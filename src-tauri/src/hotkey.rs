@@ -1,7 +1,9 @@
-//! 全局热键：用户输入规范化 + 注册/重注册（tauri-plugin-global-shortcut）。
+//! 全局热键：用户输入规范化 + 注册/重注册（tauri-plugin-global-shortcut）+ 录制期暂停/恢复。
 //!
 //! 设置里的热键为空（None/空串）表示禁用；保存设置时先全量注销再按新值注册，
 //! 被其他程序占用时返回中文错误"热键注册失败：可能被其他程序占用"。
+//! 设置页录制热键期间先 pause 注销（否则已注册的组合被系统拦截，录制框收不到按键），
+//! 录制结束由 resume 按已保存设置恢复。
 
 use tauri::AppHandle;
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
@@ -80,6 +82,20 @@ pub fn apply(app: &AppHandle, hotkey: Option<&str>) -> Result<(), String> {
     })?;
     tracing::info!("全局热键已注册: {normalized}");
     Ok(())
+}
+
+/// 录制热键期间临时注销所有全局热键（录制结束由 resume 恢复）。
+/// 注销失败只记日志：可能只是本来就没注册过
+pub fn pause(app: &AppHandle) {
+    if let Err(e) = app.global_shortcut().unregister_all() {
+        tracing::warn!("录制前注销全局热键失败: {e}");
+    }
+}
+
+/// 录制结束后恢复：按已保存的设置重新注册（未保存的录制值不生效）
+pub fn resume(app: &AppHandle) -> Result<(), String> {
+    let settings = kimicodebar::storage::load_settings().unwrap_or_default();
+    apply(app, settings.hotkey.as_deref())
 }
 
 /// 主键段规范化：纯 ASCII 字母数字整体大写（k → K、f4 → F4），其余原样保留

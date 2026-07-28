@@ -20,6 +20,7 @@ import {
 } from "./ipc";
 import { ApiKeySection } from "./components/ApiKeySection";
 import { DeviceLoginSection } from "./components/DeviceLoginSection";
+import { HotkeyInput } from "./components/HotkeyInput";
 import { WebTokenSection } from "./components/WebTokenSection";
 
 /** 通用设置表单的本地状态（数字输入框先按字符串持有，保存时解析钳制） */
@@ -28,7 +29,7 @@ interface GeneralForm {
   lowWarn: boolean;
   threshold: string;
   autostart: boolean;
-  /** 全局热键文本（原样持有输入，保存时 trim，空串→null 禁用） */
+  /** 全局热键文本（由 HotkeyInput 录制写入，保存时 trim，空串→null 禁用） */
   hotkey: string;
   /** 界面语言（"system"/"zh"/"en"，改动立即本地预览，随保存持久化） */
   language: string;
@@ -197,10 +198,10 @@ function SettingsApp() {
     }
   };
 
-  /** 保存通用设置：数字项解析后钳制（间隔 ≥1 分钟，阈值 1–99） */
+  /** 保存通用设置：数字项解析后钳制（间隔 1–60 分钟，阈值 1–99） */
   const saveGeneral = async () => {
     if (settings === null) return;
-    const refreshMin = Math.max(1, Math.floor(Number(form.refreshMin)) || 5);
+    const refreshMin = Math.min(60, Math.max(1, Math.floor(Number(form.refreshMin)) || 5));
     const threshold = Math.min(99, Math.max(1, Math.floor(Number(form.threshold)) || 20));
     const next: AppSettings = {
       login_method: method,
@@ -366,6 +367,7 @@ function SettingsApp() {
             className="input num-input"
             type="number"
             min={1}
+            max={60}
             step={1}
             value={form.refreshMin}
             onChange={(e) => setForm((f) => ({ ...f, refreshMin: e.target.value }))}
@@ -402,20 +404,10 @@ function SettingsApp() {
             onChange={(e) => setForm((f) => ({ ...f, autostart: e.target.checked }))}
           />
         </div>
-        <div className="form-row">
-          <label htmlFor="hotkey">{t("settings.general.hotkey")}</label>
-          <input
-            id="hotkey"
-            className="input hotkey-input"
-            type="text"
-            placeholder={t("settings.general.hotkeyPlaceholder")}
-            value={form.hotkey}
-            onChange={(e) => setForm((f) => ({ ...f, hotkey: e.target.value }))}
-            spellCheck={false}
-            autoComplete="off"
-          />
-        </div>
-        <p className="hint-muted">{t("settings.general.hotkeyHint")}</p>
+        <HotkeyInput
+          value={form.hotkey}
+          onChange={(v) => setForm((f) => ({ ...f, hotkey: v }))}
+        />
         <div className="form-row">
           <label htmlFor="language">{t("settings.general.language")}</label>
           <select

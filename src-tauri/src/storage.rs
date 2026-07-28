@@ -12,8 +12,10 @@ use crate::quota::KimiQuota;
 
 /// 默认刷新间隔（分钟）
 pub const DEFAULT_REFRESH_INTERVAL_MIN: u32 = 5;
-/// 最小刷新间隔（分钟），加载时小于该值会被钳制
+/// 最小刷新间隔（分钟），加载/保存时小于该值会被钳制
 pub const MIN_REFRESH_INTERVAL_MIN: u32 = 1;
+/// 最大刷新间隔（分钟），加载/保存时大于该值会被钳制
+pub const MAX_REFRESH_INTERVAL_MIN: u32 = 60;
 /// 默认低额度告警阈值（剩余百分比）
 pub const DEFAULT_WARN_THRESHOLD_PCT: f64 = 20.0;
 
@@ -23,13 +25,13 @@ pub struct Settings {
     /// 登录方式："api_key" / "oauth"；None 表示未显式选择（优先 api_key，其次 oauth）
     #[serde(default)]
     pub login_method: Option<String>,
-    /// 后台轮询间隔（分钟），默认 5，最小 1
+    /// 后台轮询间隔（分钟），默认 5，范围 1–60
     #[serde(default = "default_refresh_interval_min")]
     pub refresh_interval_min: u32,
     /// 低额度时是否发系统通知，默认开
     #[serde(default = "default_low_warn_enabled")]
     pub low_warn_enabled: bool,
-    /// 低额度告警阈值（剩余百分比，严格小于触发），默认 20.0
+    /// 低额度告警阈值（剩余百分比，严格小于触发），默认 20.0，范围 1–99
     #[serde(default = "default_warn_threshold_pct")]
     pub warn_threshold_pct: f64,
     /// 开机自启动，默认关
@@ -92,7 +94,7 @@ pub struct CachedQuota {
 }
 
 /// 读取设置：文件不存在 → 默认；损坏 → 默认；其他 IO 错误 → Err。
-/// 加载后刷新间隔钳制到最小 1 分钟。
+/// 加载后刷新间隔钳制到 1–60 分钟、告警阈值钳制到 1–99（防手改 json 越界）。
 pub fn load_settings() -> Result<Settings, String> {
     let path = settings_file_path();
     let text = match std::fs::read_to_string(&path) {
@@ -102,9 +104,10 @@ pub fn load_settings() -> Result<Settings, String> {
     };
     // 损坏文件容忍为默认（与 oauth::load_credentials 的语义一致）
     let mut settings: Settings = serde_json::from_str(&text).unwrap_or_default();
-    if settings.refresh_interval_min < MIN_REFRESH_INTERVAL_MIN {
-        settings.refresh_interval_min = MIN_REFRESH_INTERVAL_MIN;
-    }
+    settings.refresh_interval_min = settings
+        .refresh_interval_min
+        .clamp(MIN_REFRESH_INTERVAL_MIN, MAX_REFRESH_INTERVAL_MIN);
+    settings.warn_threshold_pct = settings.warn_threshold_pct.clamp(1.0, 99.0);
     Ok(settings)
 }
 
@@ -289,6 +292,28 @@ mod tests {
         let settings = load_settings().unwrap();
         assert_eq!(settings.refresh_interval_min, 1);
         assert_eq!(settings.refresh_interval_secs(), 60);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn settings_out_of_range_values_clamped_on_load() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = use_temp_config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        // 手改 json 越界：刷新间隔 >60、阈值 <1 / >99 都在加载时钳回范围内
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"refresh_interval_min":3600,"warn_threshold_pct":0}"#,
+        )
+        .unwrap();
+
+        let settings = load_settings().unwrap();
+        assert_eq!(settings.refresh_interval_min, MAX_REFRESH_INTERVAL_MIN);
+        assert_eq!(settings.warn_threshold_pct, 1.0);
+
+        std::fs::write(dir.join("settings.json"), r#"{"warn_threshold_pct":150}"#).unwrap();
+        assert_eq!(load_settings().unwrap().warn_threshold_pct, 99.0);
 
         cleanup(&dir);
     }

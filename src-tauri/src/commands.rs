@@ -29,11 +29,11 @@ const STALE_SECS: i64 = 60;
 pub struct AppSettings {
     /// 登录方式："api_key" / "oauth"；None 表示未显式选择（优先 api_key，其次 oauth）
     pub login_method: Option<String>,
-    /// 自动刷新间隔（分钟，最小 1，默认 5）
+    /// 自动刷新间隔（分钟，1–60，默认 5）
     pub refresh_interval_min: u32,
     /// 低额度告警开关
     pub low_warn_enabled: bool,
-    /// 告警阈值（剩余百分比）
+    /// 告警阈值（剩余百分比，1–99）
     pub warn_threshold_pct: f64,
     /// 开机自启（保存时同步注册表）
     pub autostart: bool,
@@ -549,9 +549,10 @@ pub fn get_settings() -> AppSettings {
 pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
     let mut settings: storage::Settings = settings.into();
     // 钳制非法值（与 load_settings 的加载钳制语义一致）
-    settings.refresh_interval_min = settings
-        .refresh_interval_min
-        .max(storage::MIN_REFRESH_INTERVAL_MIN);
+    settings.refresh_interval_min = settings.refresh_interval_min.clamp(
+        storage::MIN_REFRESH_INTERVAL_MIN,
+        storage::MAX_REFRESH_INTERVAL_MIN,
+    );
     settings.warn_threshold_pct = settings.warn_threshold_pct.clamp(1.0, 99.0);
     storage::save_settings(&settings)?;
 
@@ -581,6 +582,22 @@ pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String
     // 前端两窗口监听后即时切换语言等；热键失败走 ? 提前返回，不会广播半成品
     let _ = app.emit("settings-changed", AppSettings::from(settings));
     Ok(())
+}
+
+/// 设置页录制热键前调用：临时注销所有全局热键，
+/// 否则已注册的组合被系统全局拦截，录制输入框收不到按键
+#[tauri::command]
+pub fn pause_global_hotkey(app: AppHandle) {
+    crate::hotkey::pause(&app);
+}
+
+/// 录制结束（成功/取消/失焦）调用：按已保存设置重新注册；
+/// 恢复失败只记日志——下次保存设置时会再次尝试
+#[tauri::command]
+pub fn resume_global_hotkey(app: AppHandle) {
+    if let Err(e) = crate::hotkey::resume(&app) {
+        tracing::warn!("恢复全局热键失败: {e}");
+    }
 }
 
 #[tauri::command]

@@ -61,6 +61,8 @@ fn main() {
             commands::open_settings,
             commands::get_settings,
             commands::save_settings,
+            commands::pause_global_hotkey,
+            commands::resume_global_hotkey,
             commands::set_api_key,
             commands::clear_api_key,
             commands::get_credential_status,

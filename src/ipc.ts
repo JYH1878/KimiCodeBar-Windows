@@ -270,6 +270,24 @@ export async function saveSettings(settings: AppSettings): Promise<void> {
   return invoke<void>("save_settings", { settings });
 }
 
+/** 录制全局热键前暂停全局热键注册（否则已注册的组合被系统拦截，录制框收不到按键） */
+export async function pauseGlobalHotkey(): Promise<void> {
+  if (!isTauri) {
+    console.info("[mock] pause_global_hotkey");
+    return;
+  }
+  return invoke<void>("pause_global_hotkey");
+}
+
+/** 录制结束后按已保存设置恢复全局热键（未保存的录制值不生效） */
+export async function resumeGlobalHotkey(): Promise<void> {
+  if (!isTauri) {
+    console.info("[mock] resume_global_hotkey");
+    return;
+  }
+  return invoke<void>("resume_global_hotkey");
+}
+
 /**
  * 订阅后端广播的设置变更（settings-changed 事件，payload 为 AppSettings；
  * save_settings 成功后触发，两个窗口据此即时切换语言）。
