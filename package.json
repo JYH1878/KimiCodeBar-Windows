@@ -9,7 +9,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "tauri": "tauri",
-    "bump": "node scripts/bump-version.mjs"
+    "bump": "node scripts/bump-version.mjs",
+    "bump-bucket": "node scripts/update-scoop-bucket.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

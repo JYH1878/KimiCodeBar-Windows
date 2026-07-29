@@ -53,6 +53,8 @@ Built with **Tauri 2 + Rust + React**: installer under 3 MB, ~10–20 MB RAM in 
 
 **Option 2 · Portable**: download `KimiCodeBar_x.x.x_x64-portable.zip`, extract anywhere and run `kimicodebar.exe`. No registry writes. Note: settings and cache still live in `%APPDATA%\KimiCodeBar\` (set the `KIMICODEBAR_CONFIG_DIR` environment variable to relocate them).
 
+**Option 3 · Scoop**: `scoop bucket add kimicodebar https://github.com/JYH1878/scoop-bucket`, then `scoop install kimicodebar/kimicodebar` (installs the portable build; config still lives in `%APPDATA%\KimiCodeBar\`; upgrade later with `scoop update kimicodebar`).
+
 On first launch the icon sits in the system tray (possibly inside the "hidden icons" overflow — drag it out).
 
 Requirements: Windows 10 1809+ / Windows 11; WebView2 Runtime (preinstalled on Windows 11; the installer will prompt if missing).
