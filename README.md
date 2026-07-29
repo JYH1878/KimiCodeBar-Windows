@@ -146,7 +146,7 @@ cd src-tauri && cargo test
 
 本项目的行为语义与 API 细节（设备码流程、用量响应解析的边界情况）参考了以下项目：
 
-- [xifandev/KimiCodeBar](https://github.com/xifandev/KimiCodeBar) — macOS 原版（MIT 协议），本项目的灵感来源
+- [xifandev/KimiCodeBar](https://github.com/xifandev/KimiCodeBar) — macOS 原版（MIT 协议），本项目的灵感来源；其[官网](https://xifandev.github.io/KimiCodeBar/)与仓库描述已将 Windows 下载指向本项目
 - [Golden0Voyager/kimi-code-usage](https://github.com/Golden0Voyager/kimi-code-usage) — Kimi Code 用量 CLI（Python）参考
 
 ## License
