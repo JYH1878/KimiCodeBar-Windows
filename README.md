@@ -12,6 +12,8 @@ Kimi Code 用量监控的 Windows 系统托盘工具。常驻托盘不打扰，�
 基于 **Tauri 2 + Rust + React** 构建：安装包不到 3 MB，运行内存约 10–20 MB。
 
 > 社区版本，非 Kimi 官方出品。
+>
+> **macOS 用户请移步原版 [xifandev/KimiCodeBar](https://github.com/xifandev/KimiCodeBar)**（由 @xifandev 维护，[官网](https://xifandev.github.io/KimiCodeBar/)）——本项目是经原作者认可的 Windows 社区移植版，两仓库分治、各自独立发版。
 
 ## 功能特性
 

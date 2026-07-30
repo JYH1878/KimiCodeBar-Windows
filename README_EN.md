@@ -12,6 +12,8 @@ A Windows system tray monitor for Kimi Code usage quotas. Sits quietly in the tr
 Built with **Tauri 2 + Rust + React**: installer under 3 MB, ~10–20 MB RAM in daily use. **Bilingual UI (Chinese / English)** since v0.4.0.
 
 > Community project, not an official Kimi product.
+>
+> **On macOS? Use the original [xifandev/KimiCodeBar](https://github.com/xifandev/KimiCodeBar)** (maintained by @xifandev, [official site](https://xifandev.github.io/KimiCodeBar/)) — this repo is the author-endorsed community port for Windows; the two repos are maintained and released independently.
 
 ## Features
 
