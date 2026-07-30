@@ -156,8 +156,7 @@ export function DeviceLoginSection({ oauthConfigured, onChanged }: DeviceLoginSe
   // 已授权登录：状态徽标 + 退出登录
   if (loggedIn) {
     return (
-      <section className="scard">
-        <h2 className="scard-title">{t("deviceLogin.title")}</h2>
+      <div className="login-body">
         <div className="cred-row">
           <span className="badge">{t("deviceLogin.signedIn")}</span>
         </div>
@@ -172,7 +171,7 @@ export function DeviceLoginSection({ oauthConfigured, onChanged }: DeviceLoginSe
             {t("deviceLogin.logout")}
           </button>
         </div>
-      </section>
+      </div>
     );
   }
 
@@ -180,8 +179,7 @@ export function DeviceLoginSection({ oauthConfigured, onChanged }: DeviceLoginSe
   if (dl !== null && dl.status === "waiting") {
     const url = dl.verification_uri_complete ?? dl.verification_uri;
     return (
-      <section className="scard">
-        <h2 className="scard-title">{t("deviceLogin.title")}</h2>
+      <div className="login-body">
         <p className="hint-muted">{t("deviceLogin.waitingHint")}</p>
         <button
           type="button"
@@ -210,29 +208,27 @@ export function DeviceLoginSection({ oauthConfigured, onChanged }: DeviceLoginSe
             {t("deviceLogin.cancel")}
           </button>
         </div>
-      </section>
+      </div>
     );
   }
 
   // 失败：红色错误文案 + 重试
   if (dl !== null && dl.status === "error") {
     return (
-      <section className="scard">
-        <h2 className="scard-title">{t("deviceLogin.title")}</h2>
+      <div className="login-body">
         <p className="hint-err">{dl.error ?? t("deviceLogin.failed")}</p>
         <div className="row-end">
           <button type="button" className="btn primary" onClick={() => void start()} disabled={busy}>
             {t("deviceLogin.retry")}
           </button>
         </div>
-      </section>
+      </div>
     );
   }
 
   // 默认（未登录）：引导文案 + 开始授权
   return (
-    <section className="scard">
-      <h2 className="scard-title">{t("deviceLogin.title")}</h2>
+    <div className="login-body">
       <p className="hint-muted">{t("deviceLogin.introHint")}</p>
       {actionError !== null && <p className="hint-err">{actionError}</p>}
       <div className="row-end">
@@ -240,6 +236,6 @@ export function DeviceLoginSection({ oauthConfigured, onChanged }: DeviceLoginSe
           {busy ? t("deviceLogin.starting") : t("deviceLogin.start")}
         </button>
       </div>
-    </section>
+    </div>
   );
 }

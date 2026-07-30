@@ -85,8 +85,8 @@ body,
   background-color: var(--bg);
 }
 
-/* 有自定义背景时：铺满居中（background-image 由面板内联样式注入：遮罩渐变 + 图片）。
-   卡片/底栏按钮改半透明 + 毛玻璃，让背景图透出来（无背景时保持实色，设置页不受影响） */
+/* 有自定义背景时：铺满居中（background-image 由面板/设置页内联样式注入：遮罩渐变 + 图片）。
+   卡片/底栏按钮改半透明 + 毛玻璃，让背景图透出来（无背景时保持实色） */
 .panel.has-bg {
   background-size: cover;
   background-position: center;
@@ -590,6 +590,32 @@ body,
   font-size: 13px;
   font-weight: 600;
   color: var(--text);
+}
+
+/* 设置页背景（与面板 .panel.has-bg 同款）：铺满居中，卡片半透明 + 毛玻璃让背景透出来；
+   预设渐变复用共用 class .bg-<id>，自定义图由内联样式注入遮罩 + 图片 */
+.settings.has-bg {
+  background-size: cover;
+  background-position: center;
+  --card-bg: rgba(36, 40, 59, 0.35);
+  --card-hover: rgba(41, 46, 66, 0.5);
+}
+
+[data-theme="light"] .settings.has-bg {
+  --card-bg: rgba(255, 255, 255, 0.35);
+  --card-hover: rgba(238, 240, 246, 0.5);
+}
+
+/* 卡片毛玻璃（按钮用同一 --card-bg 变量自动跟随） */
+.settings.has-bg .scard {
+  backdrop-filter: blur(16px);
+}
+
+/* 登录卡片内嵌的配置区（方式A/方式B 内容）：替代原独立卡片的纵向排列 */
+.login-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 /* --- 登录方式单选 --- */

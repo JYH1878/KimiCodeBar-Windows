@@ -104,8 +104,7 @@ export function ApiKeySection({ status, onChanged }: ApiKeySectionProps) {
   };
 
   return (
-    <section className="scard">
-      <h2 className="scard-title">{t("apiKey.title")}</h2>
+    <div className="login-body">
       {configured && masked !== null && (
         <div className="cred-row">
           <span className="mono-text">{masked}</span>
@@ -158,6 +157,6 @@ export function ApiKeySection({ status, onChanged }: ApiKeySectionProps) {
           {t("apiKey.save")}
         </button>
       </div>
-    </section>
+    </div>
   );
 }

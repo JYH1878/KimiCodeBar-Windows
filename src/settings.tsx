@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { getVersion } from "@tauri-apps/api/app";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import { useTranslation } from "react-i18next";
 import "./styles.css";
 import i18n, { resolveLang } from "./i18n";
@@ -23,6 +24,9 @@ import { BackgroundRow } from "./components/BackgroundRow";
 import { DeviceLoginSection } from "./components/DeviceLoginSection";
 import { HotkeyInput } from "./components/HotkeyInput";
 import { WebTokenSection } from "./components/WebTokenSection";
+
+/** 预设背景白名单（与后端 background.rs PRESETS / styles.css .bg-<id> 渐变一致；非法 id 按无背景处理） */
+const BG_PRESETS = ["night", "aurora", "violet", "ember"];
 
 /** 通用设置表单的本地状态（数字输入框先按字符串持有，保存时解析钳制） */
 interface GeneralForm {
@@ -83,6 +87,31 @@ function SettingsApp() {
   const [updateFound, setUpdateFound] = useState<UpdateInfo | null>(null);
   const [updateMsg, setUpdateMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const updateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 折叠卡片展开态：登录 / 通用设置 / 诊断与日志（默认收起；无任何凭证时登录卡自动展开引导配置）
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [generalOpen, setGeneralOpen] = useState(false);
+  const [diagOpen, setDiagOpen] = useState(false);
+  // 预设背景 id（纯 CSS 渐变 class）；null = 未选预设
+  const [bgPreset, setBgPreset] = useState<string | null>(null);
+  // 自定义背景图（kimibg:// 协议 URL）；null = 无图
+  const [bgImage, setBgImage] = useState<string | null>(null);
+  // 当前已加载背景（预设 + 文件名）：settings-changed 时按它判断要不要换（防每次保存都重拉图片）
+  const bgRef = useRef<{ preset: string | null; image: string | null }>({ preset: null, image: null });
+
+  /** 按设置同步背景（与面板 panel.tsx 同一套逻辑）：预设白名单校验 + 自定义图协议 URL 加版本 query */
+  const syncBackground = useCallback((preset: string | null | undefined, filename: string | null | undefined) => {
+    const p = preset && BG_PRESETS.includes(preset) ? preset : null;
+    const name = filename ?? null;
+    if (p === bgRef.current.preset && name === bgRef.current.image) return;
+    bgRef.current = { preset: p, image: name };
+    setBgPreset(p);
+    if (name === null || !isTauri) {
+      setBgImage(null);
+      return;
+    }
+    // 同格式换图文件名不变，靠版本 query 让 webview 重新拉取（协议侧已 no-store）
+    setBgImage(`${convertFileSrc("bg", "kimibg")}?v=${Date.now()}`);
+  }, []);
 
   /** 重新拉取凭证状态（Key 保存/清除、OAuth 登录/退出后调用） */
   const reloadStatus = useCallback(async () => {
@@ -127,19 +156,24 @@ function SettingsApp() {
         });
         // 应用持久化的语言（初始渲染用的是系统语言兜底）
         void i18n.changeLanguage(resolveLang(s.language));
+        // 背景（预设/图片）与面板同步应用
+        syncBackground(s.background_preset, s.background_image);
+        // 两种凭证都没配过（首装）：登录卡自动展开，引导先配置
+        if (!st.api_key_configured && !st.oauth_configured) setLoginOpen(true);
       } catch (e) {
         if (alive) setLoadError(String(e));
       }
     })();
-    // 跟随后端 save_settings 广播的设置变更即时切换语言
-    const unlistenSettings = onSettingsChanged((s) =>
-      void i18n.changeLanguage(resolveLang(s.language)),
-    );
+    // 跟随后端 save_settings 广播的设置变更即时切换语言与背景
+    const unlistenSettings = onSettingsChanged((s) => {
+      void i18n.changeLanguage(resolveLang(s.language));
+      syncBackground(s.background_preset, s.background_image);
+    });
     return () => {
       alive = false;
       unlistenSettings();
     };
-  }, []);
+  }, [syncBackground]);
 
   // 底栏版本号动态取自应用清单；浏览器 dev（非 Tauri）保留 mock 回落值
   useEffect(() => {
@@ -301,10 +335,17 @@ function SettingsApp() {
     }
   };
 
+  // 背景：预设为纯 CSS 渐变 class（底色干净，不压遮罩）；自定义图压固定浓度遮罩。预设优先于图片（与面板一致）
+  const bgStyle =
+    bgPreset === null && bgImage !== null
+      ? { backgroundImage: `linear-gradient(var(--bg-scrim), var(--bg-scrim)), url("${bgImage}")` }
+      : undefined;
+  const settingsCls = `settings${bgPreset !== null || bgImage !== null ? " has-bg" : ""}${bgPreset !== null ? ` bg-${bgPreset}` : ""}`;
+
   // 首屏加载中
   if (settings === null && loadError === null) {
     return (
-      <div className="settings loading-center">
+      <div className={`${settingsCls} loading-center`} style={bgStyle}>
         <div className="spinner" />
         <p className="muted-text">{t("settings.loading")}</p>
       </div>
@@ -314,7 +355,7 @@ function SettingsApp() {
   // 设置加载失败（理论上不应发生）：只显示错误
   if (settings === null) {
     return (
-      <div className="settings loading-center">
+      <div className={`${settingsCls} loading-center`} style={bgStyle}>
         <p className="hint-err">{loadError}</p>
       </div>
     );
@@ -326,43 +367,171 @@ function SettingsApp() {
     : null;
 
   return (
-    <div className="settings">
+    <div className={settingsCls} style={bgStyle}>
       <h1 className="settings-title">{t("settings.title")}</h1>
 
-      {/* A. 登录方式 */}
+      {/* A. 登录方式 + 登录信息（单卡片折叠：标题行显示当前方式与配置徽标，展开后是方式单选 + 对应配置区） */}
       <section className="scard">
-        <h2 className="scard-title">{t("settings.loginMethod.title")}</h2>
-        <label className={`radio-row${method === "api_key" ? " active" : ""}`}>
-          <input
-            type="radio"
-            name="login-method"
-            checked={method === "api_key"}
-            onChange={() => void switchMethod("api_key")}
-          />
-          <span>{t("settings.loginMethod.apiKey")}</span>
-        </label>
-        <label className={`radio-row${method === "oauth" ? " active" : ""}`}>
-          <input
-            type="radio"
-            name="login-method"
-            checked={method === "oauth"}
-            onChange={() => void switchMethod("oauth")}
-          />
-          <span>{t("settings.loginMethod.oauth")}</span>
-        </label>
-        {methodMsg !== null && <p className="hint-ok">{methodMsg}</p>}
-        {methodError !== null && <p className="hint-err">{methodError}</p>}
+        <button
+          type="button"
+          className="collapse-head"
+          onClick={() => setLoginOpen((v) => !v)}
+          aria-expanded={loginOpen}
+        >
+          <span className="scard-title">{t("settings.loginMethod.title")}</span>
+          <span className="muted-text">
+            {t(method === "api_key" ? "settings.loginMethod.apiKey" : "settings.loginMethod.oauth")}
+          </span>
+          {method === "api_key" && (status?.api_key_configured ?? false) && (
+            <span className="badge">{t("apiKey.configured")}</span>
+          )}
+          {method === "oauth" && (status?.oauth_configured ?? false) && (
+            <span className="badge">{t("deviceLogin.signedIn")}</span>
+          )}
+          <span className={`chevron${loginOpen ? " open" : ""}`}>▸</span>
+        </button>
+        {loginOpen && (
+          <>
+            <label className={`radio-row${method === "api_key" ? " active" : ""}`}>
+              <input
+                type="radio"
+                name="login-method"
+                checked={method === "api_key"}
+                onChange={() => void switchMethod("api_key")}
+              />
+              <span>{t("settings.loginMethod.apiKey")}</span>
+            </label>
+            <label className={`radio-row${method === "oauth" ? " active" : ""}`}>
+              <input
+                type="radio"
+                name="login-method"
+                checked={method === "oauth"}
+                onChange={() => void switchMethod("oauth")}
+              />
+              <span>{t("settings.loginMethod.oauth")}</span>
+            </label>
+            {methodMsg !== null && <p className="hint-ok">{methodMsg}</p>}
+            {methodError !== null && <p className="hint-err">{methodError}</p>}
+            {/* B/C. 按选中方式展示对应凭证配置区（嵌在本卡片内，不再自带卡片外壳） */}
+            {method === "api_key" ? (
+              <ApiKeySection status={status} onChanged={reloadStatus} />
+            ) : (
+              <DeviceLoginSection
+                oauthConfigured={status?.oauth_configured ?? false}
+                onChanged={reloadStatus}
+              />
+            )}
+          </>
+        )}
       </section>
 
-      {/* B/C. 按选中方式展示对应凭证配置区 */}
-      {method === "api_key" ? (
-        <ApiKeySection status={status} onChanged={reloadStatus} />
-      ) : (
-        <DeviceLoginSection
-          oauthConfigured={status?.oauth_configured ?? false}
-          onChanged={reloadStatus}
-        />
-      )}
+      {/* D. 通用设置（折叠卡片，位于高级设置前） */}
+      <section className="scard">
+        <button
+          type="button"
+          className="collapse-head"
+          onClick={() => setGeneralOpen((v) => !v)}
+          aria-expanded={generalOpen}
+        >
+          <span className="scard-title">{t("settings.general.title")}</span>
+          <span className={`chevron${generalOpen ? " open" : ""}`}>▸</span>
+        </button>
+        {generalOpen && (
+          <>
+            <div className="form-row">
+              <label htmlFor="refresh-interval">{t("settings.general.refreshInterval")}</label>
+              <input
+                id="refresh-interval"
+                className="input num-input"
+                type="number"
+                min={1}
+                max={60}
+                step={1}
+                value={form.refreshMin}
+                onChange={(e) => setForm((f) => ({ ...f, refreshMin: e.target.value }))}
+              />
+            </div>
+            <div className="form-row">
+              <label htmlFor="low-warn">{t("settings.general.lowWarn")}</label>
+              <input
+                id="low-warn"
+                type="checkbox"
+                checked={form.lowWarn}
+                onChange={(e) => setForm((f) => ({ ...f, lowWarn: e.target.checked }))}
+              />
+            </div>
+            <div className="form-row">
+              <label htmlFor="warn-threshold">{t("settings.general.warnThreshold")}</label>
+              <input
+                id="warn-threshold"
+                className="input num-input"
+                type="number"
+                min={1}
+                max={99}
+                step={1}
+                value={form.threshold}
+                onChange={(e) => setForm((f) => ({ ...f, threshold: e.target.value }))}
+              />
+            </div>
+            <div className="form-row">
+              <label htmlFor="autostart">{t("settings.general.autostart")}</label>
+              <input
+                id="autostart"
+                type="checkbox"
+                checked={form.autostart}
+                onChange={(e) => setForm((f) => ({ ...f, autostart: e.target.checked }))}
+              />
+            </div>
+            <HotkeyInput
+              value={form.hotkey}
+              onChange={(v) => setForm((f) => ({ ...f, hotkey: v }))}
+            />
+            <div className="form-row">
+              <label htmlFor="language">{t("settings.general.language")}</label>
+              <select
+                id="language"
+                className="input"
+                value={form.language}
+                onChange={(e) => changeLanguagePreview(e.target.value)}
+              >
+                <option value="system">{t("settings.general.langSystem")}</option>
+                <option value="zh">{t("settings.general.langZh")}</option>
+                <option value="en">{t("settings.general.langEn")}</option>
+              </select>
+            </div>
+            <div className="form-row">
+              <label htmlFor="theme">{t("settings.general.theme")}</label>
+              <select
+                id="theme"
+                className="input"
+                value={form.theme}
+                onChange={(e) => changeThemePreview(e.target.value)}
+              >
+                <option value="system">{t("settings.general.themeSystem")}</option>
+                <option value="dark">{t("settings.general.themeDark")}</option>
+                <option value="light">{t("settings.general.themeLight")}</option>
+              </select>
+            </div>
+            <BackgroundRow
+              preset={settings.background_preset ?? null}
+              imageSet={settings.background_image != null}
+              onChanged={() => void reloadSettings()}
+            />
+            {generalError !== null && <p className="hint-err">{generalError}</p>}
+            <div className="row-end">
+              {generalSaved && <span className="hint-ok">{t("settings.general.saved")}</span>}
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => void saveGeneral()}
+                disabled={savingGeneral}
+              >
+                {t("settings.general.save")}
+              </button>
+            </div>
+          </>
+        )}
+      </section>
 
       {/* 高级：月度总量（网页 token，可选，默认收起的折叠卡片） */}
       <WebTokenSection
@@ -370,136 +539,52 @@ function SettingsApp() {
         onChanged={reloadStatus}
       />
 
-      {/* D. 通用设置 */}
+      {/* E. 诊断与日志（折叠卡片） */}
       <section className="scard">
-        <h2 className="scard-title">{t("settings.general.title")}</h2>
-        <div className="form-row">
-          <label htmlFor="refresh-interval">{t("settings.general.refreshInterval")}</label>
-          <input
-            id="refresh-interval"
-            className="input num-input"
-            type="number"
-            min={1}
-            max={60}
-            step={1}
-            value={form.refreshMin}
-            onChange={(e) => setForm((f) => ({ ...f, refreshMin: e.target.value }))}
-          />
-        </div>
-        <div className="form-row">
-          <label htmlFor="low-warn">{t("settings.general.lowWarn")}</label>
-          <input
-            id="low-warn"
-            type="checkbox"
-            checked={form.lowWarn}
-            onChange={(e) => setForm((f) => ({ ...f, lowWarn: e.target.checked }))}
-          />
-        </div>
-        <div className="form-row">
-          <label htmlFor="warn-threshold">{t("settings.general.warnThreshold")}</label>
-          <input
-            id="warn-threshold"
-            className="input num-input"
-            type="number"
-            min={1}
-            max={99}
-            step={1}
-            value={form.threshold}
-            onChange={(e) => setForm((f) => ({ ...f, threshold: e.target.value }))}
-          />
-        </div>
-        <div className="form-row">
-          <label htmlFor="autostart">{t("settings.general.autostart")}</label>
-          <input
-            id="autostart"
-            type="checkbox"
-            checked={form.autostart}
-            onChange={(e) => setForm((f) => ({ ...f, autostart: e.target.checked }))}
-          />
-        </div>
-        <HotkeyInput
-          value={form.hotkey}
-          onChange={(v) => setForm((f) => ({ ...f, hotkey: v }))}
-        />
-        <div className="form-row">
-          <label htmlFor="language">{t("settings.general.language")}</label>
-          <select
-            id="language"
-            className="input"
-            value={form.language}
-            onChange={(e) => changeLanguagePreview(e.target.value)}
-          >
-            <option value="system">{t("settings.general.langSystem")}</option>
-            <option value="zh">{t("settings.general.langZh")}</option>
-            <option value="en">{t("settings.general.langEn")}</option>
-          </select>
-        </div>
-        <div className="form-row">
-          <label htmlFor="theme">{t("settings.general.theme")}</label>
-          <select
-            id="theme"
-            className="input"
-            value={form.theme}
-            onChange={(e) => changeThemePreview(e.target.value)}
-          >
-            <option value="system">{t("settings.general.themeSystem")}</option>
-            <option value="dark">{t("settings.general.themeDark")}</option>
-            <option value="light">{t("settings.general.themeLight")}</option>
-          </select>
-        </div>
-        <BackgroundRow
-          preset={settings.background_preset ?? null}
-          imageSet={settings.background_image != null}
-          onChanged={() => void reloadSettings()}
-        />
-        {generalError !== null && <p className="hint-err">{generalError}</p>}
-        <div className="row-end">
-          {generalSaved && <span className="hint-ok">{t("settings.general.saved")}</span>}
-          <button
-            type="button"
-            className="btn primary"
-            onClick={() => void saveGeneral()}
-            disabled={savingGeneral}
-          >
-            {t("settings.general.save")}
-          </button>
-        </div>
-      </section>
-
-      {/* E. 诊断与日志 */}
-      <section className="scard">
-        <h2 className="scard-title">{t("settings.diagnostics.title")}</h2>
-        <p className="hint-muted">{t("settings.diagnostics.hint")}</p>
-        {diagError !== null && <p className="hint-err">{diagError}</p>}
-        <div className="row-end">
-          {exportDone && <span className="hint-ok">{t("settings.diagnostics.exported")}</span>}
-          <button
-            type="button"
-            className="btn primary"
-            onClick={() => void doExportDiagnostics()}
-            disabled={exporting}
-          >
-            {exporting ? t("settings.diagnostics.exporting") : t("settings.diagnostics.export")}
-          </button>
-          <button type="button" className="btn" onClick={() => void doOpenLogDir()}>
-            {t("settings.diagnostics.openLogDir")}
-          </button>
-        </div>
-        <div className="row-end">
-          {usageExported && (
-            <span className="hint-ok">{t("settings.diagnostics.usageExported")}</span>
-          )}
-          <button
-            type="button"
-            className="btn"
-            onClick={() => void doExportUsage()}
-            disabled={exportingUsage}
-          >
-            {exportingUsage
-              ? t("settings.diagnostics.exporting")
-              : t("settings.diagnostics.exportUsage")}
-          </button>
-        </div>
+        <button
+          type="button"
+          className="collapse-head"
+          onClick={() => setDiagOpen((v) => !v)}
+          aria-expanded={diagOpen}
+        >
+          <span className="scard-title">{t("settings.diagnostics.title")}</span>
+          <span className={`chevron${diagOpen ? " open" : ""}`}>▸</span>
+        </button>
+        {diagOpen && (
+          <>
+            <p className="hint-muted">{t("settings.diagnostics.hint")}</p>
+            {diagError !== null && <p className="hint-err">{diagError}</p>}
+            <div className="row-end">
+              {exportDone && <span className="hint-ok">{t("settings.diagnostics.exported")}</span>}
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => void doExportDiagnostics()}
+                disabled={exporting}
+              >
+                {exporting ? t("settings.diagnostics.exporting") : t("settings.diagnostics.export")}
+              </button>
+              <button type="button" className="btn" onClick={() => void doOpenLogDir()}>
+                {t("settings.diagnostics.openLogDir")}
+              </button>
+            </div>
+            <div className="row-end">
+              {usageExported && (
+                <span className="hint-ok">{t("settings.diagnostics.usageExported")}</span>
+              )}
+              <button
+                type="button"
+                className="btn"
+                onClick={() => void doExportUsage()}
+                disabled={exportingUsage}
+              >
+                {exportingUsage
+                  ? t("settings.diagnostics.exporting")
+                  : t("settings.diagnostics.exportUsage")}
+              </button>
+            </div>
+          </>
+        )}
       </section>
 
       {/* F. 底栏：动态版本号 + 检查更新 */}
