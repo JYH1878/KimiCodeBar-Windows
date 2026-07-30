@@ -1,8 +1,12 @@
 //! 应用更新检查：查询 GitHub Releases 最新版本，并做语义化版本比较。
 //!
 //! 更新源是作者自己的仓库（JYH1878/KimiCodeBar-Windows）的 GitHub Releases。
-//! 查询主路径是 releases/latest 短链的 302 Location 头（网页路由，不受匿名
-//! API 60 次/小时/IP 限流影响，共享代理出口下 API 路径常被限流），API 作回退。
+//! 三级回退：① releases/latest 短链的 302 Location 头（网页路由，不受匿名 API
+//! 60 次/小时/IP 限流影响，共享代理出口下 API 路径常被限流）→ ② GitHub API →
+//! ③ ghfast.top 镜像（纯直连，兜底"GitHub 直连不通且无代理"的环境）。
+//! client 走 reqwest 的 system-proxy 特性，自动读 Windows 系统代理——用户梯子
+//! 什么端口就用什么（端口来自系统设置，代码不含任何写死端口）；TUN 模式梯子在
+//! 网卡层接管，与代理设置无关。
 //! 版本比较语义参照 `KimiCodeBar-Mac/Windows/src/KimiCodeBar.Core/Services/VersionComparer.cs`。
 
 use std::time::Duration;
@@ -14,16 +18,22 @@ use crate::kimi::USER_AGENT;
 /// GitHub API「最新 Release」接口（固定指向作者仓库），回退路径
 const LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/JYH1878/KimiCodeBar-Windows/releases/latest";
+/// 作者仓库地址：拼官方 tag 页地址用（concat! 只收字面量，下面的 URL 常量无法复用它）
+const REPO_URL: &str = "https://github.com/JYH1878/KimiCodeBar-Windows";
 /// 「最新 Release」网页短链（主路径）：302 跳转到 tag 页，走网页路由而非 REST API
 const LATEST_RELEASE_PAGE_URL: &str =
     "https://github.com/JYH1878/KimiCodeBar-Windows/releases/latest";
+/// ghfast.top 镜像的同款短链（第三级回退）：302 Location 为 /https://github.com/...
+/// 形态的相对路径（实测），parse_tag_from_location 的 rfind 仍能取出 tag
+const MIRROR_PAGE_URL: &str =
+    "https://ghfast.top/https://github.com/JYH1878/KimiCodeBar-Windows/releases/latest";
 /// 302 Location 中 tag 页的路径前缀，如 /releases/tag/v0.1.1
 const TAG_PATH_PREFIX: &str = "/releases/tag/";
 /// 更新检查超时（秒）：独立于配额查询的 30s，设置页不应为更新检查久等
 const UPDATE_TIMEOUT_SECS: u64 = 10;
 /// Release notes 截断长度（字符数），避免 UI 塞入过长文本
 const NOTES_MAX_CHARS: usize = 500;
-/// GitHub 限流提示（403/429；共享代理出口常见，两条查询路径共用同一文案）
+/// GitHub 限流提示（403/429；共享代理出口常见，各级查询路径共用同一文案）
 const RATE_LIMIT_MESSAGE: &str = "GitHub 限流，请稍后再试";
 /// 302 跳转地址不符合 .../releases/tag/<tag> 形态时的错误文案
 const INVALID_LOCATION_MESSAGE: &str = "发布页地址格式异常";
@@ -39,22 +49,34 @@ pub struct ReleaseInfo {
     pub notes: Option<String>,
 }
 
-/// 更新检查编排入口：先走 302 重定向路径（不受 API 限流影响），失败再回退
-/// GitHub API；两者都失败时返回重定向路径的错误——限流场景下 API 几乎必然
-/// 同样失败，其错误对用户没有额外信息量。
+/// 更新检查编排入口：302 重定向路径 → GitHub API → ghfast.top 镜像，三级回退。
+/// 三者都失败时返回重定向路径的错误——限流场景下后两级几乎必然同样失败，
+/// 其错误对用户没有额外信息量。
 pub async fn fetch_latest() -> Result<ReleaseInfo, String> {
     // 不自动跟随重定向：302 的 Location 头本身携带版本信息。
-    // 对 API 路径无副作用（成功时 200 直达，不涉重定向），两条路径共用一个 client
+    // 对 API 路径无副作用（成功时 200 直达，不涉重定向），两条 GitHub 路径共用一个
+    // client（system-proxy 特性使其自动读 Windows 系统代理，梯子端口随用户系统设置）
     let http = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("检查更新失败：{e}"))?;
+    // 镜像专用 client：纯直连（no_proxy 同时清掉系统代理与环境变量代理）。
+    // 走到镜像时 GitHub 直连多半已挂，但镜像国内可达，必须直连访问——否则
+    // "梯子关了但系统代理残留"之类的失效配置会把最后一级回退也拖死
+    let http_direct = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
         .build()
         .map_err(|e| format!("检查更新失败：{e}"))?;
     match fetch_latest_via_redirect(&http).await {
         Ok(info) => Ok(info),
         Err(redirect_err) => match fetch_latest_release(&http).await {
             Ok(info) => Ok(info),
-            // 回主路径错误：它是用户实际需要看到的诊断（如限流提示）
-            Err(_) => Err(redirect_err),
+            Err(_) => match fetch_latest_via_mirror(&http_direct).await {
+                Ok(info) => Ok(info),
+                // 回主路径错误：它是用户实际需要看到的诊断（如限流提示）
+                Err(_) => Err(redirect_err),
+            },
         },
     }
 }
@@ -165,6 +187,48 @@ pub async fn fetch_latest_release(http: &reqwest::Client) -> Result<ReleaseInfo,
         notes: release
             .body
             .map(|body| truncate_chars(&body, NOTES_MAX_CHARS)),
+    })
+}
+
+/// 第三级回退：GET ghfast.top 镜像的 releases/latest 短链，同样从 302 Location
+/// 解析 tag（镜像把 Location 改写为 /https://github.com/... 相对路径，
+/// parse_tag_from_location 兼容该形态）。镜像拿不到 Release 正文，notes 置 None。
+///
+/// 传入的 client 必须是 no_proxy 的纯直连 client（见 fetch_latest）。镜像只用于
+/// 取版本号：Release 页地址不信任镜像返回值，用 REPO_URL 自行拼 GitHub 官方地址，
+/// 用户点击去下载始终落在 github.com。
+pub async fn fetch_latest_via_mirror(http: &reqwest::Client) -> Result<ReleaseInfo, String> {
+    let resp = http
+        .get(MIRROR_PAGE_URL)
+        // 与 GitHub 路径一致：逐请求设置 UA / 超时
+        .header(reqwest::header::USER_AGENT, USER_AGENT)
+        .timeout(Duration::from_secs(UPDATE_TIMEOUT_SECS))
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                "检查更新超时，请检查网络".to_string()
+            } else {
+                format!("检查更新失败：{e}")
+            }
+        })?;
+
+    let status = resp.status();
+    if status != reqwest::StatusCode::FOUND {
+        return Err(github_status_error(status));
+    }
+
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| INVALID_LOCATION_MESSAGE.to_string())?;
+
+    let tag = parse_tag_from_location(location)?;
+    Ok(ReleaseInfo {
+        url: format!("{REPO_URL}/releases/tag/{tag}"),
+        tag,
+        notes: None,
     })
 }
 
@@ -347,6 +411,19 @@ mod tests {
             )
             .unwrap(),
             "v0.2.0"
+        );
+    }
+
+    #[test]
+    fn parse_tag_from_mirror_relative_location() {
+        // ghfast.top 镜像把 302 Location 改写为 /https://github.com/... 相对路径
+        //（实测形态），rfind 前缀仍能取出 tag
+        assert_eq!(
+            parse_tag_from_location(
+                "/https://github.com/JYH1878/KimiCodeBar-Windows/releases/tag/v0.8.0"
+            )
+            .unwrap(),
+            "v0.8.0"
         );
     }
 

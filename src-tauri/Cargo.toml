@@ -12,7 +12,9 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls"] }
+# system-proxy：读取 Windows 系统代理（注册表），用户梯子"系统代理"模式下任意端口生效。
+# 它在 reqwest 默认 features 里，default-features = false 会连带关掉，必须显式加回。
+reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "system-proxy"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 urlencoding = "2"
