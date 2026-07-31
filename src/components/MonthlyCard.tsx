@@ -1,6 +1,6 @@
 import { useTranslation } from "react-i18next";
 import type { MonthlyInfo } from "../types";
-import { resetCountdownText } from "./UsageCard";
+import { resetTimeText } from "./UsageCard";
 
 interface MonthlyCardProps {
   /** 月度总量数据（百分比为"已用"语义，与 UsageCard 的"剩余"语义相反） */
@@ -28,7 +28,7 @@ export function MonthlyCard({ monthly }: MonthlyCardProps) {
         <span>
           Kimi {monthly.kimi_pct.toFixed(1)}% · Code {monthly.code_pct.toFixed(1)}%
         </span>
-        <span>{t("usage.reset", { text: resetCountdownText(monthly.reset_time) })}</span>
+        <span>{resetTimeText(monthly.reset_time, true)}</span>
       </div>
     </div>
   );

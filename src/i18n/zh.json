@@ -14,13 +14,10 @@
   },
   "usage": {
     "remaining": "剩余 {{remaining}}/{{limit}}",
-    "reset": "重置：{{text}}",
     "countdown": {
-      "unknown": "未知",
+      "unknown": "重置时间未知",
       "soon": "即将重置",
-      "minutes_other": "{{count}}分钟后重置",
-      "hours_other": "{{count}}小时后重置",
-      "days_other": "{{count}}天后重置"
+      "at": "{{time}} 后重置"
     }
   },
   "monthly": {

@@ -14,16 +14,10 @@
   },
   "usage": {
     "remaining": "{{remaining}}/{{limit}} left",
-    "reset": "Resets {{text}}",
     "countdown": {
-      "unknown": "unknown",
+      "unknown": "Reset: unknown",
       "soon": "soon",
-      "minutes_one": "in {{count}} minute",
-      "minutes_other": "in {{count}} minutes",
-      "hours_one": "in {{count}} hour",
-      "hours_other": "in {{count}} hours",
-      "days_one": "in {{count}} day",
-      "days_other": "in {{count}} days"
+      "at": "Reset: {{time}}"
     }
   },
   "monthly": {
