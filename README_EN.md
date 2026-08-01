@@ -21,7 +21,7 @@ Built with **Tauri 2 + Rust + React**: installer under 3 MB, ~10–20 MB RAM in 
 - **Dual quota windows**: used percentage, remaining amount and reset countdown for both the 7-day and 5-hour rolling windows
 - **Membership & wallet**: shows membership tier (Andante / Moderato / Allegretto / Allegro), Booster wallet balance and monthly usage
 - **Monthly totals (optional)**: combined Kimi + Code monthly usage from the web console (requires a one-time web token paste)
-- **Local token stats**: scans local `wire.jsonl` session logs for per-day token consumption (today/yesterday + 7-day bar chart + model breakdown) — no API needed
+- **Local token stats**: scans local `wire.jsonl` session logs for per-day token consumption (today/yesterday + 7-day bar chart + today's per-model breakdown) — no API needed
 - **Usage trend chart**: 24-hour dual-line history (7-day / 5-hour), recorded locally — facts only, no prediction
 - **Light / dark theme**: follows the system or switch manually
 - **Panel background**: preset gradients (Night / Aurora / Violet / Ember, each adapted to light & dark themes) or a custom image (PNG / JPG / WebP, ≤10MB), with translucent frosted cards
