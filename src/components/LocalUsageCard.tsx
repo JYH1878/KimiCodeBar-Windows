@@ -28,11 +28,16 @@ const MODEL_DISPLAY: Record<string, string> = {
   "kimi-for-coding-highspeed": "K2.7 HighSpeed",
 };
 
-/** 模型名取斜杠后短名（"kimi-code/k3" → "k3"），再查展示名映射，无映射原样返回 */
+/** 模型名取斜杠后短名（"kimi-code/k3" → "k3"），再查展示名映射；
+ * 未收录的按 deepseek 前缀规则处理（品牌名首字母大写），其余原样返回 */
 function shortModelName(model: string): string {
   const idx = model.lastIndexOf("/");
   const short = idx >= 0 ? model.slice(idx + 1) : model;
-  return MODEL_DISPLAY[short] ?? short;
+  const mapped = MODEL_DISPLAY[short];
+  if (mapped !== undefined) return mapped;
+  // deepseek-v4-flash → Deepseek-v4-flash（品牌名首字母大写）
+  if (short.startsWith("deepseek")) return "Deepseek" + short.slice("deepseek".length);
+  return short;
 }
 
 interface LocalUsageCardProps {
