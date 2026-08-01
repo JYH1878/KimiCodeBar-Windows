@@ -35,8 +35,8 @@ function shortModelName(model: string): string {
   const short = idx >= 0 ? model.slice(idx + 1) : model;
   const mapped = MODEL_DISPLAY[short];
   if (mapped !== undefined) return mapped;
-  // deepseek-v4-flash → Deepseek-v4-flash（品牌名首字母大写）
-  if (short.startsWith("deepseek")) return "Deepseek" + short.slice("deepseek".length);
+  // deepseek-v4-flash → DeepSeek-v4-flash（品牌名按官方拼写 DeepSeek）
+  if (short.startsWith("deepseek")) return "DeepSeek" + short.slice("deepseek".length);
   return short;
 }
 
