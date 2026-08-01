@@ -149,7 +149,8 @@ export async function getUsageHistory(): Promise<HistoryPoint[]> {
 // ============ 本地 Token 消耗统计（扫描 wire.jsonl，不依赖 API）============
 
 /**
- * 浏览器 mock 的本地 token 统计：今日 128.4K / 昨日 96.2K / 近 7 天逐日 / 两个模型。
+ * 浏览器 mock 的本地 token 统计：今日 128.4K / 昨日 96.2K / 近 7 天逐日 / 今日分模型两个
+ * （kimi-code/k3 与 kimi-code/kimi-for-coding，后者演示 K2.7 展示名映射）。
  * daily 日期按本地时区生成（与后端 YYYY-MM-DD 契约一致），末位即今日。
  */
 function mockLocalUsage(): LocalUsageStats {
@@ -168,7 +169,7 @@ function mockLocalUsage(): LocalUsageStats {
     daily,
     by_model: [
       { model: "kimi-code/k3", tokens: 406000 },
-      { model: "kimi-code/other", tokens: 89000 },
+      { model: "kimi-code/kimi-for-coding", tokens: 128000 },
     ],
     last_scan_at: Math.floor(Date.now() / 1000),
   };

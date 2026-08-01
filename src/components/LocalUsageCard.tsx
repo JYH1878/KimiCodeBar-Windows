@@ -19,10 +19,20 @@ export function formatTokens(n: number): string {
   return String(n);
 }
 
-/** 模型名取斜杠后短名（"kimi-code/k3" → "k3"），无斜杠原样返回 */
+/**
+ * 已知 Kimi 模型 ID → 展示名（对应官方 Model ID，见 kimi.com/code/docs 模型配置页）。
+ * 只收录与 ID 差异明显的模型；未收录的保持原样，避免对未知模型做错误映射。
+ */
+const MODEL_DISPLAY: Record<string, string> = {
+  "kimi-for-coding": "K2.7",
+  "kimi-for-coding-highspeed": "K2.7 HighSpeed",
+};
+
+/** 模型名取斜杠后短名（"kimi-code/k3" → "k3"），再查展示名映射，无映射原样返回 */
 function shortModelName(model: string): string {
   const idx = model.lastIndexOf("/");
-  return idx >= 0 ? model.slice(idx + 1) : model;
+  const short = idx >= 0 ? model.slice(idx + 1) : model;
+  return MODEL_DISPLAY[short] ?? short;
 }
 
 interface LocalUsageCardProps {
@@ -33,7 +43,8 @@ interface LocalUsageCardProps {
 /**
  * 本地 Token 消耗卡（扫描 wire.jsonl 的纯本地统计，不依赖 API）：
  * 今日消耗大字 + 昨日小字 + 近 7 天迷你柱状图（今日柱满不透明高亮）
- * + 按模型占比一行小字。last_scan_at 为空（从未扫描）时整卡不渲染。
+ * + 今日分模型占比一行小字（与卡片主体同为今日窗口，非累计）。
+ * last_scan_at 为空（从未扫描）时整卡不渲染。
  */
 export function LocalUsageCard({ stats }: LocalUsageCardProps) {
   const { t } = useTranslation();

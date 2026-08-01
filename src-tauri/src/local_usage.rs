@@ -14,8 +14,10 @@
 //!
 //! 与 macOS 原版的已知差异（原版仓库不在本机，按钉死的契约语义实现）：
 //! - daily 固定输出最近 7 个自然日（无消耗的日子补 0），保证前端折线图逐日连续；
-//! - 按日/按模型的累计聚合随偏移一起持久化在 scan-state.json：
-//!   增量读取下"全部时间 by_model"必须靠落盘的累计值，否则每次都得全量重读；
+//! - 按日×模型的累计聚合随偏移一起持久化在 scan-state.json：
+//!   增量读取下"今日分模型 by_model"必须靠落盘的按日×模型累计值，否则每次都得全量重读；
+//!   by_model 语义为今日（与卡片主体"今日/近 7 天"一致），不是全部时间累计；
+//! - 旧版状态（只有按日总和、没有按日×模型）在下次扫描时检测并全量重扫一次完成迁移；
 //! - 文件截断回退为整文件重读，该文件的旧贡献理论上可能重复计数一次
 //!   （会话文件按 uuid 命名、只增不改，实际不会触发）；
 //! - 已消失文件的偏移会被清理，同名新文件从头读，不会按旧偏移跳过开头。
@@ -35,7 +37,7 @@ const THROTTLE_SECS: i64 = 180;
 const DAILY_DAYS: i64 = 7;
 /// 按日聚合在状态文件里的保留窗口（天）；展示只用最近 7 天，多留冗余
 const BY_DATE_RETENTION_DAYS: i64 = 30;
-/// 分模型累计展示上限（全部时间，tokens 降序）
+/// 分模型展示上限（今日，tokens 降序）
 const TOP_MODELS: usize = 5;
 /// CSV 表头（与导出约定一致）：时间为本地 ISO（YYYY-MM-DDTHH:mm:ss）
 const CSV_HEADER: &str = "time,weekly,five_hour,monthly";
@@ -64,7 +66,7 @@ pub struct LocalUsageStats {
     pub yesterday_tokens: u64,
     /// 最近 7 天逐日消耗（升序，无消耗的日子补 0）
     pub daily: Vec<DailyUsage>,
-    /// 按模型累计（全部时间，tokens 降序 top 5）
+    /// 按模型累计（今日，tokens 降序 top 5）
     pub by_model: Vec<ModelUsage>,
     /// 上次扫描时间（epoch 秒），未扫过为 null
     pub last_scan_at: Option<i64>,
@@ -177,42 +179,44 @@ where
     Some(dt.format("%Y-%m-%d").to_string())
 }
 
-/// 全时间累计聚合器：扫描产出的事件逐条喂入，最后按"今天"出统计视图。
-/// 聚合结果随扫描状态一起落盘（增量读取下 by_model 全时间累计的前提）。
+/// 按日累计聚合器：扫描产出的事件逐条喂入，最后按"今天"出统计视图。
+/// 聚合结果随扫描状态一起落盘（增量读取下今日分模型 by_model 的前提）。
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 struct UsageAggregator {
     /// 本地日期（YYYY-MM-DD）→ 累计 tokens
     #[serde(default)]
     by_date: HashMap<String, u64>,
-    /// 模型 → 全时间累计 tokens
+    /// 本地日期（YYYY-MM-DD）→ 模型 → 该日累计 tokens（今日分模型占比的来源）
     #[serde(default)]
-    by_model: HashMap<String, u64>,
+    by_date_model: HashMap<String, HashMap<String, u64>>,
 }
 
 impl UsageAggregator {
-    /// 喂入一条事件：按本地日期与模型分别累计。日期键取不出（时间戳溢出）时
-    /// 只记模型桶，不因单点异常丢全部
+    /// 喂入一条事件：按本地日期与按日×模型分别累计。
+    /// 日期键取不出（时间戳溢出）时丢弃该事件（与解析层缺 time 同策略）
     fn add<Tz: TimeZone>(&mut self, event: &UsageEvent, tz: &Tz)
     where
         Tz::Offset: std::fmt::Display,
     {
         if let Some(date) = date_key(event.ts_ms, tz) {
-            *self.by_date.entry(date).or_insert(0) += event.tokens;
+            *self.by_date.entry(date.clone()).or_insert(0) += event.tokens;
+            let models = self.by_date_model.entry(date).or_default();
+            *models.entry(event.model.clone()).or_insert(0) += event.tokens;
         }
-        *self.by_model.entry(event.model.clone()).or_insert(0) += event.tokens;
     }
 
-    /// 丢弃 30 天前的按日聚合，控制状态文件体积（by_model 是全时间累计，不动）
+    /// 丢弃 30 天前的按日聚合（两个映射同一窗口），控制状态文件体积
     fn prune(&mut self, today: NaiveDate) {
         let cutoff = (today - chrono::Duration::days(BY_DATE_RETENTION_DAYS))
             .format("%Y-%m-%d")
             .to_string();
         // 日期键零填充定长，字符串序即日期序
         self.by_date.retain(|date, _| date >= &cutoff);
+        self.by_date_model.retain(|date, _| date >= &cutoff);
     }
 
     /// 由累计聚合出统计视图：today 为本地今天；
-    /// daily 为最近 7 个自然日（升序、缺日补 0）；by_model 降序 top 5
+    /// daily 为最近 7 个自然日（升序、缺日补 0）；by_model 为今日分模型降序 top 5
     fn finish(&self, today: NaiveDate, last_scan_at: Option<i64>) -> LocalUsageStats {
         let day_tokens = |date: NaiveDate| {
             self.by_date
@@ -231,13 +235,18 @@ impl UsageAggregator {
             })
             .collect();
         let mut by_model: Vec<ModelUsage> = self
-            .by_model
-            .iter()
-            .map(|(model, tokens)| ModelUsage {
-                model: model.clone(),
-                tokens: *tokens,
+            .by_date_model
+            .get(&today.format("%Y-%m-%d").to_string())
+            .map(|models| {
+                models
+                    .iter()
+                    .map(|(model, tokens)| ModelUsage {
+                        model: model.clone(),
+                        tokens: *tokens,
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
         // tokens 降序；并列按模型名升序，保证输出确定
         by_model.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.model.cmp(&b.model)));
         by_model.truncate(TOP_MODELS);
@@ -327,6 +336,15 @@ where
 
     let mut state = load_state(state_path);
     state.totals.prune(today);
+
+    // 迁移旧版状态：占比改按日×模型之前，scan-state 只有按日总和（by_date）没有
+    // 按日×模型。检测到旧格式时清空累计并强制全量重读，重建 by_date_model——
+    // 否则升级当天"今日分模型"会一直空着直到产生新消耗，与今日总量对不上。
+    // 已消失会话文件的旧贡献在重扫中不可恢复（派生数据，丢了重扫即可，与模块哲学一致）。
+    if state.totals.by_date_model.is_empty() && !state.totals.by_date.is_empty() {
+        state.totals.by_date.clear();
+        state.files.values_mut().for_each(|offset| *offset = 0);
+    }
 
     let mut files = Vec::new();
     collect_wire_files(sessions_dir, &mut files);
@@ -557,7 +575,7 @@ mod tests {
             &parse_usage_line(&usage_line("m1", "2026-07-26T15:59:59Z", 0, 20)).unwrap(),
             &tz,
         );
-        // 7 天窗口外（2026-07-20 本地）：不进 daily，但进 by_model
+        // 7 天窗口外（2026-07-20 本地）：不进 daily，也不进今日 by_model
         agg.add(
             &parse_usage_line(&usage_line("m2", "2026-07-20T02:00:00Z", 0, 99)).unwrap(),
             &tz,
@@ -586,13 +604,15 @@ mod tests {
         let tokens: Vec<u64> = stats.daily.iter().map(|d| d.tokens).collect();
         assert_eq!(tokens, vec![0, 0, 0, 0, 0, 20 + 11264, 10 + 11264]);
 
-        // by_model 是全时间累计（含 daily 窗口外的 m2）
-        assert_eq!(stats.by_model.len(), 2);
+        // by_model 只含今日分模型（昨天的 m1、daily 窗口外的 m2 都不计）
+        assert_eq!(stats.by_model.len(), 1);
+        assert_eq!(stats.by_model[0].model, "m1");
+        assert_eq!(stats.by_model[0].tokens, 10 + 11264);
     }
 
     #[test]
     fn aggregator_by_model_top5_desc_with_tiebreak() {
-        let mut by_model = HashMap::new();
+        let mut today_models = HashMap::new();
         for (model, tokens) in [
             ("alpha", 50),
             ("bravo", 100),
@@ -601,11 +621,17 @@ mod tests {
             ("echo", 200),
             ("foxtrot", 10),
         ] {
-            by_model.insert(model.to_string(), tokens);
+            today_models.insert(model.to_string(), tokens);
         }
+        let mut other_day_models = HashMap::new();
+        other_day_models.insert("zulu".to_string(), 999);
         let agg = UsageAggregator {
             by_date: HashMap::new(),
-            by_model,
+            by_date_model: HashMap::from([
+                ("2026-07-27".to_string(), today_models),
+                // 昨天的模型不进今日 by_model
+                ("2026-07-26".to_string(), other_day_models),
+            ]),
         };
         let stats = agg.finish(NaiveDate::from_ymd_opt(2026, 7, 27).unwrap(), None);
         // 降序 top5：echo 200 > bravo/charlie 100（并列按名升序）> alpha 50；delta/foxtrot 被截掉
@@ -619,10 +645,20 @@ mod tests {
         agg.by_date.insert("2026-06-27".to_string(), 1); // 恰 30 天前：保留
         agg.by_date.insert("2026-06-26".to_string(), 2); // 31 天前：丢弃
         agg.by_date.insert("2026-07-27".to_string(), 3);
+        agg.by_date_model
+            .insert("2026-06-27".to_string(), HashMap::new()); // 保留
+        agg.by_date_model
+            .insert("2026-06-26".to_string(), HashMap::new()); // 丢弃
+        agg.by_date_model
+            .insert("2026-07-27".to_string(), HashMap::new());
         agg.prune(NaiveDate::from_ymd_opt(2026, 7, 27).unwrap());
         assert!(agg.by_date.contains_key("2026-06-27"));
         assert!(!agg.by_date.contains_key("2026-06-26"));
         assert!(agg.by_date.contains_key("2026-07-27"));
+        // 按日×模型与按日同窗口裁剪
+        assert!(agg.by_date_model.contains_key("2026-06-27"));
+        assert!(!agg.by_date_model.contains_key("2026-06-26"));
+        assert!(agg.by_date_model.contains_key("2026-07-27"));
     }
 
     // ---- 偏移续读 ----
@@ -738,12 +774,10 @@ mod tests {
         let stats = scan_with(&sessions, &state_path, now, &tz);
         assert_eq!(stats.today_tokens, per_main_today + per_agent_today);
         assert_eq!(stats.yesterday_tokens, 200 + 20 + 11264);
-        assert_eq!(stats.by_model.len(), 2);
+        // by_model 是今日分模型：昨天的 k3、daily 窗口外的 k2 都不计
+        assert_eq!(stats.by_model.len(), 1);
         assert_eq!(stats.by_model[0].model, "kimi-code/k3");
-        assert_eq!(
-            stats.by_model[0].tokens,
-            per_main_today + per_agent_today + (200 + 20 + 11264)
-        );
+        assert_eq!(stats.by_model[0].tokens, per_main_today + per_agent_today);
         // k2 事件在 daily 窗口外：daily 全 0 的日子补 0，今日在末位
         assert_eq!(stats.daily.len(), 7);
         assert_eq!(stats.daily[6].tokens, stats.today_tokens);
@@ -766,6 +800,51 @@ mod tests {
         std::fs::write(&main_file, content).unwrap();
         let stats3 = scan_with(&sessions, &state_path, now, &tz);
         assert_eq!(stats3.today_tokens, stats.today_tokens + 1 + 2 + 11264);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_migrates_legacy_state_without_by_date_model() {
+        let dir = temp_dir("local-usage-migrate");
+        let sessions = dir.join("sessions");
+        let state_path = dir.join("config").join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+
+        // 今日一条事件；旧状态偏移已越过它（模拟旧版已消费），
+        // 无迁移时该事件不会重读，by_date_model 将一直为空
+        let file = write_wire(
+            &sessions,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T10:00:00+08:00",
+                100,
+                10,
+            )],
+        );
+        let today_tokens = 100 + 10 + 11264;
+        // 旧版 scan-state：只有 by_date 与文件偏移，没有 by_date_model
+        let legacy = serde_json::json!({
+            "last_scan_at": ms("2026-07-27T09:00:00+08:00") / 1000,
+            "files": { file.to_string_lossy().into_owned(): std::fs::metadata(&file).unwrap().len() },
+            "totals": { "by_date": { "2026-07-27": today_tokens } },
+        });
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::fs::write(&state_path, serde_json::to_string(&legacy).unwrap()).unwrap();
+
+        // 迁移触发：累计清空 + 偏移归零全量重读，今日分模型重建
+        let stats = scan_with(&sessions, &state_path, now, &tz);
+        assert_eq!(stats.today_tokens, today_tokens);
+        assert_eq!(stats.by_model.len(), 1);
+        assert_eq!(stats.by_model[0].model, "kimi-code/k3");
+        assert_eq!(stats.by_model[0].tokens, today_tokens);
+
+        // 迁移只发生一次：二次扫描不再重读，不重复计数
+        let stats2 = scan_with(&sessions, &state_path, now, &tz);
+        assert_eq!(stats2.today_tokens, today_tokens);
+        assert_eq!(stats2.by_model, stats.by_model);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

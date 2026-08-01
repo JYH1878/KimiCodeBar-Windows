@@ -134,7 +134,7 @@ export interface LocalUsageStats {
   yesterday_tokens: number;
   /** 最近 7 天逐日消耗（升序） */
   daily: DailyUsage[];
-  /** 按模型累计（全部时间，降序 top 5） */
+  /** 按模型累计（今日，降序 top 5） */
   by_model: ModelUsage[];
   /** 上次扫描时间（epoch 秒），未扫过为 null */
   last_scan_at: number | null;
