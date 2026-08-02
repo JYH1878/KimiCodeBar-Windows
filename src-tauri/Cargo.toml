@@ -1,6 +1,6 @@
 [package]
 name = "kimicodebar"
-version = "0.8.3"
+version = "1.0.0"
 description = "Kimi Code usage monitor in the Windows system tray"
 edition = "2021"
 rust-version = "1.77.2"
