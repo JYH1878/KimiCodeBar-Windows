@@ -12,7 +12,7 @@ interface WebTokenSectionProps {
   onChanged: () => void;
 }
 
-/** 设置页"高级：月度总量（可选）"折叠分区：网页 token 的粘贴校验、保存与清除 */
+/** 设置页"高级：月度总量"折叠分区：网页 token 的粘贴校验、保存与清除 */
 export function WebTokenSection({ configured, onChanged }: WebTokenSectionProps) {
   const { t } = useTranslation();
   // 默认收起，点击标题行展开/收起

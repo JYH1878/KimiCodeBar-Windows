@@ -148,7 +148,7 @@
     "remainSec": "{{s}} 秒"
   },
   "webToken": {
-    "title": "高级：月度总量（可选）",
+    "title": "高级：月度总量",
     "configured": "已配置",
     "hint": "用于显示 Kimi 网页版的每月总用量（Kimi + Code）。需要在浏览器里复制一次网页 token，过期后需重新粘贴。",
     "step1pre": "浏览器打开",

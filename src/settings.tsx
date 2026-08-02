@@ -533,7 +533,7 @@ function SettingsApp() {
         )}
       </section>
 
-      {/* 高级：月度总量（网页 token，可选，默认收起的折叠卡片） */}
+      {/* 高级：月度总量（网页 token，默认收起的折叠卡片） */}
       <WebTokenSection
         configured={status?.web_token_configured ?? false}
         onChanged={reloadStatus}

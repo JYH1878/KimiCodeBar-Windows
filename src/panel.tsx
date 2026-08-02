@@ -204,7 +204,7 @@ function PanelApp() {
       )}
       {quota?.weekly && <UsageCard title={t("panel.weeklyUsage")} detail={quota.weekly} />}
       {quota?.five_hour && <UsageCard title={t("panel.fiveHourUsage")} detail={quota.five_hour} />}
-      {/* 月度总量（网页 token 可选增强）：monthly 与 monthly_error 都为空时整卡不渲染 */}
+      {/* 月度总量（网页 token）：monthly 与 monthly_error 都为空时整卡不渲染 */}
       {state.monthly && <MonthlyCard monthly={state.monthly} />}
       {state.monthly_error && <p className="monthly-error">{state.monthly_error}</p>}
       {/* 用量趋势（本地历史采样，纯事实不预测）：月度总量卡之后、本地统计卡之前 */}

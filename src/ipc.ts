@@ -384,7 +384,7 @@ export async function getCredentialStatus(): Promise<CredentialStatus> {
   return invoke<CredentialStatus>("get_credential_status");
 }
 
-// ============ 月度总量（网页 token，可选增强）============
+// ============ 月度总量（网页 token）============
 
 /**
  * 校验并保存网页 token（kimi-auth cookie 的值，支持整串 cookie 粘贴由后端识别）。

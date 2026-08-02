@@ -145,7 +145,7 @@ export interface LocalUsageStats {
 /** 主题模式："system"（跟随系统）/ "dark" / "light"，默认 system */
 export type ThemeMode = "system" | "dark" | "light";
 
-// ============ 月度总量（网页 token，可选增强）============
+// ============ 月度总量（网页 token）============
 
 /** 月度总量：来自网页端 GetSubscriptionStats，百分比为"已用"语义 */
 export interface MonthlyInfo {

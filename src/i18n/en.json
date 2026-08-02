@@ -148,7 +148,7 @@
     "remainSec": "{{s}}s"
   },
   "webToken": {
-    "title": "Advanced: Monthly total (optional)",
+    "title": "Advanced: Monthly total",
     "configured": "Configured",
     "hint": "Shows your Kimi web monthly total usage (Kimi + Code). Requires copying the web token from your browser once; paste it again after it expires.",
     "step1pre": "Open",
