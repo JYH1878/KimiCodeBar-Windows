@@ -7,6 +7,14 @@
 //! （time 为 epoch 毫秒；tokens = inputOther + output + inputCacheRead + inputCacheCreation；
 //! usageScope 实测恒为 "turn"，不作过滤）
 //!
+//! `__secondary__` 哨兵：开启 Kimi Code 的 secondary_model 实验后，子 agent 的用量事件
+//! model 落为字面量 `"__secondary__"`（实测：
+//! `{"type":"usage.record","model":"__secondary__","usage":{"inputOther":9322,"output":132,...},...}`）。
+//! 出统计视图后把该桶并入真实模型（resolve_secondary_model + fold_secondary_model）：
+//! 环境变量 KIMI_SECONDARY_MODEL（非空）优先，其次 `~/.kimi-code/config.toml` 的
+//! `[secondary_model].model`；折叠只在展示层做、不落盘——scan-state.json 保留原始哨兵桶，
+//! 用户改配 secondary 后下次扫描自动按新映射显示；两处都解析不到时保留原样展示。
+//!
 //! 增量扫描：`{config_dir}/scan-state.json` 记录每个文件的已读字节偏移与累计聚合，
 //! 每次只读各文件偏移之后的新字节；文件被截断/重写（长度 < 偏移）回退为从头读。
 //! 状态全量原子写（临时文件 + rename，与 storage.rs 同款）。
@@ -39,6 +47,8 @@ const DAILY_DAYS: i64 = 7;
 const BY_DATE_RETENTION_DAYS: i64 = 30;
 /// 分模型展示上限（今日，tokens 降序）
 const TOP_MODELS: usize = 5;
+/// 副模型哨兵：secondary_model 实验下子 agent 的 usage.record model 落该字面值
+const SECONDARY_SENTINEL: &str = "__secondary__";
 /// CSV 表头（与导出约定一致）：时间为本地 ISO（YYYY-MM-DDTHH:mm:ss）
 const CSV_HEADER: &str = "time,weekly,five_hour,monthly";
 
@@ -89,12 +99,16 @@ pub fn scan() -> LocalUsageStats {
             }
         }
     }
-    let stats = scan_with(
+    let mut stats = scan_with(
         &sessions_dir().unwrap_or_default(),
         &state_file_path(),
         now.timestamp_millis(),
         &chrono::Local,
     );
+    // __secondary__ 桶并入真实副模型（展示层折叠，不落盘；解析不到保留原样）
+    if let Some(target) = resolve_secondary_model() {
+        fold_secondary_model(&mut stats.by_model, &target);
+    }
     *SCAN_CACHE.lock().unwrap() = Some((now_secs, stats.clone()));
     stats
 }
@@ -260,6 +274,24 @@ impl UsageAggregator {
     }
 }
 
+/// 把 by_model 里的 __secondary__ 桶并入 target 桶（tokens 相加；target 不在榜则顶替进来）。
+/// 合并后按 finish 同款规则重排（tokens 降序、并列按名升序）并重截 top 5
+fn fold_secondary_model(by_model: &mut Vec<ModelUsage>, target: &str) {
+    let Some(idx) = by_model.iter().position(|m| m.model == SECONDARY_SENTINEL) else {
+        return;
+    };
+    let secondary = by_model.remove(idx);
+    match by_model.iter_mut().find(|m| m.model == target) {
+        Some(m) => m.tokens += secondary.tokens,
+        None => by_model.push(ModelUsage {
+            model: target.to_string(),
+            tokens: secondary.tokens,
+        }),
+    }
+    by_model.sort_by(|a, b| b.tokens.cmp(&a.tokens).then_with(|| a.model.cmp(&b.model)));
+    by_model.truncate(TOP_MODELS);
+}
+
 /// 扫描状态（scan-state.json）：文件偏移 + 累计聚合。损坏/不存在容忍为空状态重新全扫
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ScanState {
@@ -401,6 +433,28 @@ fn save_state(path: &Path, state: &ScanState) -> Result<(), String> {
         std::fs::remove_file(path).map_err(|e| format!("删除旧文件失败: {e}"))?;
     }
     std::fs::rename(&tmp_path, path).map_err(|e| format!("重命名临时文件失败: {e}"))
+}
+
+/// 解析 __secondary__ 对应的真实模型别名：环境变量 KIMI_SECONDARY_MODEL（非空）优先，
+/// 其次 `{home}/.kimi-code/config.toml` 的 `[secondary_model].model`（优先级与 CLI 一致）。
+/// 两处都取不到（未开实验 / 配置缺失 / 文件损坏）为 None，哨兵桶原样展示。
+/// home 规则与 sessions_dir 一致（USERPROFILE → HOME）；配置里其余字段（api_key 等）
+/// 只在内存中解析，不读用不落盘
+fn resolve_secondary_model() -> Option<String> {
+    if let Ok(value) = std::env::var("KIMI_SECONDARY_MODEL") {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    let config_path = PathBuf::from(home).join(".kimi-code").join("config.toml");
+    let text = std::fs::read_to_string(config_path).ok()?;
+    let doc = text.parse::<toml::Table>().ok()?;
+    doc.get("secondary_model")?
+        .get("model")?
+        .as_str()
+        .map(str::to_string)
 }
 
 /// 会话根目录：{userprofile}/.kimi-code/sessions（Kimi Code CLI 的会话落盘位置）；
@@ -982,6 +1036,194 @@ mod tests {
         assert!(exports.join("usage-20260727-120000.csv").exists());
         assert!(!exports.join("history.json").exists());
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- __secondary__ 折叠与解析 ----
+
+    fn model_usage(model: &str, tokens: u64) -> ModelUsage {
+        ModelUsage {
+            model: model.to_string(),
+            tokens,
+        }
+    }
+
+    /// 在假 home 下写 .kimi-code/config.toml，含 [secondary_model].model
+    fn write_secondary_config(home: &Path, model: &str) {
+        write_config_raw(home, &format!("[secondary_model]\nmodel = \"{model}\"\n"));
+    }
+
+    fn write_config_raw(home: &Path, content: &str) {
+        let dir = home.join(".kimi-code");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("config.toml"), content).unwrap();
+    }
+
+    #[test]
+    fn fold_merges_sentinel_into_existing_target() {
+        let mut by_model = vec![
+            model_usage("kimi-code/k3", 100),
+            model_usage(SECONDARY_SENTINEL, 40),
+            model_usage("deepseek-v4-flash", 10),
+        ];
+        fold_secondary_model(&mut by_model, "deepseek-v4-flash");
+        // 哨兵 40 并入已在榜的 deepseek-v4-flash（10 → 50），哨兵桶消失
+        assert_eq!(
+            by_model,
+            vec![
+                model_usage("kimi-code/k3", 100),
+                model_usage("deepseek-v4-flash", 50),
+            ]
+        );
+    }
+
+    #[test]
+    fn fold_renames_when_target_not_on_board() {
+        // target 不在榜：哨兵桶改名顶替，并按合并值重排（200 > 100 居首）
+        let mut by_model = vec![
+            model_usage("kimi-code/k3", 100),
+            model_usage(SECONDARY_SENTINEL, 200),
+        ];
+        fold_secondary_model(&mut by_model, "deepseek-v4-flash");
+        assert_eq!(
+            by_model,
+            vec![
+                model_usage("deepseek-v4-flash", 200),
+                model_usage("kimi-code/k3", 100),
+            ]
+        );
+    }
+
+    #[test]
+    fn fold_noop_without_sentinel() {
+        let mut by_model = vec![model_usage("kimi-code/k3", 100)];
+        fold_secondary_model(&mut by_model, "deepseek-v4-flash");
+        assert_eq!(by_model, vec![model_usage("kimi-code/k3", 100)]);
+    }
+
+    #[test]
+    fn fold_truncates_to_top5_after_merge() {
+        // 5 个 100 的桶 + 哨兵 500：合并后 target 居首，榜仍只留 5 个
+        let mut by_model: Vec<ModelUsage> =
+            (0..5).map(|i| model_usage(&format!("m{i}"), 100)).collect();
+        by_model.push(model_usage(SECONDARY_SENTINEL, 500));
+        fold_secondary_model(&mut by_model, "deepseek-v4-flash");
+        assert_eq!(by_model.len(), TOP_MODELS);
+        assert_eq!(by_model[0], model_usage("deepseek-v4-flash", 500));
+    }
+
+    #[test]
+    fn resolve_prefers_env_over_config() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = temp_dir("secondary-env");
+        write_secondary_config(&home, "deepseek-v4-flash");
+        std::env::set_var("USERPROFILE", &home);
+        std::env::set_var("KIMI_SECONDARY_MODEL", "kimi-code/kimi-k2.5");
+        // 环境变量优先于 config.toml（与 CLI 优先级一致）
+        assert_eq!(
+            resolve_secondary_model().as_deref(),
+            Some("kimi-code/kimi-k2.5")
+        );
+        // 环境变量为空白：回落 config.toml
+        std::env::set_var("KIMI_SECONDARY_MODEL", "  ");
+        assert_eq!(
+            resolve_secondary_model().as_deref(),
+            Some("deepseek-v4-flash")
+        );
+        std::env::remove_var("KIMI_SECONDARY_MODEL");
+        std::env::remove_var("USERPROFILE");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn resolve_reads_model_from_config_toml() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = temp_dir("secondary-conf");
+        std::env::set_var("USERPROFILE", &home);
+        std::env::remove_var("KIMI_SECONDARY_MODEL"); // 防外部环境变量泄漏进测试
+        write_secondary_config(&home, "deepseek-v4-flash");
+        assert_eq!(
+            resolve_secondary_model().as_deref(),
+            Some("deepseek-v4-flash")
+        );
+        std::env::remove_var("USERPROFILE");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn resolve_returns_none_when_unresolvable() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = temp_dir("secondary-none");
+        std::env::set_var("USERPROFILE", &home);
+        std::env::remove_var("KIMI_SECONDARY_MODEL");
+        // config.toml 不存在
+        assert_eq!(resolve_secondary_model(), None);
+        // 无 [secondary_model] 段
+        write_config_raw(&home, "default_model = \"kimi-code/k3\"\n");
+        assert_eq!(resolve_secondary_model(), None);
+        // 有段无 model 键
+        write_config_raw(&home, "[secondary_model]\ndefault_effort = \"max\"\n");
+        assert_eq!(resolve_secondary_model(), None);
+        // model 类型不是字符串
+        write_config_raw(&home, "[secondary_model]\nmodel = 42\n");
+        assert_eq!(resolve_secondary_model(), None);
+        // 坏 TOML：None 而不是 panic
+        write_config_raw(&home, "not = [valid");
+        assert_eq!(resolve_secondary_model(), None);
+        std::env::remove_var("USERPROFILE");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// scan_with + resolve + fold 串起来的端到端（scan() 的折叠接线走进程级缓存，不直接测）
+    #[test]
+    fn scan_output_folds_secondary_into_configured_model() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = temp_dir("local-usage-secondary");
+        let home = dir.join("home");
+        let sessions = home.join(".kimi-code").join("sessions");
+        let state_path = dir.join("config").join("scan-state.json");
+        write_secondary_config(&home, "deepseek-v4-flash");
+        std::env::set_var("USERPROFILE", &home);
+        std::env::remove_var("KIMI_SECONDARY_MODEL");
+
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+        write_wire(
+            &sessions,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T10:00:00+08:00",
+                100,
+                10,
+            )],
+        );
+        write_wire(
+            &sessions,
+            "agent-0",
+            &[
+                // 主 agent 直接用过副模型（真实名桶已存在）
+                usage_line("deepseek-v4-flash", "2026-07-27T10:30:00+08:00", 10, 5),
+                usage_line(SECONDARY_SENTINEL, "2026-07-27T11:00:00+08:00", 20, 5),
+            ],
+        );
+
+        let mut stats = scan_with(&sessions, &state_path, now, &tz);
+        if let Some(target) = resolve_secondary_model() {
+            fold_secondary_model(&mut stats.by_model, &target);
+        }
+
+        // 每条 usage_line 另含 inputCacheRead 11264：
+        // deepseek = (10+5+11264) + (20+5+11264) = 22568 > k3 = 100+10+11264 = 11374，哨兵桶消失
+        assert_eq!(
+            stats.by_model,
+            vec![
+                model_usage("deepseek-v4-flash", 22568),
+                model_usage("kimi-code/k3", 11374),
+            ]
+        );
+
+        std::env::remove_var("USERPROFILE");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
