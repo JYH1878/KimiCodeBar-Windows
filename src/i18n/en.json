@@ -66,6 +66,9 @@
     "general": {
       "title": "General",
       "refreshInterval": "Refresh interval (minutes, 1–60)",
+      "refreshMode": "Refresh mode",
+      "refreshModeAdaptive": "Adaptive (1 min when active, interval below when idle)",
+      "refreshModeFixed": "Fixed interval",
       "lowWarn": "Low quota alert",
       "warnThreshold": "Alert threshold (% left, 1–99)",
       "autostart": "Launch at startup",

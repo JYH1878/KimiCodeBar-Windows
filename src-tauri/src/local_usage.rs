@@ -80,6 +80,9 @@ pub struct LocalUsageStats {
     pub by_model: Vec<ModelUsage>,
     /// 上次扫描时间（epoch 秒），未扫过为 null
     pub last_scan_at: Option<i64>,
+    /// 最近一次 usage.record 事件时间（epoch 毫秒），从未扫到为 null；
+    /// 自适应刷新的活跃判定依据（polling.rs）
+    pub last_event_at: Option<i64>,
 }
 
 /// 进程内结果缓存（节流用）：上次扫描完成时刻（epoch 秒）+ 结果
@@ -203,6 +206,10 @@ struct UsageAggregator {
     /// 本地日期（YYYY-MM-DD）→ 模型 → 该日累计 tokens（今日分模型占比的来源）
     #[serde(default)]
     by_date_model: HashMap<String, HashMap<String, u64>>,
+    /// 见过的最近一条 usage.record 事件时间（epoch 毫秒，单调取 max）；
+    /// 不受按日窗口裁剪影响，自适应刷新靠它判"近 10 分钟有无新消耗"
+    #[serde(default)]
+    last_event_at: Option<i64>,
 }
 
 impl UsageAggregator {
@@ -212,6 +219,11 @@ impl UsageAggregator {
     where
         Tz::Offset: std::fmt::Display,
     {
+        // 活跃判定时钟与日期分桶无关：时间戳合法即更新 max（溢出值比较无害）
+        self.last_event_at = Some(
+            self.last_event_at
+                .map_or(event.ts_ms, |old| old.max(event.ts_ms)),
+        );
         if let Some(date) = date_key(event.ts_ms, tz) {
             *self.by_date.entry(date.clone()).or_insert(0) += event.tokens;
             let models = self.by_date_model.entry(date).or_default();
@@ -270,6 +282,7 @@ impl UsageAggregator {
             daily,
             by_model,
             last_scan_at,
+            last_event_at: self.last_event_at,
         }
     }
 }
@@ -686,6 +699,7 @@ mod tests {
                 // 昨天的模型不进今日 by_model
                 ("2026-07-26".to_string(), other_day_models),
             ]),
+            last_event_at: None,
         };
         let stats = agg.finish(NaiveDate::from_ymd_opt(2026, 7, 27).unwrap(), None);
         // 降序 top5：echo 200 > bravo/charlie 100（并列按名升序）> alpha 50；delta/foxtrot 被截掉
@@ -854,6 +868,56 @@ mod tests {
         std::fs::write(&main_file, content).unwrap();
         let stats3 = scan_with(&sessions, &state_path, now, &tz);
         assert_eq!(stats3.today_tokens, stats.today_tokens + 1 + 2 + 11264);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_tracks_last_event_at_incrementally() {
+        let dir = temp_dir("local-usage-lastevent");
+        let sessions = dir.join("sessions");
+        let state_path = dir.join("config").join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+
+        // 两条事件：10:00 与 11:00，最近一条的时间戳应成为 last_event_at
+        let file = write_wire(
+            &sessions,
+            "main",
+            &[
+                usage_line("kimi-code/k3", "2026-07-27T10:00:00+08:00", 100, 10),
+                usage_line("kimi-code/k3", "2026-07-27T11:00:00+08:00", 7, 3),
+            ],
+        );
+        let stats = scan_with(&sessions, &state_path, now, &tz);
+        assert_eq!(stats.last_event_at, Some(ms("2026-07-27T11:00:00+08:00")));
+
+        // append 一条更早时间戳的事件：max 不回退（历史补录不算"更新近"）
+        let older = usage_line("kimi-code/k3", "2026-07-27T10:30:00+08:00", 1, 2);
+        let mut content = std::fs::read_to_string(&file).unwrap();
+        content.push_str(&older);
+        content.push('\n');
+        std::fs::write(&file, content).unwrap();
+        let stats2 = scan_with(&sessions, &state_path, now, &tz);
+        assert_eq!(stats2.last_event_at, Some(ms("2026-07-27T11:00:00+08:00")));
+
+        // append 一条更晚的事件：last_event_at 前进到 11:30
+        let newer = usage_line("kimi-code/k3", "2026-07-27T11:30:00+08:00", 1, 2);
+        let mut content = std::fs::read_to_string(&file).unwrap();
+        content.push_str(&newer);
+        content.push('\n');
+        std::fs::write(&file, content).unwrap();
+        let stats3 = scan_with(&sessions, &state_path, now, &tz);
+        assert_eq!(stats3.last_event_at, Some(ms("2026-07-27T11:30:00+08:00")));
+
+        // 空目录（从未扫到消耗）：None，活跃判定按静默
+        let empty_stats = scan_with(
+            &dir.join("nonexistent"),
+            &dir.join("other-state.json"),
+            now,
+            &tz,
+        );
+        assert_eq!(empty_stats.last_event_at, None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

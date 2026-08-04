@@ -1,9 +1,14 @@
 //! 后台定时轮询：按设置间隔刷新配额，低额度由无到有时发系统通知；
 //! 5 小时窗口重置前 15 分钟内（且剩余量 > 0）提醒一次"建议用完"。
+//!
+//! 刷新模式（settings.adaptive_refresh，默认开）：
+//! 自适应 = 近 10 分钟内有新 token 消耗（本地 wire.jsonl 扫描的 last_event_at）按 1 分钟轮询，
+//! 静默按用户配置间隔；固定 = 恒按用户配置间隔。
 
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use kimicodebar::local_usage;
 use kimicodebar::quota::QuotaDetail;
 use kimicodebar::storage;
 use tauri::{AppHandle, Manager};
@@ -15,13 +20,18 @@ use crate::i18n;
 
 /// 重置提醒提前量：进入重置前 15 分钟窗口才提醒
 const RESET_REMIND_WINDOW_MIN: i64 = 15;
+/// 活跃判定窗口：最近一次 token 消耗距今 ≤ 10 分钟记为活跃（恰好 10 分钟算活跃）
+const ACTIVE_WINDOW_MS: i64 = 10 * 60 * 1000;
+/// 自适应模式下活跃时的轮询间隔（秒）：写死 1 分钟
+const ACTIVE_INTERVAL_SECS: u64 = 60;
 
-/// 启动轮询任务：立即刷一次，之后按 settings.refresh_interval_min 分钟循环。
+/// 启动轮询任务：立即刷一次，之后按 settings.refresh_interval_min 分钟循环；
+/// 自适应模式下活跃期收紧为 1 分钟（规则见 current_interval_secs）。
 pub fn start(app: AppHandle) {
     // setup 在主线程执行、不在 tokio runtime 上下文里，
     // 必须用 tauri::async_runtime::spawn（内部惰性解析 runtime）
     tauri::async_runtime::spawn(async move {
-        let mut current_secs = load_interval_secs();
+        let mut current_secs = current_interval_secs().await;
         let mut timer = interval(Duration::from_secs(current_secs));
         // 单次刷新可能超过间隔时，错过的 tick 顺延而非补发，避免连续重刷
         timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -52,8 +62,9 @@ pub fn start(app: AppHandle) {
                 }
             }
 
-            // 设置页改了间隔：重建 interval（下一次 tick 立即触发，顺带马上刷一次）
-            let secs = load_interval_secs();
+            // 设置页改了间隔 / 自适应活跃度翻转：重建 interval
+            // （下一次 tick 立即触发，顺带马上刷一次，活跃期加密即时生效）
+            let secs = current_interval_secs().await;
             if secs != current_secs {
                 current_secs = secs;
                 timer = interval(Duration::from_secs(secs));
@@ -85,10 +96,41 @@ fn notify_low_warning(app: &AppHandle, panel: &crate::commands::PanelState) {
         .show();
 }
 
-fn load_interval_secs() -> u64 {
-    storage::load_settings()
-        .unwrap_or_default()
-        .refresh_interval_secs()
+/// 当前应使用的轮询间隔（秒）：固定模式直接用用户配置；
+/// 自适应模式按本地用量活跃度在 1 分钟与用户配置间切换。
+/// 用量扫描自带 180s 进程内节流（local_usage::scan），1 分钟 tick 下不会每轮都读盘；
+/// 扫描线程 panic 按空结果（静默）容忍，轮询主循环不受影响
+async fn current_interval_secs() -> u64 {
+    let settings = storage::load_settings().unwrap_or_default();
+    let user_secs = settings.refresh_interval_secs();
+    let active = if settings.adaptive_refresh {
+        let stats = tokio::task::spawn_blocking(local_usage::scan)
+            .await
+            .unwrap_or_default();
+        usage_active(Utc::now().timestamp_millis(), stats.last_event_at)
+    } else {
+        false
+    };
+    poll_interval_secs(settings.adaptive_refresh, active, user_secs)
+}
+
+/// 活跃判定纯函数：最近一次 usage.record 事件距今 ≤ 10 分钟为活跃（恰好 10 分钟算活跃）。
+/// None（从未扫到消耗）按静默；事件时间戳在未来（时钟回拨/写入方时钟偏快）差值为负，
+/// 同样 ≤ 窗口按活跃——刚烧过 token 多刷几次无害
+fn usage_active(now_ms: i64, last_event_ms: Option<i64>) -> bool {
+    match last_event_ms {
+        Some(ts) => now_ms - ts <= ACTIVE_WINDOW_MS,
+        None => false,
+    }
+}
+
+/// 轮询间隔选择纯函数：自适应模式且活跃 → 1 分钟；其余 → 用户配置间隔
+fn poll_interval_secs(adaptive: bool, active: bool, user_secs: u64) -> u64 {
+    if adaptive && active {
+        ACTIVE_INTERVAL_SECS
+    } else {
+        user_secs
+    }
 }
 
 /// 是否到达重置提醒时机：重置时刻在未来 0–15 分钟内（恰好 15 分钟算在内，
@@ -207,5 +249,44 @@ mod tests {
         let old_reset = now - Duration::hours(5);
         let new_reset = now + Duration::minutes(10);
         assert!(reset_remind_due(now, new_reset, Some(old_reset)));
+    }
+
+    // ---- 自适应刷新：活跃判定与间隔选择 ----
+
+    #[test]
+    fn adaptive_refresh_active_within_10_minutes() {
+        let now_ms = at(1_000_000).timestamp_millis();
+        // 9 分 59 秒前有消耗：活跃
+        assert!(usage_active(now_ms, Some(now_ms - (9 * 60 + 59) * 1000)));
+        // 事件时间戳在未来（时钟回拨）：差值为负，按活跃
+        assert!(usage_active(now_ms, Some(now_ms + 60_000)));
+    }
+
+    #[test]
+    fn adaptive_refresh_silent_beyond_10_minutes_or_no_events() {
+        let now_ms = at(1_000_000).timestamp_millis();
+        // 10 分 零 1 秒前的消耗：静默
+        assert!(!usage_active(now_ms, Some(now_ms - (10 * 60 + 1) * 1000)));
+        // 从未扫到消耗：静默
+        assert!(!usage_active(now_ms, None));
+    }
+
+    #[test]
+    fn adaptive_refresh_exactly_10_minutes_counts_active() {
+        // 恰好 10 分钟归活跃侧（与 reset_remind_due"恰好 15 分钟算在内"同惯例：
+        // "近 10 分钟内"含端点；偏向活跃只是多刷一次，代价低）
+        let now_ms = at(1_000_000).timestamp_millis();
+        assert!(usage_active(now_ms, Some(now_ms - 10 * 60 * 1000)));
+    }
+
+    #[test]
+    fn adaptive_refresh_interval_choice() {
+        // 自适应 + 活跃 → 写死 1 分钟
+        assert_eq!(poll_interval_secs(true, true, 300), ACTIVE_INTERVAL_SECS);
+        // 自适应 + 静默 → 用户配置间隔
+        assert_eq!(poll_interval_secs(true, false, 300), 300);
+        // 固定模式：无论活跃与否都按用户配置
+        assert_eq!(poll_interval_secs(false, true, 300), 300);
+        assert_eq!(poll_interval_secs(false, false, 300), 300);
     }
 }

@@ -31,6 +31,8 @@ const BG_PRESETS = ["night", "aurora", "violet", "ember"];
 /** 通用设置表单的本地状态（数字输入框先按字符串持有，保存时解析钳制） */
 interface GeneralForm {
   refreshMin: string;
+  /** 刷新模式：true=自适应（活跃时 1 分钟，静默按固定间隔），默认 true */
+  adaptiveRefresh: boolean;
   lowWarn: boolean;
   threshold: string;
   autostart: boolean;
@@ -58,6 +60,7 @@ function SettingsApp() {
   // 通用设置表单
   const [form, setForm] = useState<GeneralForm>({
     refreshMin: "5",
+    adaptiveRefresh: true,
     lowWarn: true,
     threshold: "20",
     autostart: false,
@@ -147,6 +150,7 @@ function SettingsApp() {
         );
         setForm({
           refreshMin: String(s.refresh_interval_min),
+          adaptiveRefresh: s.adaptive_refresh,
           lowWarn: s.low_warn_enabled,
           threshold: String(s.warn_threshold_pct),
           autostart: s.autostart,
@@ -250,6 +254,7 @@ function SettingsApp() {
     const next: AppSettings = {
       login_method: method,
       refresh_interval_min: refreshMin,
+      adaptive_refresh: form.adaptiveRefresh,
       low_warn_enabled: form.lowWarn,
       warn_threshold_pct: threshold,
       autostart: form.autostart,
@@ -438,6 +443,20 @@ function SettingsApp() {
         </button>
         {generalOpen && (
           <>
+            <div className="form-row">
+              <label htmlFor="refresh-mode">{t("settings.general.refreshMode")}</label>
+              <select
+                id="refresh-mode"
+                className="input"
+                value={form.adaptiveRefresh ? "adaptive" : "fixed"}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, adaptiveRefresh: e.target.value === "adaptive" }))
+                }
+              >
+                <option value="adaptive">{t("settings.general.refreshModeAdaptive")}</option>
+                <option value="fixed">{t("settings.general.refreshModeFixed")}</option>
+              </select>
+            </div>
             <div className="form-row">
               <label htmlFor="refresh-interval">{t("settings.general.refreshInterval")}</label>
               <input

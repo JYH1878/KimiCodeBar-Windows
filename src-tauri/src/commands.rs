@@ -31,6 +31,8 @@ pub struct AppSettings {
     pub login_method: Option<String>,
     /// 自动刷新间隔（分钟，1–60，默认 5）
     pub refresh_interval_min: u32,
+    /// 刷新模式：true=自适应（活跃时 1 分钟，静默按固定间隔），默认 true
+    pub adaptive_refresh: bool,
     /// 低额度告警开关
     pub low_warn_enabled: bool,
     /// 告警阈值（剩余百分比，1–99）
@@ -58,6 +60,7 @@ impl From<storage::Settings> for AppSettings {
         Self {
             login_method: s.login_method,
             refresh_interval_min: s.refresh_interval_min,
+            adaptive_refresh: s.adaptive_refresh,
             low_warn_enabled: s.low_warn_enabled,
             warn_threshold_pct: s.warn_threshold_pct,
             autostart: s.autostart,
@@ -75,6 +78,7 @@ impl From<AppSettings> for storage::Settings {
         Self {
             login_method: s.login_method,
             refresh_interval_min: s.refresh_interval_min,
+            adaptive_refresh: s.adaptive_refresh,
             low_warn_enabled: s.low_warn_enabled,
             warn_threshold_pct: s.warn_threshold_pct,
             autostart: s.autostart,

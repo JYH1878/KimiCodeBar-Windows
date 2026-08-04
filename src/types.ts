@@ -67,6 +67,8 @@ export interface AppSettings {
   login_method: LoginMethod | null;
   /** 自动刷新间隔（分钟，最小 1，默认 5） */
   refresh_interval_min: number;
+  /** 刷新模式：true=自适应（近 10 分钟有消耗按 1 分钟轮询，静默按固定间隔），默认 true */
+  adaptive_refresh: boolean;
   /** 低额度告警开关（默认 true） */
   low_warn_enabled: boolean;
   /** 告警阈值百分比（默认 20） */
@@ -138,6 +140,8 @@ export interface LocalUsageStats {
   by_model: ModelUsage[];
   /** 上次扫描时间（epoch 秒），未扫过为 null */
   last_scan_at: number | null;
+  /** 最近一次 usage.record 事件时间（epoch 毫秒），从未扫到为 null；自适应刷新的活跃判定依据 */
+  last_event_at: number | null;
 }
 
 // ============ 主题 ============

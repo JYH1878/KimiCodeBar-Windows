@@ -66,6 +66,9 @@
     "general": {
       "title": "通用设置",
       "refreshInterval": "刷新间隔（分钟，1–60）",
+      "refreshMode": "刷新模式",
+      "refreshModeAdaptive": "自适应（活跃时 1 分钟，静默按下方间隔）",
+      "refreshModeFixed": "固定间隔",
       "lowWarn": "低额度告警",
       "warnThreshold": "告警阈值（剩余 %，1–99）",
       "autostart": "开机自启",

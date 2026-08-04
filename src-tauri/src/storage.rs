@@ -28,6 +28,10 @@ pub struct Settings {
     /// 后台轮询间隔（分钟），默认 5，范围 1–60
     #[serde(default = "default_refresh_interval_min")]
     pub refresh_interval_min: u32,
+    /// 自适应刷新：开（默认）时近 10 分钟有 token 消耗按 1 分钟轮询、静默按固定间隔；
+    /// 关时恒按 refresh_interval_min 固定间隔
+    #[serde(default = "default_adaptive_refresh")]
+    pub adaptive_refresh: bool,
     /// 低额度时是否发系统通知，默认开
     #[serde(default = "default_low_warn_enabled")]
     pub low_warn_enabled: bool,
@@ -59,6 +63,10 @@ const fn default_refresh_interval_min() -> u32 {
     DEFAULT_REFRESH_INTERVAL_MIN
 }
 
+const fn default_adaptive_refresh() -> bool {
+    true
+}
+
 const fn default_low_warn_enabled() -> bool {
     true
 }
@@ -72,6 +80,7 @@ impl Default for Settings {
         Self {
             login_method: None,
             refresh_interval_min: DEFAULT_REFRESH_INTERVAL_MIN,
+            adaptive_refresh: true,
             low_warn_enabled: true,
             warn_threshold_pct: DEFAULT_WARN_THRESHOLD_PCT,
             autostart: false,
@@ -220,6 +229,7 @@ mod tests {
         let settings = Settings {
             login_method: Some("oauth".to_string()),
             refresh_interval_min: 15,
+            adaptive_refresh: false,
             low_warn_enabled: false,
             warn_threshold_pct: 33.5,
             autostart: true,
@@ -280,6 +290,8 @@ mod tests {
         let settings = load_settings().unwrap();
         assert_eq!(settings.login_method.as_deref(), Some("oauth"));
         assert_eq!(settings.refresh_interval_min, DEFAULT_REFRESH_INTERVAL_MIN);
+        // 旧版设置文件无 adaptive_refresh 字段：读回默认 true（自适应）
+        assert!(settings.adaptive_refresh);
         assert!(settings.low_warn_enabled);
         assert_eq!(settings.warn_threshold_pct, DEFAULT_WARN_THRESHOLD_PCT);
         assert!(!settings.autostart);

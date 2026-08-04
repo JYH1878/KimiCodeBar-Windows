@@ -172,6 +172,8 @@ function mockLocalUsage(): LocalUsageStats {
       { model: "kimi-code/kimi-for-coding", tokens: 128000 },
     ],
     last_scan_at: Math.floor(Date.now() / 1000),
+    // mock 演示"当前活跃"：最近事件时间即现在
+    last_event_at: Date.now(),
   };
 }
 
@@ -199,6 +201,7 @@ const mockDb = {
   settings: {
     login_method: null,
     refresh_interval_min: 5,
+    adaptive_refresh: true,
     low_warn_enabled: true,
     warn_threshold_pct: 20,
     autostart: false,
