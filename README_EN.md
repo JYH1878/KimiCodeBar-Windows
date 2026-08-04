@@ -13,6 +13,8 @@ Built with **Tauri 2 + Rust + React**: installer under 3 MB, ~10–20 MB RAM in 
 
 > Community project, not an official Kimi product.
 >
+> **Official site**: [jyh1878.github.io/KimiCodeBar-Windows](https://jyh1878.github.io/KimiCodeBar-Windows/)
+>
 > **On macOS? Use the original [xifandev/KimiCodeBar](https://github.com/xifandev/KimiCodeBar)** (maintained by @xifandev, [official site](https://xifandev.github.io/KimiCodeBar/)) — this repo is the author-endorsed community port for Windows; the two repos are maintained and released independently.
 
 ## Features
@@ -25,10 +27,11 @@ Built with **Tauri 2 + Rust + React**: installer under 3 MB, ~10–20 MB RAM in 
 - **Usage trend chart**: 24-hour dual-line history (7-day / 5-hour), recorded locally — facts only, no prediction
 - **Light / dark theme**: follows the system or switch manually
 - **Panel background**: preset gradients (Night / Aurora / Violet / Ember, each adapted to light & dark themes) or a custom image (PNG / JPG / WebP, ≤10MB), with translucent frosted cards
+- **Panel mascot**: an animated blue dumpling (vector SVG) in the bottom-left corner of the panel — blinks and glances around, adapts to light/dark themes; purely decorative
 - **Two sign-in methods**
   - **API Key**: paste a `sk-kimi-` key, stored in Windows Credential Manager
   - **Account authorization**: OAuth device flow (same as the Kimi Code CLI), one-click browser authorization with automatic token refresh
-- **Auto refresh**: polls every 5 minutes by default (1–60 min configurable)
+- **Adaptive refresh**: polls every 5 minutes by default (1–60 min configurable); tightens to 1-minute polling while a local Kimi session is active (new token usage within the last 10 minutes) and relaxes back when idle — switchable to fixed mode in Settings (adaptive by default)
 - **Low-quota alerts**: tray icon turns red and a system notification fires when any window drops below the threshold (default 20%, configurable)
 - **Works offline**: last successful result is cached locally and shown without errors when the network is down
 - **Auto update**: silently checks GitHub Releases; an update badge appears in the panel when a new version is available
@@ -145,7 +148,7 @@ cd src-tauri && cargo test
 ## Engineering & quality
 
 - **CI gates**: every push / PR runs `cargo fmt --check`, `cargo clippy -D warnings`, ESLint and `cargo test` ([workflow](.github/workflows/ci.yml))
-- **Test strategy**: 110+ unit/integration tests focusing on defensive parsing of the usage API (missing fields, proto3 omissions, field aliases, currency unit conversion), OAuth flow logic, version comparison and storage round-trips; real API responses (sanitized) are kept as regression fixtures
+- **Test strategy**: 180+ unit/integration tests focusing on defensive parsing of the usage API (missing fields, proto3 omissions, field aliases, currency unit conversion), OAuth flow logic, version comparison and storage round-trips; real API responses (sanitized) are kept as regression fixtures
 - **Dependabot**: weekly PRs for npm / cargo / GitHub Actions updates
 - **Automated releases**: pushing a `v*` tag builds the NSIS installer and portable zip in CI and drafts a GitHub Release ([workflow](.github/workflows/release.yml))
 

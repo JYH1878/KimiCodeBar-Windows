@@ -11,6 +11,8 @@ Kimi Code 用量监控的 Windows 系统托盘工具。常驻托盘不打扰，�
 
 基于 **Tauri 2 + Rust + React** 构建：安装包不到 3 MB，运行内存约 10–20 MB。
 
+> **官网**：[jyh1878.github.io/KimiCodeBar-Windows](https://jyh1878.github.io/KimiCodeBar-Windows/)
+>
 > 社区版本，非 Kimi 官方出品。
 >
 > **macOS 用户请移步原版 [xifandev/KimiCodeBar](https://github.com/xifandev/KimiCodeBar)**（由 @xifandev 维护，[官网](https://xifandev.github.io/KimiCodeBar/)）——本项目是经原作者认可的 Windows 社区移植版，两仓库分治、各自独立发版。
@@ -26,7 +28,7 @@ Kimi Code 用量监控的 Windows 系统托盘工具。常驻托盘不打扰，�
 - **双模式登录**
   - **方式A · API Key**：手动输入 `sk-kimi-` 前缀的 Key，存入 Windows 凭据管理器
   - **方式B · 账号授权**：OAuth 设备码流程（与 Kimi Code CLI 相同），浏览器一键授权，自动续期
-- **自动刷新**：默认每 5 分钟轮询（1–60 分钟可调）
+- **自适应刷新**：默认每 5 分钟轮询（1–60 分钟可调）；检测到本地会话活跃（近 10 分钟有新 token 消耗）时自动加密到 1 分钟、闲置回落，设置页可切换"自适应 / 固定"（默认自适应）
 - **低额度预警**：任一窗口剩余低于阈值（默认 20%，可调）时托盘图标变红，并推送系统通知（可关闭）
 - **离线可用**：最近一次查询结果本地缓存，断网时照常展示，不报错不崩溃
 - **自动更新**：静默检查 GitHub Releases，有新版本时面板出现更新徽标，点击直达下载页
@@ -35,6 +37,7 @@ Kimi Code 用量监控的 Windows 系统托盘工具。常驻托盘不打扰，�
 - **中英双语**：界面、通知、托盘提示全覆盖（跟随系统 / 中文 / English）
 - **浅色 / 深色主题**：跟随系统或手动切换
 - **面板背景**：预设渐变色（夜空 / 极光 / 紫藤 / 暖阳，各配明暗两套色随主题切换）或自定义图片（PNG / JPG / WebP，≤10MB），卡片为半透明毛玻璃
+- **面板吉祥物**：底栏左角的蓝团子矢量动画（眨眼 + 眼珠左右看），深浅主题自动适配，纯装饰不抢戏
 - **用量导出**：一键导出 CSV/JSON 用量记录，方便报销与复盘
 - **诊断与日志**：按天滚动运行日志（不含任何凭证）+ 一键导出脱敏诊断文件
 - **开机自启**：可选，设置里一键开关
@@ -136,7 +139,7 @@ cd src-tauri && cargo test
 ## 工程与质量
 
 - **CI 门禁**：每次 push / PR 自动执行 `cargo fmt --check`、`cargo clippy -D warnings`、ESLint、`cargo test`（[工作流](.github/workflows/ci.yml)）
-- **测试策略**：110+ 单元/集成测试，重点覆盖用量响应的防御性解析（字段缺失、proto3 省略、字段别名、金额单位换算）、OAuth 流程纯逻辑、版本比较、配置读写回环；真实 API 响应脱敏后作为 fixture 常驻回归
+- **测试策略**：180+ 单元/集成测试，重点覆盖用量响应的防御性解析（字段缺失、proto3 省略、字段别名、金额单位换算）、OAuth 流程纯逻辑、版本比较、配置读写回环；真实 API 响应脱敏后作为 fixture 常驻回归
 - **Dependabot**：每周自动检查 npm / cargo / GitHub Actions 依赖升级并开 PR
 - **自动发版**：打 `v*` tag → CI 自动构建 NSIS 安装包与便携 zip → 生成 Release 草稿，人工确认后发布（[工作流](.github/workflows/release.yml)）
 
