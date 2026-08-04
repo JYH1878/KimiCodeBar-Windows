@@ -196,6 +196,24 @@ body,
   line-height: 24px;
 }
 
+/* --- 顶部吉祥物（团子动图贴纸） --- */
+
+/* 团子 gif 自带深色底：用圆角裁切 + 描边 + 柔和阴影做成"贴纸"，
+   深/浅主题、有/无自定义面板背景（has-bg 毛玻璃）下都成立，不留生硬色块 */
+.mascot-bar {
+  display: flex;
+  justify-content: center;
+  padding-top: 2px;
+}
+
+.mascot {
+  width: 60px;
+  height: auto;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);
+}
+
 /* 面板通用卡片（与设置页 .card 区分，左对齐、内边距更紧凑） */
 .pcard {
   padding: 12px 14px;

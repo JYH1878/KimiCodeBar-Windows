@@ -10,7 +10,8 @@
     "refreshTitle": "立即刷新",
     "settings": "设置",
     "settingsTitle": "打开设置",
-    "updateBadgeTitle": "发现新版本，点击打开发布页"
+    "updateBadgeTitle": "发现新版本，点击打开发布页",
+    "mascotTitle": "KimiCodeBar 吉祥物"
   },
   "usage": {
     "remaining": "剩余 {{remaining}}/{{limit}}",

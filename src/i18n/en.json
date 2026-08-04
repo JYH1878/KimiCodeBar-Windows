@@ -10,7 +10,8 @@
     "refreshTitle": "Refresh now",
     "settings": "Settings",
     "settingsTitle": "Open settings",
-    "updateBadgeTitle": "New version available — click to open the release page"
+    "updateBadgeTitle": "New version available — click to open the release page",
+    "mascotTitle": "KimiCodeBar mascot"
   },
   "usage": {
     "remaining": "{{remaining}}/{{limit}} left",

@@ -199,6 +199,10 @@ function PanelApp() {
 
   return (
     <div className={panelCls} style={bgStyle}>
+      {/* 顶部吉祥物：蓝团子动图贴纸（纯装饰，hover 提示文案） */}
+      <div className="mascot-bar">
+        <img className="mascot" src="logo.gif" alt="" title={t("panel.mascotTitle")} />
+      </div>
       {state.error !== null && (
         <ErrorBanner error={state.error} onRetry={() => void doRefresh()} />
       )}
