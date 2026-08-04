@@ -15,6 +15,7 @@ import { MembershipCard } from "./components/MembershipCard";
 import { BoosterCard } from "./components/BoosterCard";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { EmptyState } from "./components/EmptyState";
+import { Tuanzi } from "./components/Tuanzi";
 
 /** epoch 秒 → 本地时间 HH:mm:ss */
 function formatFetchedAt(epochSec: number): string {
@@ -199,10 +200,6 @@ function PanelApp() {
 
   return (
     <div className={panelCls} style={bgStyle}>
-      {/* 顶部吉祥物：蓝团子动图贴纸（纯装饰，hover 提示文案） */}
-      <div className="mascot-bar">
-        <img className="mascot" src="logo.gif" alt="" title={t("panel.mascotTitle")} />
-      </div>
       {state.error !== null && (
         <ErrorBanner error={state.error} onRetry={() => void doRefresh()} />
       )}
@@ -224,33 +221,37 @@ function PanelApp() {
         </div>
       )}
       <div className="footer">
-        <span className="fetched-at">
-          {updateUrl !== null && update?.latest && (
+        {/* 底栏团子（矢量 SVG，复刻上游 AnimatedKimiCodeLogo，纯装饰） */}
+        <Tuanzi className="mascot" />
+        <div className="footer-right">
+          <div className="footer-actions">
             <button
-              type="button"
-              className="update-badge"
-              onClick={() => void openExternalUrl(updateUrl)}
-              title={t("panel.updateBadgeTitle")}
+              className="btn"
+              onClick={() => void doRefresh()}
+              disabled={busy}
+              title={t("panel.refreshTitle")}
             >
-              ⬆ v{update.latest}
+              <span className={busy ? "spin" : ""}>⟳</span> {t("panel.refresh")}
             </button>
-          )}
-          {state.fetched_at
-            ? t("panel.updatedAt", { time: formatFetchedAt(state.fetched_at) })
-            : t("panel.noData")}
-        </span>
-        <div className="footer-actions">
-          <button
-            className="btn"
-            onClick={() => void doRefresh()}
-            disabled={busy}
-            title={t("panel.refreshTitle")}
-          >
-            <span className={busy ? "spin" : ""}>⟳</span> {t("panel.refresh")}
-          </button>
-          <button className="btn" onClick={() => void openSettings()} title={t("panel.settingsTitle")}>
-            {t("panel.settings")}
-          </button>
+            <button className="btn" onClick={() => void openSettings()} title={t("panel.settingsTitle")}>
+              {t("panel.settings")}
+            </button>
+          </div>
+          <span className="fetched-at">
+            {updateUrl !== null && update?.latest && (
+              <button
+                type="button"
+                className="update-badge"
+                onClick={() => void openExternalUrl(updateUrl)}
+                title={t("panel.updateBadgeTitle")}
+              >
+                ⬆ v{update.latest}
+              </button>
+            )}
+            {state.fetched_at
+              ? t("panel.updatedAt", { time: formatFetchedAt(state.fetched_at) })
+              : t("panel.noData")}
+          </span>
         </div>
       </div>
     </div>

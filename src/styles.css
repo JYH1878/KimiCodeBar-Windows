@@ -76,7 +76,7 @@ body,
   max-width: 100vw;
   height: 100%;
   margin: 0 auto;
-  padding: 10px 12px;
+  padding: 10px 12px 8px;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -196,22 +196,70 @@ body,
   line-height: 24px;
 }
 
-/* --- 顶部吉祥物（团子动图贴纸） --- */
+/* --- 底栏团子（矢量 SVG，规格复刻上游 AnimatedKimiCodeLogo） --- */
 
-/* 团子 gif 自带深色底：用圆角裁切 + 描边 + 柔和阴影做成"贴纸"，
-   深/浅主题、有/无自定义面板背景（has-bg 毛玻璃）下都成立，不留生硬色块 */
-.mascot-bar {
+/* 右列：上排按钮、下排更新时间（右对齐） */
+.footer-right {
   display: flex;
-  justify-content: center;
-  padding-top: 2px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  min-width: 0;
 }
 
-.mascot {
-  width: 60px;
-  height: auto;
-  border-radius: 14px;
-  border: 1px solid var(--border);
-  box-shadow: 0 3px 12px rgba(0, 0, 0, 0.3);
+/* 团子撑满底栏整行高度：行高约 49px（右列 43 + 行上下 padding 5/1），
+   负 margin 吃掉 padding 部分；团子上距卡片约 10px、下距窗口底约 8px */
+.footer .mascot {
+  height: 43px;
+  width: auto;
+  flex-shrink: 0;
+  margin: -5px 0 -1px;
+  filter: drop-shadow(0 3px 8px rgba(59, 130, 245, 0.35));
+}
+
+/* 身体 Kimi 蓝；眼睛跟随主题：深色近黑、浅色纯白（同上游） */
+.tuanzi-body {
+  fill: #3b82f5;
+}
+
+.tuanzi-eye {
+  fill: #181817;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: tuanzi-blink 3s ease-in-out infinite;
+}
+
+[data-theme="light"] .tuanzi-eye {
+  fill: #ffffff;
+}
+
+/* 眨眼：每 3s 一次（闭 0.08s → 停 0.04s → 睁 0.08s，折算为周期百分比） */
+@keyframes tuanzi-blink {
+  0% { transform: scaleY(1); }
+  2.7% { transform: scaleY(0.12); }
+  4% { transform: scaleY(0.12); }
+  6.7%, 100% { transform: scaleY(1); }
+}
+
+/* 左右看：6s 周期（右→中→左→中，移动段 0.3s 折 5%，停顿约 1s） */
+.tuanzi-eyes {
+  animation: tuanzi-look 6s ease-in-out infinite;
+}
+
+@keyframes tuanzi-look {
+  0%, 16% { transform: translateX(0); }
+  21%, 45% { transform: translateX(5px); }
+  50%, 66% { transform: translateX(0); }
+  71%, 95% { transform: translateX(-5px); }
+  100% { transform: translateX(0); }
+}
+
+/* 系统"减少动态效果"开启时静止 */
+@media (prefers-reduced-motion: reduce) {
+  .tuanzi-eye,
+  .tuanzi-eyes {
+    animation: none;
+  }
 }
 
 /* 面板通用卡片（与设置页 .card 区分，左对齐、内边距更紧凑） */
@@ -402,6 +450,16 @@ body,
   gap: 10px;
 }
 
+/* mini 卡（会员/Booster）比标准卡矮一截，给底栏团子腾纵向空间 */
+.mini-card {
+  padding: 8px 14px;
+}
+
+.mini-card .mini-value {
+  margin-top: 2px;
+  font-size: 15px;
+}
+
 .mini-row > * {
   flex: 1;
   min-width: 0;
@@ -527,13 +585,14 @@ body,
 /* 底栏：内容不足 480px 时 margin-top:auto 沉底；内容超出窗口 .panel 纵向滚动时
    sticky 吸底（背景色遮挡下方滚过的内容） */
 .footer {
-  margin-top: auto;
+  /* 底栏与上方卡片的间距在 flex gap 10px 基础上再减 2px（领导定稿） */
+  margin-top: -2px;
   position: sticky;
   bottom: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 6px 2px 2px;
+  padding: 5px 2px 1px;
   background-color: var(--bg);
   font-size: 11px;
   color: var(--muted);
