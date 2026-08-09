@@ -14,7 +14,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # 只读解析 Kimi Code config.toml 的 [secondary_model]（local_usage 把 __secondary__
 # 哨兵桶并入真实模型用）；依赖树里已有同名版本，不引入新传递依赖
-toml = "0.9"
+toml = "1.1"
 # system-proxy：读取 Windows 系统代理（注册表），用户梯子"系统代理"模式下任意端口生效。
 # 它在 reqwest 默认 features 里，default-features = false 会连带关掉，必须显式加回。
 reqwest = { version = "0.13", default-features = false, features = ["json", "native-tls", "system-proxy"] }
