@@ -214,7 +214,7 @@ const mockDb = {
   // 预置一个假 Key，方便浏览器开发时看到"已配置"徽标
   apiKey: "sk-kimi-mock9f8e7d6c5b4a" as string | null,
   oauthConfigured: false,
-  // 网页 token（月度总量用）：初始未配置，走 setWebToken/clearWebToken 变更
+  // 网页凭证（refresh_token / 旧 kimi-auth，月度总量用）：初始未配置，走 setWebToken/clearWebToken 变更
   webToken: null as string | null,
 };
 
@@ -387,15 +387,16 @@ export async function getCredentialStatus(): Promise<CredentialStatus> {
   return invoke<CredentialStatus>("get_credential_status");
 }
 
-// ============ 月度总量（网页 token）============
+// ============ 月度总量（网页 refresh_token）============
 
 /**
- * 校验并保存网页 token（kimi-auth cookie 的值，支持整串 cookie 粘贴由后端识别）。
- * 后端先调网页接口校验，失败抛中文错误原样透传；成功返回当月月度总量。
+ * 校验并保存网页凭证（月度总量用）。
+ * 优先按新鉴权体系的 refresh_token 处理（后端自动续期）；旧体系 kimi-auth 值也兼容。
+ * 后端先调接口校验，失败抛中文错误原样透传；成功返回当月月度总量。
  */
 export async function setWebToken(token: string): Promise<MonthlyInfo> {
   if (!isTauri) {
-    if (token.trim() === "") throw new Error("请粘贴 kimi-auth 的值");
+    if (token.trim() === "") throw new Error("请粘贴 refresh_token 的值");
     // 模拟网络延迟，便于调试"校验中…"加载态
     await new Promise((resolve) => setTimeout(resolve, 600));
     mockDb.webToken = token.trim();
@@ -404,7 +405,7 @@ export async function setWebToken(token: string): Promise<MonthlyInfo> {
   return invoke<MonthlyInfo>("set_web_token", { token });
 }
 
-/** 清除已保存的网页 token（面板月度卡随之不再展示） */
+/** 清除已保存的网页凭证（面板月度卡随之不再展示） */
 export async function clearWebToken(): Promise<void> {
   if (!isTauri) {
     mockDb.webToken = null;

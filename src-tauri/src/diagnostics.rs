@@ -108,6 +108,10 @@ fn build_report(
         "web_token_configured: {}\n",
         matches!(creds::load_web_token(), Ok(Some(_)))
     ));
+    out.push_str(&format!(
+        "web_refresh_token_configured: {}\n",
+        matches!(creds::load_web_refresh_token(), Ok(Some(_)))
+    ));
 
     // 最近一次错误（配额 / 月度）
     out.push_str("\n[最近错误]\n");

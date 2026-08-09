@@ -668,39 +668,80 @@ pub fn get_credential_status() -> CredentialStatus {
         api_key_configured: api_key.is_some(),
         api_key_masked: api_key.as_deref().map(mask_api_key),
         oauth_configured: matches!(oauth::load_credentials(), Ok(Some(_))),
-        web_token_configured: matches!(creds::load_web_token(), Ok(Some(_))),
+        // 新旧体系任一配置都算"已配置"（web_token=kimi-auth / web_refresh_token）
+        web_token_configured: matches!(creds::load_web_token(), Ok(Some(_)))
+            || matches!(creds::load_web_refresh_token(), Ok(Some(_))),
     }
 }
 
-/// 保存网页 token（kimi-auth）：先规范化，再真实调 GetSubscriptionStats 校验；
-/// 通过后存凭据管理器并触发一次刷新，让月度数据立刻上面板
+/// 保存网页 token（月度总量用）：接受新体系 refresh_token 或旧体系 kimi-auth。
+/// 先规范化，再真实调接口校验；通过后存凭据管理器并触发一次刷新，让月度数据立刻上面板。
+///
+/// 校验策略（新旧兼容）：
+/// - 输入形如 refresh_token → 先调 RefreshToken 续期（拿 access_token 验证有效性），
+///   成功后落盘 refresh_token 并用 access_token 拉一次月度；
+/// - 输入是旧体系 kimi-auth（JWT 未过期仍可作 Bearer 用）→ 直接调 GetSubscriptionStats 校验。
 #[tauri::command]
 pub async fn set_web_token(app: AppHandle, token: String) -> Result<MonthlyInfo, String> {
     let token = web::normalize_web_token(&token)?;
-    match web::fetch_subscription_stats(&token).await {
-        Ok(info) => {
-            creds::save_web_token(&token).map_err(|e| e.to_string())?;
+
+    // 优先按新体系处理：refresh_token 续期成功 → 存 refresh_token + 拉月度
+    match web::refresh_access_token(&token).await {
+        Ok(session) => {
+            creds::save_web_refresh_token(&session.refresh_token).map_err(|e| e.to_string())?;
+            // 预热 access_token 缓存，避免随后的 do_refresh 再续一次
+            let exp = web::jwt_exp_secs(&session.access_token)
+                .unwrap_or(now_unix() + WEB_ACCESS_TOKEN_TTL_SECS);
+            *WEB_ACCESS_CACHE.lock().unwrap() = Some((session.access_token.clone(), exp));
             // 只记"已配置"，严禁记录 token 本身
-            tracing::info!("网页 token 已配置");
+            tracing::info!("网页 refresh_token 已配置");
+            let info = web::fetch_subscription_stats(&session.access_token)
+                .await
+                .map_err(|e| web_error_message(&e))?;
             do_refresh(&app).await;
             Ok(info)
         }
-        Err(WebError::Unauthorized) => {
-            Err("网页登录态无效或已过期，请重新复制 kimi-auth 的值".to_string())
-        }
+        // 续期 401/403：可能是旧体系 kimi-auth（JWT 未过期仍可作 Bearer 用），回退直接校验
+        Err(WebError::Unauthorized) => match web::fetch_subscription_stats(&token).await {
+            Ok(info) => {
+                creds::save_web_token(&token).map_err(|e| e.to_string())?;
+                tracing::info!("网页 kimi-auth token 已配置");
+                do_refresh(&app).await;
+                Ok(info)
+            }
+            Err(WebError::Unauthorized) => {
+                Err("网页登录态无效或已过期，请复制最新的 refresh_token 值".to_string())
+            }
+            Err(e) => Err(web_error_message(&e)),
+        },
+        // 续期网络/响应异常：此刻无法验证 token 有效性，直接报错（不回退误判 kimi-auth）
         Err(WebError::Http(_)) => Err("网络错误，校验失败".to_string()),
-        // Parse：展示原始错误文本
-        Err(e @ WebError::Parse(_)) => Err(e.to_string()),
+        Err(WebError::Refresh(msg)) => Err(format!("续期失败：{msg}")),
+        // Parse 理论不可达（refresh_access_token 不返回 Parse），按续期失败文案兜底
+        Err(WebError::Parse(_)) => Err("续期响应解析失败，请重新复制 refresh_token".to_string()),
     }
 }
 
-/// 清除网页 token 并触发一次刷新（面板回到无月度数据态）
+/// 清除网页 token（新旧体系都清）并触发一次刷新（面板回到无月度数据态）
 #[tauri::command]
 pub async fn clear_web_token(app: AppHandle) -> Result<(), String> {
     creds::clear_web_token().map_err(|e| e.to_string())?;
+    creds::clear_web_refresh_token().map_err(|e| e.to_string())?;
+    *WEB_ACCESS_CACHE.lock().unwrap() = None;
     tracing::info!("网页 token 已清除");
     do_refresh(&app).await;
     Ok(())
+}
+
+/// 把 WebError 翻译为面向用户的中文文案（与 set_web_token 的返回语义一致）
+fn web_error_message(e: &WebError) -> String {
+    match e {
+        WebError::Unauthorized => {
+            "网页登录态无效或已过期，请重新复制 refresh_token 的值".to_string()
+        }
+        WebError::Http(_) => "网络错误，校验失败".to_string(),
+        WebError::Parse(msg) | WebError::Refresh(msg) => msg.clone(),
+    }
 }
 
 /// 发起设备码登录：先取设备授权码，立即返回 waiting 状态；
@@ -928,7 +969,7 @@ enum FetchOutcome {
 
 /// 月度刷新的四种结局（独立于配额刷新结果处理）
 enum MonthlyOutcome {
-    /// 未配置网页 token
+    /// 未配置网页 token（新旧体系均无）
     NoToken,
     /// 拉取成功
     Success(MonthlyInfo),
@@ -938,8 +979,23 @@ enum MonthlyOutcome {
     Failed,
 }
 
-/// 取网页 token 并拉取月度总量；未配置 token → NoToken
+/// 网页 access_token 提前续期余量（秒）：剩余有效期小于该值视为临期
+const WEB_REFRESH_MARGIN_SECS: i64 = 300;
+/// access_token 兜底有效期（秒）：JWT 解不出 exp 时按新体系 15 分钟估算
+const WEB_ACCESS_TOKEN_TTL_SECS: i64 = 15 * 60;
+/// 进程内网页 access_token 缓存（access_token, expires_at 秒）。
+/// refresh_token 轮换后的新值由调用方负责落盘（见 fetch_monthly_with_refresh）。
+static WEB_ACCESS_CACHE: std::sync::Mutex<Option<(String, i64)>> = std::sync::Mutex::new(None);
+
+/// 取网页 token 并拉取月度总量；未配置 token → NoToken。
+///
+/// 新鉴权体系（refresh_token）优先：进程内缓存 access_token，临期自动调
+/// RefreshToken 续期并把轮换后的新 refresh_token 落盘（轮换制丢旧即失效）；
+/// 旧体系（kimi-auth，未过期仍可作 Bearer 用）作为兼容路径保留。
 async fn fetch_monthly() -> MonthlyOutcome {
+    if let Ok(Some(refresh_token)) = creds::load_web_refresh_token() {
+        return fetch_monthly_with_refresh(&refresh_token).await;
+    }
     let token = match creds::load_web_token() {
         Ok(Some(token)) => token,
         Ok(None) => return MonthlyOutcome::NoToken,
@@ -949,6 +1005,89 @@ async fn fetch_monthly() -> MonthlyOutcome {
         Ok(info) => MonthlyOutcome::Success(info),
         Err(WebError::Unauthorized) => MonthlyOutcome::Unauthorized,
         Err(_) => MonthlyOutcome::Failed,
+    }
+}
+
+/// 新鉴权体系月度刷新：access_token 未临期直接用缓存，否则续期后查询。
+async fn fetch_monthly_with_refresh(refresh_token: &str) -> MonthlyOutcome {
+    let now = now_unix();
+    let access_token = match web_access_token(refresh_token, now).await {
+        Ok(token) => token,
+        Err(MonthlyOutcome::Unauthorized) => {
+            // refresh_token 已失效：清掉本地凭证，下次引导重新粘贴
+            tracing::warn!("网页 refresh_token 已失效，已清除本地凭证");
+            let _ = creds::clear_web_refresh_token();
+            return MonthlyOutcome::Unauthorized;
+        }
+        Err(other) => return other,
+    };
+
+    match web::fetch_subscription_stats(&access_token).await {
+        Ok(info) => MonthlyOutcome::Success(info),
+        // access_token 已过期（缓存判定后提前失效等罕见情况）：清缓存，
+        // 用当前 refresh_token 再续一次；仍 401 则判 refresh_token 失效
+        Err(WebError::Unauthorized) => {
+            *WEB_ACCESS_CACHE.lock().unwrap() = None;
+            match web_access_token(refresh_token, now_unix()).await {
+                Ok(token) => match web::fetch_subscription_stats(&token).await {
+                    Ok(info) => MonthlyOutcome::Success(info),
+                    Err(WebError::Unauthorized) => {
+                        tracing::warn!("网页 refresh_token 已失效，已清除本地凭证");
+                        let _ = creds::clear_web_refresh_token();
+                        MonthlyOutcome::Unauthorized
+                    }
+                    Err(_) => MonthlyOutcome::Failed,
+                },
+                Err(MonthlyOutcome::Unauthorized) => {
+                    let _ = creds::clear_web_refresh_token();
+                    MonthlyOutcome::Unauthorized
+                }
+                Err(other) => other,
+            }
+        }
+        Err(_) => MonthlyOutcome::Failed,
+    }
+}
+
+/// 取可用的网页 access_token：缓存未临期直接复用，否则调 RefreshToken 续期。
+/// 续期成功后把轮换的新 refresh_token 落盘（丢旧即失效）。
+async fn web_access_token(refresh_token: &str, now: i64) -> Result<String, MonthlyOutcome> {
+    let cached = {
+        let cache = WEB_ACCESS_CACHE.lock().unwrap();
+        cache
+            .as_ref()
+            .filter(|(_, exp)| *exp - now > WEB_REFRESH_MARGIN_SECS)
+            .map(|(token, _)| token.clone())
+    };
+    if let Some(token) = cached {
+        return Ok(token);
+    }
+
+    match web::refresh_access_token(refresh_token).await {
+        Ok(session) => {
+            // 轮换后的新 refresh_token 必须落盘，否则旧值失效后无法再续期
+            if let Err(e) = creds::save_web_refresh_token(&session.refresh_token) {
+                tracing::warn!("保存轮换后的 refresh_token 失败: {e}");
+            }
+            let exp =
+                web::jwt_exp_secs(&session.access_token).unwrap_or(now + WEB_ACCESS_TOKEN_TTL_SECS);
+            *WEB_ACCESS_CACHE.lock().unwrap() = Some((session.access_token.clone(), exp));
+            // 续期成功留痕（严禁记录 token 本身），便于诊断"自动续期是否在跑"
+            tracing::info!("网页 access_token 续期成功");
+            Ok(session.access_token)
+        }
+        Err(WebError::Unauthorized) => {
+            *WEB_ACCESS_CACHE.lock().unwrap() = None;
+            Err(MonthlyOutcome::Unauthorized)
+        }
+        // 网络/解析失败：若缓存里还有未过期的 access_token 可先用（网络抖动场景）
+        Err(_) => {
+            let stale = WEB_ACCESS_CACHE.lock().unwrap().clone();
+            match stale {
+                Some((token, exp)) if exp > now => Ok(token),
+                _ => Err(MonthlyOutcome::Failed),
+            }
+        }
     }
 }
 

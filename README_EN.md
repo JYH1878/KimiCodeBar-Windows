@@ -22,7 +22,7 @@ Built with **Tauri 2 + Rust + React**: installer under 3 MB, ~10–20 MB RAM in 
 - **System tray app**: left-click pops up the usage panel (positioned above the tray icon, auto-hides on focus loss); right-click menu (Refresh / Settings / Exit)
 - **Dual quota windows**: used percentage, remaining amount and reset countdown for both the 7-day and 5-hour rolling windows
 - **Membership & wallet**: shows membership tier (Andante / Moderato / Allegretto / Allegro), Booster wallet balance and monthly usage
-- **Monthly totals**: combined Kimi + Code monthly usage from the web console (one-time web token paste in Settings)
+- **Monthly totals**: combined Kimi + Code monthly usage from the web console (paste the web refresh_token once in Settings; the app renews it automatically)
 - **Local token stats**: scans local `wire.jsonl` session logs for per-day token consumption (today/yesterday + 7-day bar chart + today's per-model breakdown) — no API needed
 - **Usage trend chart**: 24-hour dual-line history (7-day / 5-hour), recorded locally — facts only, no prediction
 - **Light / dark theme**: follows the system or switch manually
@@ -142,7 +142,7 @@ cd src-tauri && cargo test
 | Framework | Tauri 2 (tray, frameless panel, notifications, autostart, opener, global shortcut) |
 | Backend | Rust: reqwest (native-tls), serde, tokio, keyring (Windows Credential Manager), tracing |
 | Frontend | React 18 + TypeScript + Vite, i18next (zh/en), no heavy UI libraries |
-| Persistence | JSON files (settings / cache / history) + Windows Credential Manager (API key, web token) + DPAPI-encrypted file (OAuth) |
+| Persistence | JSON files (settings / cache / history) + Windows Credential Manager (API key, web refresh token) + DPAPI-encrypted file (OAuth) |
 | Packaging | NSIS (per-user install, no admin) + portable zip |
 
 ## Engineering & quality

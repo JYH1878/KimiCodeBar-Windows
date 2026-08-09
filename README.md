@@ -21,7 +21,7 @@ Kimi Code 用量监控的 Windows 系统托盘工具。常驻托盘不打扰，�
 
 - **系统托盘常驻**：左键弹出用量面板（自动定位到托盘图标上方，失焦收起）；右键菜单（刷新 / 设置 / 退出）
 - **双窗口用量**：7 天窗口 + 5 小时窗口的已用百分比、剩余量、重置倒计时
-- **月度总量**：Kimi + Code 每月总用量分列显示（设置中粘贴一次网页 token 即可）
+- **月度总量**：Kimi + Code 每月总用量分列显示（设置中粘贴一次网页 refresh_token，插件自动续期）
 - **本地消耗统计**：扫描本地 `wire.jsonl` 会话日志，按天统计 token 消耗（今日/昨日 + 近 7 天柱状图 + 今日分模型占比），不依赖 API
 - **用量趋势**：近 24 小时双线折线图（7 天/5 小时），本地记录 7 天历史，纯事实不预测
 - **会员与钱包**：显示会员档位（Andante / Moderato / Allegretto / Allegro）与加油包（Booster）钱包余额、月度用量
@@ -133,7 +133,7 @@ cd src-tauri && cargo test
 | 框架 | Tauri 2（系统托盘、无边框面板、通知、自启、 opener） |
 | 后端 | Rust：reqwest（native-tls）、serde、tokio、keyring（Windows 凭据管理器） |
 | 前端 | React 18 + TypeScript + Vite，无重型 UI 依赖 |
-| 持久化 | JSON 文件（settings / cache）+ Windows 凭据管理器（API Key）+ 本地凭证文件（OAuth） |
+| 持久化 | JSON 文件（settings / cache）+ Windows 凭据管理器（API Key、网页 refresh_token）+ 本地凭证文件（OAuth） |
 | 打包 | NSIS（当前用户安装，免管理员） |
 
 ## 工程与质量

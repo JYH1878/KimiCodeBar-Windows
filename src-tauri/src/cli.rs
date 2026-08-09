@@ -99,13 +99,55 @@ async fn fetch_status() -> Result<String, (i32, String)> {
         .await
         .map_err(|e| (EXIT_FETCH_FAILED, error_json(&format!("获取配额失败: {e}"))))?;
 
-    // 月度总量是可选增强：无 web token 或拉取失败都退化为 null，不影响主结果
-    let monthly = match web_token() {
-        Some(token) => web::fetch_subscription_stats(&token).await.ok(),
-        None => None,
+    // 月度总量是可选增强：无网页凭证或拉取失败都退化为 null，不影响主结果。
+    // 新体系（refresh_token）优先自动续期；旧体系 kimi-auth / 环境变量直接当 Bearer 用。
+    let monthly = match web_monthly().await {
+        Some(info) => Some(info),
+        None => match web_token() {
+            Some(token) => web::fetch_subscription_stats(&token).await.ok(),
+            None => None,
+        },
     };
 
     Ok(success_json(quota, monthly, Utc::now().timestamp()))
+}
+
+/// 新鉴权体系月度拉取：keyring 有 refresh_token 则自动续期后查询。
+/// refresh_token 续期轮换，新值必须写回 keyring（丢旧即失效）。
+/// 返回 Some(月度) 表示成功；None 表示未配置 refresh_token 或拉取失败（调用方回退旧路径）。
+async fn web_monthly() -> Option<MonthlyInfo> {
+    let refresh_token = creds::load_web_refresh_token().ok().flatten()?;
+    match web::refresh_access_token(&refresh_token).await {
+        Ok(session) => {
+            // 轮换后的新 refresh_token 必须落盘，否则旧值失效后无法再续期
+            if let Err(e) = creds::save_web_refresh_token(&session.refresh_token) {
+                tracing::warn!("保存轮换后的 refresh_token 失败: {e}");
+            }
+            // 续期成功留痕（严禁记录 token 本身），便于诊断"自动续期是否在跑"
+            tracing::info!("网页 access_token 续期成功");
+            web::fetch_subscription_stats(&session.access_token)
+                .await
+                .ok()
+        }
+        // refresh_token 已失效：清掉本地凭证，回退旧路径（可能有 kimi-auth / 环境变量）
+        Err(web::WebError::Unauthorized) => {
+            tracing::warn!("网页 refresh_token 已失效，已清除本地凭证");
+            let _ = creds::clear_web_refresh_token();
+            None
+        }
+        // 网络抖动：暂用旧路径兜底（可能同样失败，月度退化为 null）
+        Err(_) => None,
+    }
+}
+
+/// 旧体系 web token 解析顺序：环境变量 KIMI_WEB_TOKEN（非空）→ keyring web_token。
+/// keyring 读取失败按"无 web token"处理，不阻断主流程。
+/// 仅在新体系 refresh_token 未配置或续期失败时作为兼容路径调用。
+fn web_token() -> Option<String> {
+    if let Some(token) = env_token("KIMI_WEB_TOKEN") {
+        return Some(token);
+    }
+    creds::load_web_token().ok().flatten()
 }
 
 /// 读取非空环境变量（trim 后为空视为未设置）
@@ -114,15 +156,6 @@ fn env_token(name: &str) -> Option<String> {
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty())
-}
-
-/// web token 解析顺序：环境变量 KIMI_WEB_TOKEN（非空）→ keyring web_token。
-/// keyring 读取失败按"无 web token"处理，不阻断主流程。
-fn web_token() -> Option<String> {
-    if let Some(token) = env_token("KIMI_WEB_TOKEN") {
-        return Some(token);
-    }
-    creds::load_web_token().ok().flatten()
 }
 
 /// 成功输出的 pretty JSON（stdout）

@@ -1,7 +1,16 @@
 //! Kimi 网页端月度总量查询：`GetSubscriptionStats`（Connect-RPC JSON 变体）。
 //!
-//! 该数据只在网页端接口提供（我们的 OAuth token 调不通，401），鉴权用网页
-//! cookie `kimi-auth`（用户从浏览器 DevTools 手动复制粘贴）。
+//! 该数据只在网页端接口提供（我们的 OAuth token 调不通，401）。
+//!
+//! ## 鉴权体系（2026-08 迁移，issue #16）
+//!
+//! kimi 网页端已废弃 `kimi-auth` cookie，改用短寿命 Bearer token + refresh_token 续期：
+//! - 新登录不再签发 kimi-auth cookie；网页版请求只带 `Authorization: Bearer <JWT>`
+//!   （access_token 仅 15 分钟有效，payload 含 ssid/sub、无 device_id）；
+//! - refresh_token 约 90 天有效，每次续期轮换（旧的立即失效），续期端点为
+//!   `auth.kimi.com/api/account.gateway.v1.AuthService/RefreshToken`；
+//! - 旧体系 kimi-auth JWT 未过期前仍可作 Bearer 用（双头发送兼容过渡期）。
+//!
 //! 解析防御思路参考 token-monitor 的 kimiLimits.js：容忍 data 包裹、
 //! camelCase/snake_case 别名、ratio ≤1 视为小数（×100），subscriptionBalance
 //! 仅在 feature/type 匹配时采信。
@@ -16,10 +25,13 @@ use crate::kimi::USER_AGENT;
 /// 月度总量查询接口（Connect-RPC JSON：POST + `{}` body）
 const SUBSCRIPTION_STATS_URL: &str =
     "https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats";
+/// 网页端 refresh_token 续期端点（Connect-RPC JSON：POST + `{"refresh_token":...}` body）
+const REFRESH_TOKEN_URL: &str =
+    "https://auth.kimi.com/api/account.gateway.v1.AuthService/RefreshToken";
 /// 网页端请求超时（秒）：比常规 API 略短，避免拖慢刷新主流程
 const WEB_TIMEOUT_SECS: u64 = 15;
 /// token 格式非法时返回给前端的文案
-const INVALID_WEB_TOKEN_MESSAGE: &str = "无法识别的 token 格式，请直接粘贴 kimi-auth 的值";
+const INVALID_WEB_TOKEN_MESSAGE: &str = "无法识别的 token 格式，请直接粘贴 refresh_token 的值";
 
 /// 月度总量（与 src/types.ts 的 MonthlyInfo 一一对应，百分比为**已用**语义）
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +55,8 @@ pub enum WebError {
     Http(String),
     #[error("月度数据解析失败: {0}")]
     Parse(String),
+    #[error("续期失败: {0}")]
+    Refresh(String),
 }
 
 /// 规范化用户粘贴的网页 token。接受：
@@ -219,8 +233,130 @@ pub fn parse_subscription_stats(body: &str) -> Result<MonthlyInfo, WebError> {
 // 以下为内部实现
 // ---------------------------------------------------------------------------
 
+/// 用 refresh_token 换取新的 access_token + refresh_token（新鉴权体系）。
+/// 续期成功后 refresh_token 会轮换（旧的立即失效），调用方必须把新的落盘。
+///
+/// 401/403 → Unauthorized；其他非 2xx / 网络失败 → Http；响应不合预期 → Refresh。
+pub async fn refresh_access_token(refresh_token: &str) -> Result<WebSession, WebError> {
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(WEB_TIMEOUT_SECS))
+        .user_agent(USER_AGENT)
+        // refresh_token 走明文 HTTP 不可接受，只允许 HTTPS
+        .https_only(true)
+        .build()
+        .map_err(|e| WebError::Http(e.to_string()))?;
+
+    let body = serde_json::json!({ "refresh_token": refresh_token });
+    let resp = http
+        .post(REFRESH_TOKEN_URL)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header(reqwest::header::ORIGIN, "https://www.kimi.com")
+        .header(
+            reqwest::header::REFERER,
+            "https://www.kimi.com/code/console",
+        )
+        .header("connect-protocol-version", "1")
+        .header("x-msh-platform", "web")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            tracing::warn!("refresh_token 续期请求发送失败: {e}");
+            WebError::Http(e.to_string())
+        })?;
+    let status = resp.status();
+    let body = resp.text().await.map_err(|e| {
+        tracing::warn!("refresh_token 续期响应读取失败: {e}");
+        WebError::Http(e.to_string())
+    })?;
+
+    // 错误分支只记状态码与响应体长度，严禁记录 token / 响应原文
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        tracing::warn!(
+            "refresh_token 续期鉴权失败: status={}, body_len={}",
+            status.as_u16(),
+            body.len()
+        );
+        return Err(WebError::Unauthorized);
+    }
+    if !status.is_success() {
+        tracing::warn!(
+            "refresh_token 续期返回非 2xx: status={}, body_len={}",
+            status.as_u16(),
+            body.len()
+        );
+        return Err(WebError::Http(format!("HTTP {}", status.as_u16())));
+    }
+    parse_refresh_response(&body)
+}
+
+/// 续期成功返回的会话：access_token（短命，15 分钟级）与轮换后的新 refresh_token
+#[derive(Debug, Clone)]
+pub struct WebSession {
+    pub access_token: String,
+    /// 轮换后的新 refresh_token，必须落盘；轮换制下旧值立即失效
+    pub refresh_token: String,
+}
+
+/// 解析 RefreshToken 响应为 WebSession（纯函数，便于单测）。
+/// 容忍 `data` 包裹层；字段兼容 camelCase 与 snake_case 别名。
+fn parse_refresh_response(body: &str) -> Result<WebSession, WebError> {
+    let value: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| WebError::Refresh(e.to_string()))?;
+    // 容忍 data 包裹
+    let root = value
+        .get("data")
+        .filter(|d| d.is_object())
+        .unwrap_or(&value)
+        .as_object()
+        .ok_or_else(|| WebError::Refresh("响应不是 JSON 对象".to_string()))?;
+
+    let access_token = pick_str(root, &["accessToken", "access_token"])
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| WebError::Refresh("响应缺少 accessToken".to_string()))?;
+    // 轮换制：响应必须带新 refresh_token，缺失即按续期失败处理（旧值已失效）
+    let refresh_token = pick_str(root, &["refreshToken", "refresh_token"])
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| WebError::Refresh("响应缺少 refreshToken".to_string()))?;
+
+    Ok(WebSession {
+        access_token: access_token.to_string(),
+        refresh_token: refresh_token.to_string(),
+    })
+}
+
+/// 从 JWT payload 解出过期时间（Unix 秒）；非三段 JWT / 解析失败 → None。
+/// 用于判断 access_token 是否临期（新体系 15 分钟即过期，需提前续期）。
+pub fn jwt_exp_secs(token: &str) -> Option<i64> {
+    let parts: Vec<&str> = token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let payload = base64url_decode(parts[1])
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())?;
+    payload
+        .get("exp")
+        .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|u| u as i64)))
+}
+
+/// 只读本地设备 ID：`%USERPROFILE%\.kimi-code\device_id`（与 Kimi Code CLI 共享）。
+/// 文件不存在 / 内容为空 / 读失败 → None；只读不创建，避免月度查询产生副作用。
+fn read_local_device_id() -> Option<String> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from)?;
+    let path = home.join(".kimi-code").join("device_id");
+    let id = std::fs::read_to_string(path).ok()?;
+    let id = id.trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
 /// 从 JWT payload 解出网页端会话头（x-msh-device-id / x-msh-session-id / x-traffic-id）。
-/// 非三段 JWT / base64 或 JSON 解析失败 / 缺任一字段 → 空 vec（省略这三头）。
+/// 新体系 JWT（iss=account-nt）只有 ssid/sub、没有 device_id：
+/// device_id 缺失时回退到本地设备 ID（`~/.kimi-code/device_id`，与 CLI 共享），
+/// 保证新 token 也能发出 X-Msh-Device-Id。
+/// 非三段 JWT / base64 或 JSON 解析失败 / ssid 或 sub 缺失 → 空 vec（省略这三头）。
 fn jwt_session_headers(token: &str) -> Vec<(String, String)> {
     let parts: Vec<&str> = token.split('.').collect();
     if parts.len() != 3 {
@@ -238,7 +374,10 @@ fn jwt_session_headers(token: &str) -> Vec<(String, String)> {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
     };
-    match (get("device_id"), get("ssid"), get("sub")) {
+    // device_id：JWT 里没有（新体系）就用本地设备 ID（读 `~/.kimi-code/device_id`，
+    // 只读不创建；与 CLI 共享，读不到就省略该头）
+    let device_id = get("device_id").or_else(read_local_device_id);
+    match (device_id, get("ssid"), get("sub")) {
         (Some(device_id), Some(ssid), Some(sub)) => vec![
             ("x-msh-device-id".to_string(), device_id),
             ("x-msh-session-id".to_string(), ssid),
@@ -505,6 +644,101 @@ mod tests {
         // 缺 ssid / sub：按约定整体省略三头
         let jwt = make_jwt(r#"{"device_id":"dev-1"}"#);
         assert!(jwt_session_headers(&jwt).is_empty());
+    }
+
+    #[test]
+    fn jwt_headers_new_token_falls_back_to_local_device_id() {
+        // 新鉴权体系 JWT 只有 ssid/sub、无 device_id：回退本地设备 ID 补 X-Msh-Device-Id。
+        // 用临时 USERPROFILE 写入 device_id 文件，避免依赖真实环境（进程级全局状态持锁串行）
+        use crate::TEST_ENV_LOCK as ENV_LOCK;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("kimicodebar-web-deviceid-{}", uuid::Uuid::new_v4()));
+        let kimi_dir = dir.join(".kimi-code");
+        std::fs::create_dir_all(&kimi_dir).unwrap();
+        std::fs::write(kimi_dir.join("device_id"), "local-dev-9").unwrap();
+        std::env::set_var("USERPROFILE", &dir);
+
+        let jwt = make_jwt(r#"{"ssid":"sess-2","sub":"user-3"}"#);
+        let headers = jwt_session_headers(&jwt);
+        assert_eq!(
+            headers,
+            vec![
+                ("x-msh-device-id".to_string(), "local-dev-9".to_string()),
+                ("x-msh-session-id".to_string(), "sess-2".to_string()),
+                ("x-traffic-id".to_string(), "user-3".to_string()),
+            ]
+        );
+
+        std::env::remove_var("USERPROFILE");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_local_device_id_missing_home_returns_none() {
+        // USERPROFILE 指向不存在目录 → None（只读不创建）
+        use crate::TEST_ENV_LOCK as ENV_LOCK;
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("kimicodebar-web-nohome-{}", uuid::Uuid::new_v4()));
+        std::env::set_var("USERPROFILE", &dir);
+        assert!(read_local_device_id().is_none());
+        std::env::remove_var("USERPROFILE");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- jwt_exp_secs ----
+
+    #[test]
+    fn jwt_exp_parsed_from_valid_token() {
+        let jwt = make_jwt(r#"{"exp":1800000000,"ssid":"s"}"#);
+        assert_eq!(jwt_exp_secs(&jwt), Some(1_800_000_000));
+    }
+
+    #[test]
+    fn jwt_exp_none_for_non_jwt_or_missing_exp() {
+        assert_eq!(jwt_exp_secs("opaque-token"), None);
+        assert_eq!(jwt_exp_secs("abc.def"), None);
+        assert_eq!(jwt_exp_secs(&make_jwt(r#"{"ssid":"s"}"#)), None);
+        // payload 不是 JSON / base64 非法
+        assert_eq!(jwt_exp_secs("aaa.!!!.ccc"), None);
+    }
+
+    // ---- parse_refresh_response ----
+
+    #[test]
+    fn refresh_response_parses_camel_case() {
+        let body = r#"{"accessToken":"at-1","refreshToken":"rt-2"}"#;
+        let s = parse_refresh_response(body).unwrap();
+        assert_eq!(s.access_token, "at-1");
+        assert_eq!(s.refresh_token, "rt-2");
+    }
+
+    #[test]
+    fn refresh_response_parses_data_wrapped() {
+        let body = r#"{"data":{"accessToken":"at-1","refreshToken":"rt-2"}}"#;
+        let s = parse_refresh_response(body).unwrap();
+        assert_eq!(s.access_token, "at-1");
+        assert_eq!(s.refresh_token, "rt-2");
+    }
+
+    #[test]
+    fn refresh_response_missing_refresh_token_is_error() {
+        // 轮换制：响应缺新 refresh_token 按续期失败处理
+        let body = r#"{"accessToken":"at-1"}"#;
+        assert!(matches!(
+            parse_refresh_response(body).unwrap_err(),
+            WebError::Refresh(_)
+        ));
+        let body = r#"{"accessToken":"","refreshToken":""}"#;
+        assert!(matches!(
+            parse_refresh_response(body).unwrap_err(),
+            WebError::Refresh(_)
+        ));
+        assert!(matches!(
+            parse_refresh_response("not json").unwrap_err(),
+            WebError::Refresh(_)
+        ));
     }
 
     // ---- parse_subscription_stats ----

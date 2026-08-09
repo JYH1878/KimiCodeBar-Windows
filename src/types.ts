@@ -50,7 +50,7 @@ export interface PanelState {
   error: string | null;
   /** 任一窗口剩余低于阈值（默认 20%），UI 标红 */
   low_warning: boolean;
-  /** 月度总量（已配置网页 token 且有数据时展示；可能为 null） */
+  /** 月度总量（已配置网页凭证且有数据时展示；可能为 null） */
   monthly?: MonthlyInfo | null;
   /** 月度数据获取失败原因（如网页登录态过期）；成功为 null */
   monthly_error?: string | null;
@@ -95,7 +95,7 @@ export interface CredentialStatus {
   /** 脱敏展示，如 sk-kimi-****…a4nr；未配置为 null */
   api_key_masked: string | null;
   oauth_configured: boolean;
-  /** 网页 token（月度总量用）是否已配置 */
+  /** 网页凭证（refresh_token 或旧 kimi-auth，月度总量用）是否已配置 */
   web_token_configured: boolean;
 }
 
@@ -149,7 +149,7 @@ export interface LocalUsageStats {
 /** 主题模式："system"（跟随系统）/ "dark" / "light"，默认 system */
 export type ThemeMode = "system" | "dark" | "light";
 
-// ============ 月度总量（网页 token）============
+// ============ 月度总量（网页凭证 refresh_token / 兼容旧 kimi-auth）============
 
 /** 月度总量：来自网页端 GetSubscriptionStats，百分比为"已用"语义 */
 export interface MonthlyInfo {
