@@ -401,62 +401,24 @@
         pointer-events: none;
       }
 
-      /* 模拟 Windows 任务栏托盘区 */
-      .traybar {
+      /* 面板截图上方：软件图标与名称（居中） */
+      .hero-app {
         position: relative;
         z-index: 2;
         display: flex;
         align-items: center;
-        gap: 14px;
-        margin: 14px 14px 0;
-        padding: 10px 14px;
-        border-radius: 14px;
-        background: rgba(255, 255, 255, 0.045);
-        border: 1px solid var(--border);
-      }
-
-      .traybar-app {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        margin-right: auto;
-        font-size: 12.5px;
+        justify-content: center;
+        gap: 9px;
+        margin: 18px 14px 4px;
+        font-size: 15px;
         font-weight: 600;
-        color: var(--text-2);
-      }
-
-      .traybar-app img {
-        width: 17px;
-        height: 17px;
-        border-radius: 5px;
-      }
-
-      .traybar-widget {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        padding: 3px 10px;
-        border-radius: 999px;
-        background: rgba(255, 255, 255, 0.05);
-        border: 1px solid var(--border);
-        font-size: 12px;
-        font-weight: 700;
         color: var(--text);
-        font-variant-numeric: tabular-nums;
       }
 
-      .traybar-widget .dot {
-        width: 6px;
-        height: 6px;
-        border-radius: 50%;
-        background: #4ade90;
-        box-shadow: 0 0 8px #4ade90;
-      }
-
-      .traybar-clock {
-        font-size: 12px;
-        color: var(--text-2);
-        font-variant-numeric: tabular-nums;
+      .hero-app img {
+        width: 22px;
+        height: 22px;
+        border-radius: 6px;
       }
 
       .hero-panel {
@@ -699,6 +661,11 @@
 
       #features .sec-head {
         margin-bottom: 0;
+      }
+
+      /* 副标题单行显示（宽限内自然折行兜底窄屏） */
+      #features .sec-head p {
+        max-width: 900px;
       }
 
       #features {
@@ -1210,19 +1177,13 @@
       <header class="hero" id="top">
         <div class="container">
           <div class="hero-split">
-            <!-- 左侧：Windows 托盘演示（任务栏托盘区 + 用量面板截图） -->
+            <!-- 左侧：软件图标与名称 + 用量面板截图 -->
             <div class="hero-shot-wrap reveal">
               <div class="hero-shot">
                 <div class="hero-glow"></div>
-                <div class="traybar" data-i18n="traybarAria" aria-label="系统托盘演示：KimiCodeBar 托盘图标与用量">
-                  <div class="traybar-app">
-                    <img src="assets/tray-normal.png" alt="" />
-                    KimiCodeBar
-                  </div>
-                  <span class="traybar-widget" data-i18n="traybarUsage" title="本周用量 84% · 5 小时用量 6%">
-                    <i class="dot"></i>84%
-                  </span>
-                  <span class="traybar-clock" id="mockClock"></span>
+                <div class="hero-app">
+                  <img src="assets/icon.png" alt="KimiCodeBar" />
+                  KimiCodeBar
                 </div>
                 <div class="hero-panel">
                   <img src="screenshots/panel.png" alt="KimiCodeBar 用量面板" />
@@ -1625,8 +1586,6 @@
             heroSub: '基于 Tauri 2 + Rust + React 构建：安装包不到 3 MB，运行内存约 10–20 MB。静默驻留系统托盘，左键一点看额度，快烧完了变红提醒你。',
             heroCheck1: '<b>托盘常驻</b> 7 天 / 5 小时用量，一点即见',
             heroCheck2: '<b>低额度预警</b> 图标变红 + 系统通知',
-            traybarAria: '系统托盘演示：KimiCodeBar 托盘图标与用量',
-            traybarUsage: '本周用量 84% · 5 小时用量 6%',
             downloadWindows: 'Windows 版',
             downloadWindowsNote: '由 @JYH1878 维护',
             downloadMacOS: 'macOS 版',
@@ -1733,8 +1692,6 @@
             heroSub: 'Built with Tauri 2 + Rust + React: installer under 3 MB, ~10–20 MB RAM in daily use. Lives quietly in the system tray; one left-click shows your quota, and it turns red before you run out.',
             heroCheck1: '<b>Lives in the tray</b> 7-day / 5-hour usage at a glance',
             heroCheck2: '<b>Low-quota alerts</b> red tray icon + system notification',
-            traybarAria: 'System tray demo: KimiCodeBar tray icon and usage',
-            traybarUsage: 'Weekly 84% · 5-hour 6%',
             downloadWindows: 'Windows',
             downloadWindowsNote: 'Maintained by @JYH1878',
             downloadMacOS: 'macOS',
@@ -1866,9 +1823,6 @@
             el.innerHTML = t(el.getAttribute('data-i18n-html'));
           });
 
-          // 刷新任务栏时钟
-          if (window.__tickClock) window.__tickClock();
-
           // 更新语言按钮
           var switchLabel = document.getElementById('langSwitchLabel');
           if (switchLabel) switchLabel.textContent = lang === 'zh' ? '中文' : 'EN';
@@ -1913,29 +1867,6 @@
         } else {
           window.addEventListener('load', renderIcons);
         }
-      })();
-
-      // 模拟任务栏时钟（根据当前语言切换中/英文格式）
-      (function () {
-        var el = document.getElementById('mockClock');
-        if (!el) return;
-        var monthsZh = ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'];
-        var monthsEn = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-        function pad(n) {
-          return n < 10 ? '0' + n : '' + n;
-        }
-        function tick() {
-          var d = new Date();
-          var lang = window.__currentLang || 'zh';
-          if (lang === 'zh') {
-            el.textContent = monthsZh[d.getMonth()] + d.getDate() + '日 ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-          } else {
-            el.textContent = monthsEn[d.getMonth()] + ' ' + d.getDate() + ', ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
-          }
-        }
-        window.__tickClock = tick;
-        tick();
-        setInterval(tick, 30000);
       })();
 
       // 滚动入场动画
