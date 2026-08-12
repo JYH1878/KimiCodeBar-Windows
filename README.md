@@ -60,6 +60,8 @@ Kimi Code 用量监控的 Windows 系统托盘工具。常驻托盘不打扰，�
 
 **方式三 · Scoop**：`scoop bucket add kimicodebar https://github.com/JYH1878/scoop-bucket` 后 `scoop install kimicodebar/kimicodebar`（装的便携版，配置仍在 `%APPDATA%\KimiCodeBar\`；以后 `scoop update kimicodebar` 一键升级）。
 
+**方式四 · winget**：`winget install JYH1878.KimiCodeBar`（装的安装包版，当前用户安装免管理员；以后 `winget upgrade JYH1878.KimiCodeBar` 一键升级）。
+
 首次启动后图标常驻系统托盘（可能在"隐藏的图标"折叠区，拖出来即可）。
 
 系统要求：Windows 10 1809+ / Windows 11；依赖 WebView2 运行时（Windows 11 已预装，缺失时安装包会引导安装）。

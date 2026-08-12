@@ -721,7 +721,7 @@
       /* ============ 安装 ============ */
       .install-grid {
         display: grid;
-        grid-template-columns: repeat(3, 1fr);
+        grid-template-columns: repeat(2, 1fr);
         gap: 16px;
         align-items: stretch;
       }
@@ -1375,7 +1375,7 @@
         <div class="container">
           <div class="sec-head reveal">
             <span class="sec-tag" data-i18n="installTag">Install</span>
-            <h2 data-i18n="installTitle">三种方式，一分钟装好</h2>
+            <h2 data-i18n="installTitle">四种方式，一分钟装好</h2>
             <p data-i18n="installDesc">系统要求：Windows 10 1809+ / Windows 11；依赖 WebView2 运行时（Windows 11 已预装，缺失时安装包会引导安装）。</p>
           </div>
           <div class="install-grid">
@@ -1403,6 +1403,12 @@
               <p data-i18n="inst3D">一行命令安装（便携版），以后 scoop update kimicodebar 一键升级：</p>
               <div class="code-block"><span class="c1">$</span> scoop bucket add kimicodebar https://github.com/JYH1878/scoop-bucket
 <span class="c1">$</span> scoop install kimicodebar/kimicodebar</div>
+            </div>
+            <div class="card reveal">
+              <div class="step-num">04</div>
+              <h3 data-i18n="inst4T">winget</h3>
+              <p data-i18n="inst4D">Windows 官方包管理器，一行命令安装（安装包版），以后 winget upgrade 一键升级：</p>
+              <div class="code-block"><span class="c1">$</span> winget install JYH1878.KimiCodeBar</div>
             </div>
           </div>
           <p class="install-note" data-i18n="installNote">首次运行可能被 Windows SmartScreen 拦截（应用未购买代码签名证书，属开源软件常见情况）：点击「更多信息」→「仍要运行」即可。</p>
@@ -1634,7 +1640,7 @@
             shot3C: '设置页：诊断与日志',
             shotsNote: '截图为浅色主题；深色主题与英文界面可在设置中切换。',
             installTag: 'Install',
-            installTitle: '三种方式，一分钟装好',
+            installTitle: '四种方式，一分钟装好',
             installDesc: '系统要求：Windows 10 1809+ / Windows 11；依赖 WebView2 运行时（Windows 11 已预装，缺失时安装包会引导安装）。',
             inst1T: '安装包（推荐）',
             inst1D: '下载 NSIS 安装包，双击即可安装——当前用户安装，无需管理员权限，装完出现在开始菜单。',
@@ -1644,6 +1650,8 @@
             inst2B: '下载便携版',
             inst3T: 'Scoop',
             inst3D: '一行命令安装（便携版），以后 scoop update kimicodebar 一键升级：',
+            inst4T: 'winget',
+            inst4D: 'Windows 官方包管理器，一行命令安装（安装包版），以后 winget upgrade 一键升级：',
             installNote: '首次运行可能被 Windows SmartScreen 拦截（应用未购买代码签名证书，属开源软件常见情况）：点击「更多信息」→「仍要运行」即可。',
             faqTag: 'FAQ',
             faqTitle: '常见问题',
@@ -1740,7 +1748,7 @@
             shot3C: 'Settings: diagnostics & logs',
             shotsNote: 'Screenshots show the light theme; dark theme and English UI are available in Settings.',
             installTag: 'Install',
-            installTitle: 'Three ways, installed in a minute',
+            installTitle: 'Four ways, installed in a minute',
             installDesc: 'Requirements: Windows 10 1809+ / Windows 11; WebView2 Runtime (preinstalled on Windows 11, the installer will prompt if missing).',
             inst1T: 'Installer (recommended)',
             inst1D: 'Download the NSIS installer and double-click it — per-user install, no admin rights required, appears in the Start Menu.',
@@ -1750,6 +1758,8 @@
             inst2B: 'Download portable',
             inst3T: 'Scoop',
             inst3D: 'Install with one command (portable build); upgrade later with scoop update kimicodebar:',
+            inst4T: 'winget',
+            inst4D: 'The official Windows package manager — one command to install (installer build), then winget upgrade to update:',
             installNote: 'Windows SmartScreen may warn on first run (the app is not code-signed — common for open-source software): click "More info" → "Run anyway".',
             faqTag: 'FAQ',
             faqTitle: 'FAQ',
