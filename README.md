@@ -9,7 +9,7 @@
 
 Kimi Code 用量监控的 Windows 系统托盘工具。常驻托盘不打扰，左键一点看额度，快烧完了变红提醒你。
 
-基于 **Tauri 2 + Rust + React** 构建：安装包不到 3 MB，运行内存约 10–20 MB。
+基于 **Tauri 2 + Rust + React** 构建：安装包不到 4 MB，运行内存约 10–20 MB。
 
 > **官网**：[jyh1878.github.io/KimiCodeBar-Windows](https://jyh1878.github.io/KimiCodeBar-Windows/)
 >

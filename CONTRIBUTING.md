@@ -42,4 +42,4 @@ cargo test          # 单元/集成测试
 
 ## 发版流程（仅维护者）
 
-`npm run bump -- X.Y.Z` 一键同步四处版本号（含 Cargo.lock）→ 提交推送 → `git tag vX.Y.Z && git push origin vX.Y.Z` → CI 自动构建并在 Releases 生成草稿 → 人工检查发布 → Publish 后运行 `npm run bump-bucket -- X.Y.Z` 更新 [scoop-bucket](https://github.com/JYH1878/scoop-bucket) 清单（winget 上架后还需同步更新 `packaging/winget/` 清单并给 winget-pkgs 提 PR）。
+`npm run bump -- X.Y.Z` 一键同步四处版本号（含 Cargo.lock）→ 提交推送 → `git tag vX.Y.Z && git push origin vX.Y.Z` → CI 自动构建并在 Releases 生成草稿 → 人工检查发布 → Publish 后运行 `npm run bump-bucket -- X.Y.Z` 更新 [scoop-bucket](https://github.com/JYH1878/scoop-bucket) 清单（winget 已上架：还需同步更新 `packaging/winget/` 清单并给 winget-pkgs 提更新 PR）。
