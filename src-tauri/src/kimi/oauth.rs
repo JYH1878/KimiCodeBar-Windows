@@ -58,7 +58,8 @@ pub struct Credentials {
     pub token_type: Option<String>,
 }
 
-/// 设备授权发起结果（展示 user_code 并打开 verification_uri_complete）
+/// 设备授权发起结果（展示 user_code 并打开 verification_uri_complete）。
+/// 两个 URI 字段在 start_device_auth 已做 https + kimi.com 白名单校验
 #[derive(Debug, Clone)]
 pub struct DeviceAuthInfo {
     pub user_code: String,
@@ -90,11 +91,23 @@ pub async fn start_device_auth() -> Result<DeviceAuthInfo, OAuthError> {
     if resp.user_code.is_empty() || resp.device_code.is_empty() {
         return Err(OAuthError::Api("授权服务返回了无效的响应".into()));
     }
+    let verification_uri = resp.verification_uri.unwrap_or_default();
+    let verification_uri_complete = resp.verification_uri_complete;
+    // 验证地址是远端可控字符串，点击会在系统浏览器打开：必须 https 且落在
+    // kimi.com（含子域），否则按授权服务异常处理（挡住 TLS 中间人的钓鱼跳转）
+    for uri in [
+        verification_uri.as_str(),
+        verification_uri_complete.as_deref().unwrap_or(""),
+    ] {
+        if !uri.is_empty() && !is_trusted_verification_uri(uri) {
+            return Err(OAuthError::Api("授权服务返回了非预期的验证地址".into()));
+        }
+    }
     Ok(DeviceAuthInfo {
         user_code: resp.user_code,
         device_code: resp.device_code,
-        verification_uri: resp.verification_uri.unwrap_or_default(),
-        verification_uri_complete: resp.verification_uri_complete,
+        verification_uri,
+        verification_uri_complete,
         expires_in: resp.expires_in.unwrap_or(0),
         interval: resp.interval.unwrap_or(0),
     })
@@ -360,6 +373,22 @@ fn http_client() -> Result<reqwest::Client, OAuthError> {
         .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
         .build()
         .map_err(|e| OAuthError::Http(e.to_string()))
+}
+
+/// 验证地址白名单校验（纯函数）：必须 https scheme 且 host 为 kimi.com 或其子域。
+/// 先剥 userinfo（防 https://kimi.com@evil.com 伪装）再去端口，按小写 host 比较
+fn is_trusted_verification_uri(uri: &str) -> bool {
+    let Some(rest) = uri.strip_prefix("https://") else {
+        return false;
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let host_port = authority.rsplit('@').next().unwrap_or_default();
+    let host = host_port
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    host == "kimi.com" || host.ends_with(".kimi.com")
 }
 
 /// POST 表单（带 X-Msh-* 设备身份头），返回 (状态码, 响应文本)
@@ -723,6 +752,33 @@ mod tests {
 
         std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- 验证地址白名单校验 ----
+
+    #[test]
+    fn verification_uri_trust_check() {
+        // 放行：kimi.com 及其子域的 https 地址（含路径 / query / 端口）
+        for good in [
+            "https://kimi.com/device",
+            "https://auth.kimi.com/api/oauth/device?user_code=ABCD",
+            "https://www.kimi.com:443/x",
+        ] {
+            assert!(is_trusted_verification_uri(good), "应放行: {good}");
+        }
+        // 拒绝：非 https、异 host、后缀伪装、userinfo 伪装、危险 scheme
+        for bad in [
+            "",
+            "http://kimi.com/device",
+            "https://evil.com",
+            "https://kimi.com.evil.com",
+            "https://evil-kimi.com",
+            "https://kimi.com@evil.com/",
+            "javascript:alert(1)",
+            "file:///C:/Windows/System32/cmd.exe",
+        ] {
+            assert!(!is_trusted_verification_uri(bad), "应拒绝: {bad}");
+        }
     }
 
     // ---- form body 构造 ----

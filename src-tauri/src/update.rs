@@ -43,7 +43,7 @@ const INVALID_LOCATION_MESSAGE: &str = "发布页地址格式异常";
 pub struct ReleaseInfo {
     /// 版本标签，如 v0.2.0
     pub tag: String,
-    /// Release 页面地址（点击去下载）
+    /// Release 页面地址（点击去下载；由 tag 自拼官方仓库地址，不信任远端返回值）
     pub url: String,
     /// Release notes（截断 500 字符；无正文为 None）
     pub notes: Option<String>,
@@ -82,7 +82,8 @@ pub async fn fetch_latest() -> Result<ReleaseInfo, String> {
 }
 
 /// 主路径：GET releases/latest 短链，从 302 的 Location 头解析最新 tag。
-/// 网页路由拿不到 Release 正文，notes 置 None。
+/// 网页路由拿不到 Release 正文，notes 置 None。Release 页地址不信任
+/// Location 原值（TLS 中间人场景下是攻击者可控字符串），tag 校验后自拼。
 ///
 /// 注意：传入的 client 必须配置 redirect::Policy::none()，否则 302 被透明
 /// 跟随、Location 头丢失，本函数只能拿到 200 的 HTML 而报状态码错误。
@@ -113,10 +114,10 @@ pub async fn fetch_latest_via_redirect(http: &reqwest::Client) -> Result<Release
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| INVALID_LOCATION_MESSAGE.to_string())?;
 
+    let tag = parse_tag_from_location(location)?;
     Ok(ReleaseInfo {
-        tag: parse_tag_from_location(location)?,
-        // Release 页面地址保留 Location 原值，点击去下载
-        url: location.to_string(),
+        url: tag_page_url(&tag),
+        tag,
         notes: None,
     })
 }
@@ -132,12 +133,28 @@ fn parse_tag_from_location(location: &str) -> Result<String, String> {
     let Some(idx) = path.rfind(TAG_PATH_PREFIX) else {
         return Err(INVALID_LOCATION_MESSAGE.to_string());
     };
-    let tag = &path[idx + TAG_PATH_PREFIX.len()..];
-    // tag 必须非空且不含路径分隔符（挡住 .../tag/a/b 之类的异常形态）
-    if tag.is_empty() || tag.contains('/') {
+    validate_tag(&path[idx + TAG_PATH_PREFIX.len()..])
+}
+
+/// tag 形态校验（纯函数）：非空且只含 ASCII 字母数字与 . - _。
+/// 挡住 / ? # 空白 @ 等字符（.../tag/a/b 异常形态、URL 特殊字符），
+/// 保证自拼出的发布页地址尾部干净、host 恒为 github.com
+fn validate_tag(tag: &str) -> Result<String, String> {
+    if tag.is_empty()
+        || !tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
         return Err(INVALID_LOCATION_MESSAGE.to_string());
     }
     Ok(tag.to_string())
+}
+
+/// 自拼发布页地址（纯函数）：三条查询路径统一不信任远端返回的 URL
+///（302 Location / API html_url 在 TLS 中间人场景下可被替换成钓鱼地址），
+/// 用固定 REPO_URL + 校验过的 tag 拼接，点击去下载始终落在 github.com
+fn tag_page_url(tag: &str) -> String {
+    format!("{REPO_URL}/releases/tag/{tag}")
 }
 
 /// GitHub 非预期状态码 → 面向用户的中文错误：限流（403/429）单独提示，
@@ -153,7 +170,8 @@ fn github_status_error(status: reqwest::StatusCode) -> String {
 
 /// 回退路径：GET GitHub API 最新 Release 并解析。UA 用 crate::kimi::USER_AGENT
 /// （GitHub API 强制要求 UA），超时 10s；非 2xx / 网络失败 / 解析失败均返回
-/// 中文错误文案（403/429 映射为限流提示）。
+/// 中文错误文案（403/429 映射为限流提示）。只取 tag_name 与正文——html_url
+/// 同样不信任，tag 校验后自拼发布页地址。
 pub async fn fetch_latest_release(http: &reqwest::Client) -> Result<ReleaseInfo, String> {
     let resp = http
         .get(LATEST_RELEASE_URL)
@@ -181,9 +199,10 @@ pub async fn fetch_latest_release(http: &reqwest::Client) -> Result<ReleaseInfo,
         .await
         .map_err(|e| format!("解析更新信息失败：{e}"))?;
 
+    let tag = validate_tag(&release.tag_name)?;
     Ok(ReleaseInfo {
-        tag: release.tag_name,
-        url: release.html_url,
+        url: tag_page_url(&tag),
+        tag,
         notes: release
             .body
             .map(|body| truncate_chars(&body, NOTES_MAX_CHARS)),
@@ -226,7 +245,7 @@ pub async fn fetch_latest_via_mirror(http: &reqwest::Client) -> Result<ReleaseIn
 
     let tag = parse_tag_from_location(location)?;
     Ok(ReleaseInfo {
-        url: format!("{REPO_URL}/releases/tag/{tag}"),
+        url: tag_page_url(&tag),
         tag,
         notes: None,
     })
@@ -252,11 +271,11 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
     false
 }
 
-/// GitHub API 返回的 Release JSON（只取需要的字段，其余忽略）
+/// GitHub API 返回的 Release JSON（只取需要的字段，其余忽略；
+/// html_url 刻意不取——发布页地址一律自拼，不信任远端返回值）
 #[derive(Deserialize)]
 struct GithubRelease {
     tag_name: String,
-    html_url: String,
     body: Option<String>,
 }
 
@@ -451,6 +470,32 @@ mod tests {
         assert_eq!(
             parse_tag_from_location("").unwrap_err(),
             INVALID_LOCATION_MESSAGE
+        );
+    }
+
+    // ---- tag 形态校验与发布页地址自拼 ----
+
+    #[test]
+    fn validate_tag_accepts_normal_tags() {
+        assert_eq!(validate_tag("v1.1.2").unwrap(), "v1.1.2");
+        assert_eq!(validate_tag("v0.2.0-beta").unwrap(), "v0.2.0-beta");
+        assert_eq!(validate_tag("1.0").unwrap(), "1.0");
+    }
+
+    #[test]
+    fn validate_tag_rejects_hostile_chars() {
+        // / ? # 空白 @ \ 及非 ASCII 一律拒绝：防止 tag 携带 URL 特殊字符
+        for bad in ["", "a/b", "a?b", "a#b", "a b", "a@b", "a\\b", "版本"] {
+            assert!(validate_tag(bad).is_err(), "应拒绝: {bad:?}");
+        }
+    }
+
+    #[test]
+    fn tag_page_url_always_on_repo_host() {
+        // 安全不变量：发布页地址恒为官方仓库 tag 页，不受远端返回值影响
+        assert_eq!(
+            tag_page_url("v1.1.2"),
+            "https://github.com/JYH1878/KimiCodeBar-Windows/releases/tag/v1.1.2"
         );
     }
 
