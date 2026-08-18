@@ -23,14 +23,18 @@ function formatRemain(sec: number, t: TFunction): string {
 }
 
 interface DeviceLoginSectionProps {
+  /** 目标账号 id（设备码流程绑定该账号，成功时凭证写入它） */
+  accountId: string;
   /** 后端是否已配置 OAuth 凭证 */
   oauthConfigured: boolean;
   /** 登录/退出成功后回调，父组件重新拉取凭证状态 */
   onChanged: () => void;
+  /** 挂载后立即自动发起一次授权（添加 OAuth 账号后的连贯引导）；缺省 false */
+  autoStart?: boolean;
 }
 
-/** 设置页"方式B：账号授权登录"分区（设备码流程状态机） */
-export function DeviceLoginSection({ oauthConfigured, onChanged }: DeviceLoginSectionProps) {
+/** 设置页"方式B：账号授权登录"分区（设备码流程状态机，按账号绑定） */
+export function DeviceLoginSection({ accountId, oauthConfigured, onChanged, autoStart = false }: DeviceLoginSectionProps) {
   const { t } = useTranslation();
   // 设备码流程状态：null/idle=未开始，waiting=等待授权，success/error=终态
   const [deviceLogin, setDeviceLogin] = useState<DeviceLoginState | null>(null);
@@ -98,7 +102,7 @@ export function DeviceLoginSection({ oauthConfigured, onChanged }: DeviceLoginSe
     setBusy(true);
     setActionError(null);
     try {
-      setDeviceLogin(await startDeviceLogin());
+      setDeviceLogin(await startDeviceLogin(accountId));
     } catch (e) {
       // 拿不到设备码（网络错误等）：直接进入 error 态，展示重试
       setDeviceLogin({
@@ -112,7 +116,15 @@ export function DeviceLoginSection({ oauthConfigured, onChanged }: DeviceLoginSe
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [accountId]);
+
+  // 添加 OAuth 账号后的连贯引导：挂载即自动发起一次授权（ref 防 StrictMode 双调用）
+  const autoStartedRef = useRef(false);
+  useEffect(() => {
+    if (!autoStart || oauthConfigured || autoStartedRef.current) return;
+    autoStartedRef.current = true;
+    void start();
+  }, [autoStart, oauthConfigured, start]);
 
   const cancel = useCallback(async () => {
     try {
@@ -127,7 +139,7 @@ export function DeviceLoginSection({ oauthConfigured, onChanged }: DeviceLoginSe
     setBusy(true);
     setActionError(null);
     try {
-      await oauthLogout();
+      await oauthLogout(accountId);
       setDeviceLogin(null);
       onChanged();
     } catch (e) {
@@ -135,7 +147,7 @@ export function DeviceLoginSection({ oauthConfigured, onChanged }: DeviceLoginSe
     } finally {
       setBusy(false);
     }
-  }, [onChanged]);
+  }, [accountId, onChanged]);
 
   const copyCode = useCallback(async () => {
     if (!deviceLogin?.user_code) return;

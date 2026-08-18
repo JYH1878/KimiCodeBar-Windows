@@ -1,4 +1,4 @@
-//! 用量趋势历史采样存储：`history.json`。
+//! 用量趋势历史采样存储：每账号一个 `history-<id>.json`。
 //!
 //! 设计原则（架构方钉死）：**纯事实、不预测** —— 只记录每次成功刷新时的本地
 //! 采样，前端据点画折线，不做任何外推。
@@ -110,10 +110,10 @@ impl HistoryStore {
         }
     }
 
-    /// 读取历史：文件不存在、损坏或其他 IO 错误均按空容忍；
+    /// 读取该账号的历史（history-<id>.json）：文件不存在、损坏或其他 IO 错误均按空容忍；
     /// 返回前按 t 升序排序（磁盘数据可能被手工改过）
-    pub fn load() -> Self {
-        let text = match std::fs::read_to_string(history_file_path()) {
+    pub fn load(account_id: &str) -> Self {
+        let text = match std::fs::read_to_string(history_file_path(account_id)) {
             Ok(text) => text,
             Err(_) => return Self::default(),
         };
@@ -122,15 +122,15 @@ impl HistoryStore {
         store
     }
 
-    /// 原子写入 history.json（临时文件 + rename；先删目标再 rename，
+    /// 原子写入该账号的 history-<id>.json（临时文件 + rename；先删目标再 rename，
     /// Windows rename 不允许覆盖已存在文件，与 storage::save_json 同款）
-    pub fn save(&self) -> Result<(), String> {
-        let path = history_file_path();
+    pub fn save(&self, account_id: &str) -> Result<(), String> {
+        let path = history_file_path(account_id);
         let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
         std::fs::create_dir_all(dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
 
         let json = serde_json::to_string_pretty(self).map_err(|e| format!("序列化失败: {e}"))?;
-        let tmp_path = dir.join("history.json.tmp");
+        let tmp_path = dir.join(format!("history-{account_id}.json.tmp"));
         std::fs::write(&tmp_path, json).map_err(|e| format!("写入临时文件失败: {e}"))?;
         if path.exists() {
             std::fs::remove_file(&path).map_err(|e| format!("删除旧文件失败: {e}"))?;
@@ -139,8 +139,14 @@ impl HistoryStore {
     }
 }
 
-/// 历史文件路径：{config_dir}/history.json（config_dir 规则与 storage.rs 一致）
-fn history_file_path() -> PathBuf {
+/// 该账号的历史文件路径：{config_dir}/history-<id>.json
+/// （pub(crate)：删账号清理残留用，见 accounts::purge_account_data）
+pub(crate) fn history_file_path(account_id: &str) -> PathBuf {
+    crate::storage::config_dir().join(format!("history-{account_id}.json"))
+}
+
+/// 旧单账号时代的历史文件路径（仅迁移用）：{config_dir}/history.json
+pub(crate) fn legacy_history_file_path() -> PathBuf {
     crate::storage::config_dir().join("history.json")
 }
 
@@ -266,7 +272,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let dir = use_temp_config_dir();
 
-        assert!(HistoryStore::load().points().is_empty());
+        assert!(HistoryStore::load("acc1").points().is_empty());
 
         cleanup(&dir);
     }
@@ -276,9 +282,9 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let dir = use_temp_config_dir();
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("history.json"), "not json").unwrap();
+        std::fs::write(dir.join("history-acc1.json"), "not json").unwrap();
 
-        assert!(HistoryStore::load().points().is_empty());
+        assert!(HistoryStore::load("acc1").points().is_empty());
 
         cleanup(&dir);
     }
@@ -302,20 +308,22 @@ mod tests {
             five_hour: None,
             monthly: Some(16.12),
         });
-        store.save().unwrap();
-        assert!(dir.join("history.json").exists());
+        store.save("acc1").unwrap();
+        assert!(dir.join("history-acc1.json").exists());
         // 临时文件不应残留
-        assert!(!dir.join("history.json.tmp").exists());
+        assert!(!dir.join("history-acc1.json.tmp").exists());
 
-        let loaded = HistoryStore::load();
+        let loaded = HistoryStore::load("acc1");
         assert_eq!(loaded.points(), store.points());
+        // 另一个账号无历史
+        assert!(HistoryStore::load("acc2").points().is_empty());
 
         // 覆盖写入（rename 目标已存在的路径）
-        store.save().unwrap();
-        assert_eq!(HistoryStore::load().points(), store.points());
+        store.save("acc1").unwrap();
+        assert_eq!(HistoryStore::load("acc1").points(), store.points());
 
         // 磁盘格式为 snake_case JSON（与 types.ts 契约一致）
-        let raw = std::fs::read_to_string(dir.join("history.json")).unwrap();
+        let raw = std::fs::read_to_string(dir.join("history-acc1.json")).unwrap();
         assert!(raw.contains("\"points\""));
         assert!(raw.contains("\"five_hour\""));
         assert!(raw.contains("\"weekly\""));
@@ -330,12 +338,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // 磁盘数据乱序且点缺 monthly 字段（serde default 读回 None）
         std::fs::write(
-            dir.join("history.json"),
+            dir.join("history-acc1.json"),
             r#"{"points":[{"t":300,"weekly":5.0},{"t":100,"five_hour":1.5,"monthly":16.0},{"t":200}]}"#,
         )
         .unwrap();
 
-        let loaded = HistoryStore::load();
+        let loaded = HistoryStore::load("acc1");
         let ts: Vec<i64> = loaded.points().iter().map(|p| p.t).collect();
         assert_eq!(ts, vec![100, 200, 300]);
         assert_eq!(loaded.points()[0].five_hour, Some(1.5));

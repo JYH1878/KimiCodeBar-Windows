@@ -7,6 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
+  Account,
   AppSettings,
   CredentialStatus,
   DailyUsage,
@@ -36,38 +37,68 @@ const MOCK_MONTHLY: MonthlyInfo = {
   reset_time: MOCK_MONTHLY_RESET,
 };
 
-/** 浏览器开发用的 mock 面板状态：weekly 87% / five_hour 36% / 中级版 / Booster 未开通 */
+/** 浏览器 mock 的账号列表（两个账号，便于调试翻页） */
+const MOCK_ACCOUNTS: Account[] = [
+  { id: "mock-acc-1", name: "账号 1", login_method: "api_key" },
+  { id: "mock-acc-2", name: "演示号", login_method: "oauth" },
+];
+
+/** 浏览器开发用的 mock 面板状态：账号 1 健康（weekly 87% / five_hour 36% / 中级版），
+ *  演示号模拟"无效 token"——缓存数据照显 + 错误横幅，托盘不变红 */
 const MOCK_STATE: PanelState = {
-  credential: true,
   loading: false,
-  quota: {
-    weekly: {
-      used: 130,
-      limit: 1000,
-      remaining: 870,
-      reset_time: MOCK_WEEKLY_RESET,
-      percent_remaining: 87,
+  accounts: [
+    {
+      account: MOCK_ACCOUNTS[0],
+      credential: true,
+      quota: {
+        weekly: {
+          used: 130,
+          limit: 1000,
+          remaining: 870,
+          reset_time: MOCK_WEEKLY_RESET,
+          percent_remaining: 87,
+        },
+        five_hour: {
+          used: 64,
+          limit: 100,
+          remaining: 36,
+          reset_time: MOCK_FIVE_HOUR_RESET,
+          percent_remaining: 36,
+        },
+        membership_level: "LEVEL_INTERMEDIATE",
+        booster: {
+          enabled: false,
+          balance_yuan: 0,
+          monthly_charge_limit_enabled: false,
+        },
+      },
+      fetched_at: Math.floor(Date.now() / 1000),
+      error: null,
+      low_warning: false,
+      // 月度卡也在浏览器 mock 下展示，便于脱离后端调试分段条
+      monthly: MOCK_MONTHLY,
+      monthly_error: null,
     },
-    five_hour: {
-      used: 64,
-      limit: 100,
-      remaining: 36,
-      reset_time: MOCK_FIVE_HOUR_RESET,
-      percent_remaining: 36,
+    {
+      account: MOCK_ACCOUNTS[1],
+      credential: true,
+      quota: {
+        weekly: {
+          used: 950,
+          limit: 1000,
+          remaining: 50,
+          reset_time: MOCK_WEEKLY_RESET,
+          percent_remaining: 5,
+        },
+      },
+      fetched_at: Math.floor(Date.now() / 1000) - 3600,
+      error: "凭证无效或已过期，请在设置中重新配置",
+      // 拉取失败的账号不算低额（GOAL 拍板）：缓存剩 5% 也不标红
+      low_warning: false,
+      monthly_error: "月度数据刷新失败",
     },
-    membership_level: "LEVEL_INTERMEDIATE",
-    booster: {
-      enabled: false,
-      balance_yuan: 0,
-      monthly_charge_limit_enabled: false,
-    },
-  },
-  fetched_at: Math.floor(Date.now() / 1000),
-  error: null,
-  low_warning: false,
-  // 月度卡也在浏览器 mock 下展示，便于脱离后端调试分段条
-  monthly: MOCK_MONTHLY,
-  monthly_error: null,
+  ],
 };
 
 /** 获取面板状态（含缓存配额，断网也可立即渲染） */
@@ -86,13 +117,34 @@ export async function refreshNow(): Promise<PanelState> {
   return invoke<PanelState>("refresh_now");
 }
 
-/** 打开设置窗口 */
-export async function openSettings(): Promise<void> {
+/** 打开设置窗口；section 指定定位分区（如 "account-add" 定位到账号添加表单） */
+export async function openSettings(section?: string): Promise<void> {
   if (!isTauri) {
-    console.info("[mock] open_settings");
+    console.info(`[mock] open_settings section=${section ?? ""}`);
     return;
   }
-  return invoke<void>("open_settings");
+  return invoke<void>("open_settings", { section: section ?? null });
+}
+
+/**
+ * 订阅设置页定位请求（settings-navigate 事件，payload 为分区名；
+ * 面板「+」页等入口借此让设置页定位到指定表单）。
+ * 返回反注册函数，供组件卸载时调用。
+ */
+export function onSettingsNavigate(cb: (section: string) => void): () => void {
+  if (!isTauri) {
+    return () => {};
+  }
+  let unlisten: (() => void) | null = null;
+  let cancelled = false;
+  listen<string>("settings-navigate", (event) => cb(event.payload)).then((fn) => {
+    if (cancelled) fn();
+    else unlisten = fn;
+  });
+  return () => {
+    cancelled = true;
+    unlisten?.();
+  };
 }
 
 /**
@@ -125,7 +177,7 @@ export function onQuotaUpdated(cb: (state: PanelState) => void): () => void {
  * weekly 从 20 缓慢爬升到 65，five_hour 呈锯齿波（模拟 5 小时窗口到期重置），
  * monthly 从 14 缓升到 15。
  */
-export async function getUsageHistory(): Promise<HistoryPoint[]> {
+export async function getUsageHistory(accountId: string): Promise<HistoryPoint[]> {
   if (!isTauri) {
     const nowSec = Math.floor(Date.now() / 1000);
     const points: HistoryPoint[] = [];
@@ -143,7 +195,7 @@ export async function getUsageHistory(): Promise<HistoryPoint[]> {
     }
     return points;
   }
-  return invoke<HistoryPoint[]>("get_usage_history");
+  return invoke<HistoryPoint[]>("get_usage_history", { accountId });
 }
 
 // ============ 本地 Token 消耗统计（扫描 wire.jsonl，不依赖 API）============
@@ -199,7 +251,6 @@ export async function exportUsageReport(): Promise<string> {
 /** 浏览器 mock 的可变"数据库"：让设置页在纯浏览器下也能走完整交互 */
 const mockDb = {
   settings: {
-    login_method: null,
     refresh_interval_min: 5,
     adaptive_refresh: true,
     low_warn_enabled: true,
@@ -211,11 +262,13 @@ const mockDb = {
     background_image: null,
     background_preset: null,
   } as AppSettings,
-  // 预置一个假 Key，方便浏览器开发时看到"已配置"徽标
-  apiKey: "sk-kimi-mock9f8e7d6c5b4a" as string | null,
-  oauthConfigured: false,
-  // 网页凭证（refresh_token / 旧 kimi-auth，月度总量用）：初始未配置，走 setWebToken/clearWebToken 变更
-  webToken: null as string | null,
+  // 账号列表（顺序 = 面板页顺序）；初始与面板 mock 一致
+  accounts: MOCK_ACCOUNTS.map((a) => ({ ...a })),
+  // 各账号的凭证（按账号 id 索引）：预置账号 1 一个假 Key，方便看到"已配置"徽标
+  apiKeys: { "mock-acc-1": "sk-kimi-mock9f8e7d6c5b4a" } as Record<string, string>,
+  oauthAccounts: new Set<string>(),
+  // 网页凭证（refresh_token / 旧 kimi-auth，月度总量用）：初始未配置
+  webTokens: {} as Record<string, string>,
 };
 
 /** 浏览器 mock 的 device-login-updated 事件订阅者集合 */
@@ -250,14 +303,16 @@ function mockWaitingLogin(): DeviceLoginState {
   };
 }
 
-/** 由 mock 数据库推导 CredentialStatus */
-function mockCredentialStatus(): CredentialStatus {
+/** 由 mock 数据库推导该账号的 CredentialStatus */
+function mockCredentialStatus(accountId: string): CredentialStatus {
+  const account = mockDb.accounts.find((a) => a.id === accountId);
+  const apiKey = mockDb.apiKeys[accountId] ?? null;
   return {
-    login_method: mockDb.settings.login_method,
-    api_key_configured: mockDb.apiKey !== null,
-    api_key_masked: mockDb.apiKey ? `sk-kimi-****…${mockDb.apiKey.slice(-4)}` : null,
-    oauth_configured: mockDb.oauthConfigured,
-    web_token_configured: mockDb.webToken !== null,
+    login_method: account?.login_method ?? null,
+    api_key_configured: apiKey !== null,
+    api_key_masked: apiKey ? `sk-kimi-****…${apiKey.slice(-4)}` : null,
+    oauth_configured: mockDb.oauthAccounts.has(accountId),
+    web_token_configured: mockDb.webTokens[accountId] != null,
   };
 }
 
@@ -355,8 +410,82 @@ export function onSettingsChanged(cb: (settings: AppSettings) => void): () => vo
   };
 }
 
-/** 保存 API Key（写入系统钥匙串）；后端校验失败会抛中文错误，原样透传 */
-export async function setApiKey(key: string): Promise<void> {
+// ============ 账号管理 ============
+
+/** 账号列表（顺序 = 面板页顺序） */
+export async function listAccounts(): Promise<Account[]> {
+  if (!isTauri) return mockDb.accounts.map((a) => ({ ...a }));
+  return invoke<Account[]>("list_accounts");
+}
+
+/** 新增账号（超上限 5 个报错；名称为空默认「账号 N」），返回新建账号 */
+export async function addAccount(name?: string): Promise<Account> {
+  if (!isTauri) {
+    if (mockDb.accounts.length >= 5) throw new Error("最多支持 5 个账号");
+    const trimmed = name?.trim();
+    const account: Account = {
+      id: `mock-acc-${Date.now()}`,
+      name: trimmed || `账号 ${mockDb.accounts.length + 1}`,
+      login_method: null,
+    };
+    mockDb.accounts.push(account);
+    return { ...account };
+  }
+  return invoke<Account>("add_account", { name: name ?? null });
+}
+
+/** 账号改名（空名 / 不存在报错） */
+export async function renameAccount(accountId: string, name: string): Promise<void> {
+  if (!isTauri) {
+    const account = mockDb.accounts.find((a) => a.id === accountId);
+    if (!account) throw new Error("账号不存在");
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error("账号名称不能为空");
+    account.name = trimmed;
+    return;
+  }
+  return invoke<void>("rename_account", { accountId, name });
+}
+
+/** 账号上移/下移（direction 取 -1 / +1；越界为无操作） */
+export async function moveAccount(accountId: string, direction: number): Promise<void> {
+  if (!isTauri) {
+    const i = mockDb.accounts.findIndex((a) => a.id === accountId);
+    const j = i + Math.sign(direction);
+    if (i < 0 || j < 0 || j >= mockDb.accounts.length) return;
+    [mockDb.accounts[i], mockDb.accounts[j]] = [mockDb.accounts[j], mockDb.accounts[i]];
+    return;
+  }
+  return invoke<void>("move_account", { accountId, direction });
+}
+
+/** 删除账号（连同该账号全部本地数据；调用方需先做二次确认） */
+export async function deleteAccount(accountId: string): Promise<void> {
+  if (!isTauri) {
+    mockDb.accounts = mockDb.accounts.filter((a) => a.id !== accountId);
+    delete mockDb.apiKeys[accountId];
+    delete mockDb.webTokens[accountId];
+    mockDb.oauthAccounts.delete(accountId);
+    return;
+  }
+  return invoke<void>("delete_account", { accountId });
+}
+
+/** 切换该账号的登录方式（"api_key" / "oauth"；null 为未显式选择） */
+export async function setAccountLoginMethod(
+  accountId: string,
+  method: "api_key" | "oauth" | null,
+): Promise<void> {
+  if (!isTauri) {
+    const account = mockDb.accounts.find((a) => a.id === accountId);
+    if (account) account.login_method = method;
+    return;
+  }
+  return invoke<void>("set_account_login_method", { accountId, method });
+}
+
+/** 保存该账号的 API Key（写入系统凭据管理器）；后端校验失败会抛中文错误，原样透传 */
+export async function setApiKey(accountId: string, key: string): Promise<void> {
   if (!isTauri) {
     const k = key.trim();
     // mock 复刻后端格式校验，便于浏览器下调试错误提示
@@ -366,67 +495,69 @@ export async function setApiKey(key: string): Promise<void> {
     if (k.length < 12) {
       throw new Error("API Key 格式不正确：长度过短");
     }
-    mockDb.apiKey = k;
+    mockDb.apiKeys[accountId] = k;
     return;
   }
-  return invoke<void>("set_api_key", { key });
+  return invoke<void>("set_api_key", { accountId, key });
 }
 
-/** 清除已保存的 API Key */
-export async function clearApiKey(): Promise<void> {
+/** 清除该账号已保存的 API Key */
+export async function clearApiKey(accountId: string): Promise<void> {
   if (!isTauri) {
-    mockDb.apiKey = null;
+    delete mockDb.apiKeys[accountId];
     return;
   }
-  return invoke<void>("clear_api_key");
+  return invoke<void>("clear_api_key", { accountId });
 }
 
-/** 获取凭证配置状态（脱敏 Key + 各方式是否已配置） */
-export async function getCredentialStatus(): Promise<CredentialStatus> {
-  if (!isTauri) return mockCredentialStatus();
-  return invoke<CredentialStatus>("get_credential_status");
+/** 获取该账号的凭证配置状态（脱敏 Key + 各方式是否已配置） */
+export async function getCredentialStatus(accountId: string): Promise<CredentialStatus> {
+  if (!isTauri) return mockCredentialStatus(accountId);
+  return invoke<CredentialStatus>("get_credential_status", { accountId });
 }
 
 // ============ 月度总量（网页 refresh_token）============
 
 /**
- * 校验并保存网页凭证（月度总量用）。
+ * 校验并保存该账号的网页凭证（月度总量用）。
  * 优先按新鉴权体系的 refresh_token 处理（后端自动续期）；旧体系 kimi-auth 值也兼容。
  * 后端先调接口校验，失败抛中文错误原样透传；成功返回当月月度总量。
  */
-export async function setWebToken(token: string): Promise<MonthlyInfo> {
+export async function setWebToken(accountId: string, token: string): Promise<MonthlyInfo> {
   if (!isTauri) {
     if (token.trim() === "") throw new Error("请粘贴 refresh_token 的值");
     // 模拟网络延迟，便于调试"校验中…"加载态
     await new Promise((resolve) => setTimeout(resolve, 600));
-    mockDb.webToken = token.trim();
+    mockDb.webTokens[accountId] = token.trim();
     return MOCK_MONTHLY;
   }
-  return invoke<MonthlyInfo>("set_web_token", { token });
+  return invoke<MonthlyInfo>("set_web_token", { accountId, token });
 }
 
-/** 清除已保存的网页凭证（面板月度卡随之不再展示） */
-export async function clearWebToken(): Promise<void> {
+/** 清除该账号已保存的网页凭证（该页月度卡随之不再展示） */
+export async function clearWebToken(accountId: string): Promise<void> {
   if (!isTauri) {
-    mockDb.webToken = null;
+    delete mockDb.webTokens[accountId];
     return;
   }
-  return invoke<void>("clear_web_token");
+  return invoke<void>("clear_web_token", { accountId });
 }
 
-/** 发起 OAuth 设备码登录：返回 waiting 状态，后续进度由 device-login-updated 事件推送 */
-export async function startDeviceLogin(): Promise<DeviceLoginState> {
+/** 发起 OAuth 设备码登录（绑定指定账号）：返回 waiting 状态，后续进度由 device-login-updated 事件推送 */
+export async function startDeviceLogin(accountId: string): Promise<DeviceLoginState> {
   if (!isTauri) {
     if (mockDeviceLoginTimer !== null) clearTimeout(mockDeviceLoginTimer);
     // 模拟用户 8 秒后完成浏览器授权
     mockDeviceLoginTimer = setTimeout(() => {
       mockDeviceLoginTimer = null;
-      mockDb.oauthConfigured = true;
+      mockDb.oauthAccounts.add(accountId);
+      const account = mockDb.accounts.find((a) => a.id === accountId);
+      if (account) account.login_method = "oauth";
       emitMockDeviceLogin({ ...MOCK_IDLE_LOGIN, status: "success" });
     }, 8000);
     return mockWaitingLogin();
   }
-  return invoke<DeviceLoginState>("start_device_login");
+  return invoke<DeviceLoginState>("start_device_login", { accountId });
 }
 
 /** 取消进行中的设备码登录（无进行中流程时为空操作） */
@@ -442,13 +573,15 @@ export async function cancelDeviceLogin(): Promise<void> {
   return invoke<void>("cancel_device_login");
 }
 
-/** 退出 OAuth 账号授权登录（清除本地 token） */
-export async function oauthLogout(): Promise<void> {
+/** 退出该账号的 OAuth 授权登录（清除本地 token） */
+export async function oauthLogout(accountId: string): Promise<void> {
   if (!isTauri) {
-    mockDb.oauthConfigured = false;
+    mockDb.oauthAccounts.delete(accountId);
+    const account = mockDb.accounts.find((a) => a.id === accountId);
+    if (account?.login_method === "oauth") account.login_method = null;
     return;
   }
-  return invoke<void>("oauth_logout");
+  return invoke<void>("oauth_logout", { accountId });
 }
 
 /**

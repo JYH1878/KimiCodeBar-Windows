@@ -70,7 +70,7 @@ body,
 
 /* ===== 用量面板 ===== */
 
-/* 面板根容器：360px 宽、纵向排列、内容超高时纵向滚动、禁止横向滚动 */
+/* 面板根容器：360px 宽、纵向排列；多账号翻页后由各页（.page）自己纵向滚动，容器不滚 */
 .panel {
   width: 360px;
   max-width: 100vw;
@@ -80,9 +80,128 @@ body,
   display: flex;
   flex-direction: column;
   gap: 10px;
+  overflow: hidden;
+  background-color: var(--bg);
+}
+
+/* --- 多账号翻页（像手机桌面：横向滑动，到头停不循环） --- */
+
+/* 翻页视口：吃掉头部之外的全部高度，横向裁剪；纵向滚轮/触摸滚动放行给 .page */
+.pager {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  /* 鼠标拖拽翻页时不选中文字 */
+  user-select: none;
+  touch-action: pan-y;
+}
+
+/* 翻页轨道：每页 100% 宽横向排开；位移动画时长与 panel.tsx PAGE_ANIM_MS 一致 */
+.pager-track {
+  display: flex;
+  height: 100%;
+  transition: transform 0.38s ease;
+  will-change: transform;
+}
+
+/* 单账号页：整宽一页，内容超高时页内纵向滚动 */
+.page {
+  width: 100%;
+  flex: 0 0 100%;
+  min-width: 0;
+  height: 100%;
   overflow-y: auto;
   overflow-x: hidden;
-  background-color: var(--bg);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 页头：账号名（低额时标红，与托盘告警一致） */
+.page-head {
+  text-align: center;
+}
+
+.page-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+}
+
+.page-title.low {
+  color: var(--danger);
+}
+
+.page-loading {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+/* 圆点导航：N 个账号圆点 + 末尾「+」 */
+.pager-dots {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: none;
+  padding: 0;
+  background: var(--faint);
+  opacity: 0.45;
+  cursor: pointer;
+  transition:
+    opacity 0.2s,
+    transform 0.2s;
+}
+
+.dot:hover {
+  opacity: 0.8;
+}
+
+.dot.active {
+  opacity: 1;
+  background: var(--accent);
+  transform: scale(1.25);
+}
+
+/* 低额账号的圆点带红色（预览哪页在告警） */
+.dot.low {
+  background: var(--danger);
+  opacity: 0.85;
+}
+
+/* 末尾「+」：点开设置页并定位到账号添加表单 */
+.dot-add {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px dashed var(--faint);
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  opacity: 0.8;
+}
+
+.dot-add:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  opacity: 1;
 }
 
 /* 有自定义背景时：铺满居中（background-image 由面板/设置页内联样式注入：遮罩渐变 + 图片）。
@@ -985,4 +1104,102 @@ body,
 .link:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* --- 账号管理卡（设置页） --- */
+
+/* 小节标题（账号卡内的"添加账号"、内嵌月度总量等） */
+.sub-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  margin: 4px 0 2px;
+}
+
+/* 账号行：整体是一张可展开的小卡 */
+.account-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin: 6px 0;
+  overflow: hidden;
+}
+
+.account-row.expanded {
+  border-color: var(--border-hover);
+}
+
+/* 行头：点击展开/收起凭证配置区 */
+.account-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.account-head:hover {
+  background: var(--card-hover);
+}
+
+.account-name {
+  font-size: 13px;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-head .grow {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 行内操作按钮组（改名/上移/下移/删除；二次确认时的确认/取消） */
+.account-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.account-actions .btn {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+.account-actions .icon-btn {
+  padding: 2px 6px;
+}
+
+.account-actions .hint-err {
+  font-size: 11px;
+}
+
+/* 展开的凭证配置区：与行头分隔，内边距收一档 */
+.account-body {
+  border-top: 1px solid var(--border);
+  padding: 8px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* 添加账号表单：与列表分隔（面板「+」的滚动定位锚点） */
+.account-add {
+  border-top: 1px dashed var(--border);
+  margin-top: 8px;
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  scroll-margin-top: 8px;
+}
+
+.add-method-row {
+  display: flex;
+  gap: 12px;
 }

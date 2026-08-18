@@ -16,13 +16,17 @@ use crate::commands::PanelState;
 /// 原始响应收录上限（与 AppState 内存截断一致，超出部分不进诊断）
 pub const MAX_RAW_BODY_LEN: usize = 20 * 1024;
 
-/// 生成诊断文本并写入配置目录，返回诊断文件路径
-pub fn export(panel: &PanelState, raw_response: Option<(String, i64)>) -> Result<PathBuf, String> {
+/// 生成诊断文本并写入配置目录，返回诊断文件路径。
+/// raw_responses：各账号最近一次成功的 usages 原始响应（账号名, 响应原文, epoch 秒）
+pub fn export(
+    panel: &PanelState,
+    raw_responses: Vec<(String, String, i64)>,
+) -> Result<PathBuf, String> {
     let dir = storage::config_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("创建配置目录失败: {e}"))?;
     let now = chrono::Local::now();
     let path = dir.join(format!("diagnostics-{}.txt", now.format("%Y%m%d-%H%M%S")));
-    std::fs::write(&path, build_report(panel, raw_response, now))
+    std::fs::write(&path, build_report(panel, &raw_responses, now))
         .map_err(|e| format!("写入诊断文件失败: {e}"))?;
     Ok(path)
 }
@@ -67,10 +71,10 @@ fn is_sensitive_key(key: &str) -> bool {
     KNOWN.contains(&lower.as_str()) || lower.ends_with("_id") || key.ends_with("Id")
 }
 
-/// 组装诊断报告全文
+/// 组装诊断报告全文（多账号：凭证状态与最近错误逐账号各一节）
 fn build_report(
     panel: &PanelState,
-    raw_response: Option<(String, i64)>,
+    raw_responses: &[(String, String, i64)],
     now: chrono::DateTime<chrono::Local>,
 ) -> String {
     let mut out = String::new();
@@ -94,44 +98,48 @@ fn build_report(
         Err(e) => out.push_str(&format!("<读取失败: {e}>")),
     }
 
-    // 凭证只导出 configured 布尔，绝不导出值
-    out.push_str("\n\n[凭证状态]\n");
-    out.push_str(&format!(
-        "api_key_configured: {}\n",
-        matches!(creds::load_api_key(), Ok(Some(_)))
-    ));
-    out.push_str(&format!(
-        "oauth_configured: {}\n",
-        matches!(oauth::load_credentials(), Ok(Some(_)))
-    ));
-    out.push_str(&format!(
-        "web_token_configured: {}\n",
-        matches!(creds::load_web_token(), Ok(Some(_)))
-    ));
-    out.push_str(&format!(
-        "web_refresh_token_configured: {}\n",
-        matches!(creds::load_web_refresh_token(), Ok(Some(_)))
-    ));
+    // 逐账号：凭证只导出 configured 布尔，绝不导出值；附最近错误（配额 / 月度）
+    for account in &panel.accounts {
+        let id = &account.account.id;
+        out.push_str(&format!("\n\n[账号：{}（{}）]\n", account.account.name, id));
+        out.push_str("[凭证状态]\n");
+        out.push_str(&format!(
+            "api_key_configured: {}\n",
+            matches!(creds::load_api_key(id), Ok(Some(_)))
+        ));
+        out.push_str(&format!(
+            "oauth_configured: {}\n",
+            matches!(oauth::load_credentials(id), Ok(Some(_)))
+        ));
+        out.push_str(&format!(
+            "web_token_configured: {}\n",
+            matches!(creds::load_web_token(id), Ok(Some(_)))
+        ));
+        out.push_str(&format!(
+            "web_refresh_token_configured: {}\n",
+            matches!(creds::load_web_refresh_token(id), Ok(Some(_)))
+        ));
+        out.push_str("[最近错误]\n");
+        out.push_str(&format!(
+            "quota_error: {}\n",
+            account.error.as_deref().unwrap_or("<无>")
+        ));
+        out.push_str(&format!(
+            "monthly_error: {}\n",
+            account.monthly_error.as_deref().unwrap_or("<无>")
+        ));
+    }
 
-    // 最近一次错误（配额 / 月度）
-    out.push_str("\n[最近错误]\n");
-    out.push_str(&format!(
-        "quota_error: {}\n",
-        panel.error.as_deref().unwrap_or("<无>")
-    ));
-    out.push_str(&format!(
-        "monthly_error: {}\n",
-        panel.monthly_error.as_deref().unwrap_or("<无>")
-    ));
-
-    // 最近一次 usages 原始响应（脱敏后附上）
+    // 各账号最近一次 usages 原始响应（脱敏后附上）
     out.push_str("\n[最近一次 usages 原始响应]\n");
-    match raw_response {
-        Some((raw, fetched_at)) => {
-            out.push_str(&format!("fetched_at: {fetched_at}\n"));
-            out.push_str(&format_raw_body(&raw));
-        }
-        None => out.push_str("<尚无成功响应>"),
+    if raw_responses.is_empty() {
+        out.push_str("<尚无成功响应>");
+    }
+    for (name, raw, fetched_at) in raw_responses {
+        out.push_str(&format!("--- 账号：{name} ---\n"));
+        out.push_str(&format!("fetched_at: {fetched_at}\n"));
+        out.push_str(&format_raw_body(raw));
+        out.push('\n');
     }
     out.push('\n');
     out

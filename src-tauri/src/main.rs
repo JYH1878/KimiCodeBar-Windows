@@ -13,6 +13,13 @@ mod tray;
 use tauri::Manager;
 
 fn main() {
+    // 旧单账号数据 → 多账号的自动迁移必须先于一切（GUI 与 CLI --status 都读凭证）；
+    // 幂等，失败只记日志（旧数据原样保留，下次启动重试）
+    if let Err(e) = kimicodebar::migrate::migrate_legacy_to_accounts() {
+        // 日志系统尚未初始化，这里只能落 stderr
+        eprintln!("旧数据迁移失败（下次启动重试）: {e}");
+    }
+
     // CLI 拦截必须先于一切 Tauri / 日志初始化：单实例插件会把第二个实例
     // 吞成"唤起已有面板"，--status 一旦走进 Builder 就无法输出 JSON 退出
     if let Some(code) = cli::maybe_run() {
@@ -66,7 +73,7 @@ fn main() {
                     .unwrap_or_else(|_| tauri::http::Response::new(Vec::new())),
             }
         })
-        // 启动时从 cache.json 预热最近一次配额（断网/未刷新也能展示）
+        // 启动时从各账号 cache-<id>.json 预热最近一次配额（断网/未刷新也能展示）
         .manage(commands::AppState::new())
         .invoke_handler(tauri::generate_handler![
             commands::get_panel_state,
@@ -82,6 +89,12 @@ fn main() {
             commands::set_background_image,
             commands::clear_background_image,
             commands::set_background_preset,
+            commands::list_accounts,
+            commands::add_account,
+            commands::rename_account,
+            commands::move_account,
+            commands::delete_account,
+            commands::set_account_login_method,
             commands::set_api_key,
             commands::clear_api_key,
             commands::get_credential_status,

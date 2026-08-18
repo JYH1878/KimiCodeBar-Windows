@@ -1,8 +1,12 @@
 //! Tauri 命令层与刷新编排（bin 侧）：面板状态组装、防重入刷新、托盘/事件联动。
 //!
-//! 前端契约（`src/types.ts`）：`get_panel_state()` / `refresh_now()` → PanelState，
-//! 后端状态变化时 emit `quota-updated`（payload 为 PanelState JSON）。
+//! 多账号：一轮 `do_refresh` 遍历全部账号（单航班锁保护整轮），各账号独立存
+//! 配额/月度/错误快照；`quota-updated` 事件 payload 为含 accounts 数组的 PanelState。
+//!
+//! 前端契约（`src/types.ts`）：`get_panel_state()` / `refresh_now()` → PanelState。
 
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 use kimicodebar::creds;
@@ -11,7 +15,7 @@ use kimicodebar::kimi::client::KimiClient;
 use kimicodebar::kimi::oauth;
 use kimicodebar::kimi::web::{self, MonthlyInfo, WebError};
 use kimicodebar::quota::{needs_low_warning, KimiQuota, QuotaError};
-use kimicodebar::storage::{self, CachedQuota};
+use kimicodebar::storage::{self, Account, CachedQuota};
 use kimicodebar::update;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -24,11 +28,11 @@ use crate::tray;
 /// 面板距上次成功刷新超过该秒数，再次显示时触发后台刷新
 const STALE_SECS: i64 = 60;
 
-/// 应用设置（与 src/types.ts 的 AppSettings 一一对应，snake_case；Deserialize 用于收参）
+/// 应用设置（与 src/types.ts 的 AppSettings 一一对应，snake_case；Deserialize 用于收参）。
+/// 注意：账号列表与登录方式不在此（属 Account / settings.json 的 accounts 数组，
+/// 由 list_accounts / add_account 等账号命令管理）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
-    /// 登录方式："api_key" / "oauth"；None 表示未显式选择（优先 api_key，其次 oauth）
-    pub login_method: Option<String>,
     /// 自动刷新间隔（分钟，1–60，默认 5）
     pub refresh_interval_min: u32,
     /// 刷新模式：true=自适应（活跃时 1 分钟，静默按固定间隔），默认 true
@@ -58,7 +62,6 @@ pub struct AppSettings {
 impl From<storage::Settings> for AppSettings {
     fn from(s: storage::Settings) -> Self {
         Self {
-            login_method: s.login_method,
             refresh_interval_min: s.refresh_interval_min,
             adaptive_refresh: s.adaptive_refresh,
             low_warn_enabled: s.low_warn_enabled,
@@ -76,7 +79,9 @@ impl From<storage::Settings> for AppSettings {
 impl From<AppSettings> for storage::Settings {
     fn from(s: AppSettings) -> Self {
         Self {
-            login_method: s.login_method,
+            // 账号列表与废弃的全局 login_method 由调用方补（save_settings 先读后写）
+            accounts: Vec::new(),
+            login_method: None,
             refresh_interval_min: s.refresh_interval_min,
             adaptive_refresh: s.adaptive_refresh,
             low_warn_enabled: s.low_warn_enabled,
@@ -91,10 +96,10 @@ impl From<AppSettings> for storage::Settings {
     }
 }
 
-/// 凭证配置状态（与 src/types.ts 的 CredentialStatus 一一对应）
+/// 凭证配置状态（与 src/types.ts 的 CredentialStatus 一一对应；按账号查询）
 #[derive(Debug, Clone, Serialize)]
 pub struct CredentialStatus {
-    /// 当前生效的登录方式（settings.login_method）
+    /// 该账号当前生效的登录方式（account.login_method）
     pub login_method: Option<String>,
     pub api_key_configured: bool,
     /// 脱敏展示，如 sk-kimi-****…a4nr；未配置为 None
@@ -183,20 +188,20 @@ pub struct UpdateInfo {
     pub error: Option<String>,
 }
 
-/// 面板状态（与 src/types.ts 的 PanelState 一一对应，snake_case 序列化）
+/// 单个账号的面板快照（PanelState.accounts 的元素，与 src/types.ts 的 AccountPanel 对应）
 #[derive(Debug, Clone, Serialize)]
-pub struct PanelState {
-    /// 是否已配置任一凭证（API Key 或 OAuth）
+pub struct AccountPanel {
+    /// 账号元数据（id / name / login_method）
+    pub account: Account,
+    /// 该账号是否已配置任一凭证（API Key 或 OAuth）
     pub credential: bool,
-    /// 是否正在后台刷新
-    pub loading: bool,
     /// 最近一次成功的配额（可能来自缓存；断网时依然展示）
     pub quota: Option<KimiQuota>,
     /// 上次成功刷新时间（epoch 秒）
     pub fetched_at: Option<i64>,
     /// 最近一次错误信息（与缓存并存，用于非阻断横幅）
     pub error: Option<String>,
-    /// 任一窗口剩余低于阈值，UI 标红
+    /// 任一窗口剩余低于阈值，UI 标红（最近刷新失败/凭证无效时恒为 false，GOAL 拍板）
     pub low_warning: bool,
     /// 月度总量（已配置网页 token 且有数据时展示；可能为 None）
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -206,7 +211,16 @@ pub struct PanelState {
     pub monthly_error: Option<String>,
 }
 
-/// 进程内共享状态（`.manage(AppState::new())`，启动时从 cache.json 预热）
+/// 面板状态（与 src/types.ts 的 PanelState 一一对应，snake_case 序列化）
+#[derive(Debug, Clone, Serialize)]
+pub struct PanelState {
+    /// 是否正在后台刷新（整轮全部账号，单航班）
+    pub loading: bool,
+    /// 各账号快照（顺序 = settings.accounts 顺序 = 面板页顺序）
+    pub accounts: Vec<AccountPanel>,
+}
+
+/// 进程内共享状态（`.manage(AppState::new())`，启动时从各账号 cache-<id>.json 预热）
 pub struct AppState {
     inner: Mutex<Inner>,
     /// 设备码登录流程状态与取消通道（锁内不做任何 await）
@@ -218,12 +232,20 @@ pub struct AppState {
 #[derive(Default)]
 struct Inner {
     loading: bool,
+    /// 每账号运行时快照（按账号 id 索引；顺序无关，展示顺序由 settings.accounts 决定）
+    accounts: HashMap<String, AccountRuntime>,
+}
+
+/// 单账号的运行时快照（启动时由 cache-<id>.json 预热）
+#[derive(Default, Clone)]
+struct AccountRuntime {
+    /// 最近一次错误信息（配额刷新失败；成功为 None）
     error: Option<String>,
-    /// 最近一次成功刷新（配额, epoch 秒）；启动时由 cache.json 预热
+    /// 最近一次成功刷新（配额, epoch 秒）
     last_quota: Option<(KimiQuota, i64)>,
     /// 最近一次成功的 usages 原始响应（超 20KB 截断）与时间戳；诊断导出用
     last_raw_response: Option<(String, i64)>,
-    /// 最近一次成功的月度总量；启动时由 cache.json 预热
+    /// 最近一次成功的月度总量
     monthly: Option<MonthlyInfo>,
     /// 月度数据获取失败原因（如网页登录态过期）；成功为 None
     monthly_error: Option<String>,
@@ -235,22 +257,29 @@ struct DeviceLoginInner {
     state: DeviceLoginState,
     /// 取消通道发送端（后台轮询任务持 receiver）；无进行中任务时为 None
     cancel: Option<watch::Sender<bool>>,
+    /// 本流程绑定的账号 id（成功时凭证写入该账号；同一时间只跑一个流程）
+    account_id: Option<String>,
 }
 
 impl AppState {
     pub fn new() -> Self {
-        let cache = storage::load_cache();
-        let last_quota = cache.as_ref().map(|c| (c.quota.clone(), c.fetched_at));
-        // 月度数据随配额缓存一并预热（断网/未刷新也能展示）
-        let monthly = cache.and_then(|c| c.monthly);
+        // 启动预热：每个账号各自的 cache-<id>.json（断网/未刷新也能展示）
+        let settings = storage::load_settings().unwrap_or_default();
+        let mut accounts = HashMap::new();
+        for account in &settings.accounts {
+            let cache = storage::load_cache(&account.id);
+            let runtime = AccountRuntime {
+                last_quota: cache.as_ref().map(|c| (c.quota.clone(), c.fetched_at)),
+                // 月度数据随配额缓存一并预热
+                monthly: cache.and_then(|c| c.monthly),
+                ..AccountRuntime::default()
+            };
+            accounts.insert(account.id.clone(), runtime);
+        }
         Self {
             inner: Mutex::new(Inner {
                 loading: false,
-                error: None,
-                last_quota,
-                last_raw_response: None,
-                monthly,
-                monthly_error: None,
+                accounts,
             }),
             device_login: Mutex::new(DeviceLoginInner::default()),
             refresh_lock: tokio::sync::Mutex::new(()),
@@ -263,113 +292,150 @@ impl AppState {
         assemble_panel_state(&inner)
     }
 
-    /// 最近一次成功的 usages 原始响应（已截断）与时间戳；诊断导出用
-    pub fn raw_response(&self) -> Option<(String, i64)> {
-        self.inner.lock().unwrap().last_raw_response.clone()
+    /// 删除账号后收敛内存态：移除该账号的运行时快照（无残留）
+    pub fn remove_account_runtime(&self, account_id: &str) {
+        self.inner.lock().unwrap().accounts.remove(account_id);
+    }
+
+    /// 各账号最近一次成功的 usages 原始响应（已截断）：(账号名, 响应, epoch 秒)，诊断导出用
+    pub fn raw_responses(&self) -> Vec<(String, String, i64)> {
+        let inner = self.inner.lock().unwrap();
+        let settings = storage::load_settings().unwrap_or_default();
+        inner
+            .accounts
+            .iter()
+            .filter_map(|(id, rt)| {
+                rt.last_raw_response.clone().map(|(raw, ts)| {
+                    let name = settings
+                        .account(id)
+                        .map(|a| a.name.clone())
+                        .unwrap_or_else(|| id.clone());
+                    (name, raw, ts)
+                })
+            })
+            .collect()
     }
 }
 
-/// 刷新主流程（轮询 / 托盘菜单"刷新" / 面板显示时共用）。
+/// 刷新主流程（轮询 / 托盘菜单"刷新" / 面板显示时共用）：一轮刷新全部账号。
 /// 单航班合并：并发调用排队等在途刷新完成，各自拿到完整新状态；
-/// 全局兜底超时保证 loading 永远不会被永久置位。
+/// 每个账号 45s 兜底超时，保证 loading 永远不会被永久置位。
 pub async fn do_refresh(app: &AppHandle) -> PanelState {
     let state = app.state::<AppState>();
 
     let _permit = state.refresh_lock.lock().await;
 
-    tracing::info!("开始刷新配额");
+    let accounts = storage::load_settings().unwrap_or_default().accounts;
+    tracing::info!("开始刷新配额（{} 个账号）", accounts.len());
     {
         let mut inner = state.inner.lock().unwrap();
         inner.loading = true;
     }
 
-    // 任何环节挂起（网络 / 系统凭证服务）都不能把 loading 永久置位
-    let outcome =
-        match tokio::time::timeout(std::time::Duration::from_secs(45), fetch_with_credential())
-            .await
+    // 逐账号拉取（配额 + 月度）：任何环节挂起都不能把 loading 永久置位
+    let mut outcomes: Vec<(String, FetchOutcome, MonthlyOutcome)> = Vec::new();
+    for account in &accounts {
+        // 任何环节挂起（网络 / 系统凭证服务）都不能把 loading 永久置位
+        let outcome = match tokio::time::timeout(
+            std::time::Duration::from_secs(45),
+            fetch_with_credential(account),
+        )
+        .await
         {
             Ok(outcome) => outcome,
             Err(_) => FetchOutcome::Failed("请求超时，请检查网络".to_string()),
         };
+        // 月度总量（网页 token）：拿到配额后无论成败都继续尝试
+        let monthly_outcome = fetch_monthly(&account.id).await;
+        outcomes.push((account.id.clone(), outcome, monthly_outcome));
+    }
 
-    // 月度总量（网页 token）：拿到配额后无论成败都继续尝试
-    let monthly_outcome = fetch_monthly().await;
-
+    let mut any_quota_success = false;
     let panel = {
         let mut inner = state.inner.lock().unwrap();
         // 所有分支必须先复位 loading（NoCredential 曾漏掉这行导致永久卡死）
         inner.loading = false;
-        let quota_success = matches!(outcome, FetchOutcome::Success(..));
-        match outcome {
-            // 当前登录方式无凭证：若另一种方式有凭证（用户刚切了方式），给引导文案；
-            // 完全没有凭证则 error=None，面板显示 EmptyState 引导
-            FetchOutcome::NoCredential => {
-                inner.error = if has_any_credential() {
-                    Some("当前登录方式未配置凭证，请到设置页配置或切换".to_string())
-                } else {
-                    None
-                };
+        for (account_id, outcome, monthly_outcome) in outcomes {
+            let runtime = inner.accounts.entry(account_id.clone()).or_default();
+            let quota_success = matches!(outcome, FetchOutcome::Success(..));
+            match outcome {
+                // 当前登录方式无凭证：若另一种方式有凭证（用户刚切了方式），给引导文案；
+                // 完全没有凭证则 error=None，面板该页显示未配置引导
+                FetchOutcome::NoCredential => {
+                    runtime.error = if has_any_credential(&account_id) {
+                        Some("当前登录方式未配置凭证，请到设置页配置或切换".to_string())
+                    } else {
+                        None
+                    };
+                }
+                // 成功：清错误、更新 last_quota 与原始响应（缓存在下方统一落盘）
+                FetchOutcome::Success(payload) => {
+                    let (quota, fetched_at, raw) = *payload;
+                    runtime.error = None;
+                    runtime.last_raw_response = Some((truncate_raw_body(raw), fetched_at));
+                    runtime.last_quota = Some((quota, fetched_at));
+                }
+                // 失败：保留旧缓存数据，仅记错误（错误类型与文案已在 fetch_with_credential 记 warn）
+                FetchOutcome::Failed(message) => runtime.error = Some(message),
             }
-            // 成功：清错误、更新 last_quota 与原始响应（缓存在下方统一落盘）
-            FetchOutcome::Success(payload) => {
-                let (quota, fetched_at, raw) = *payload;
-                tracing::info!("配额已更新");
-                inner.error = None;
-                inner.last_raw_response = Some((truncate_raw_body(raw), fetched_at));
-                inner.last_quota = Some((quota, fetched_at));
-            }
-            // 失败：保留旧缓存数据，仅记错误（错误类型与文案已在 fetch_with_credential 记 warn）
-            FetchOutcome::Failed(message) => inner.error = Some(message),
-        }
 
-        // 月度结果：成功才覆盖数据；失败一律保留旧数据，仅记原因
-        let mut monthly_success = false;
-        match monthly_outcome {
-            // 未配置网页 token：清空月度展示
-            MonthlyOutcome::NoToken => {
-                inner.monthly = None;
-                inner.monthly_error = None;
-            }
-            MonthlyOutcome::Success(info) => {
-                inner.monthly = Some(info);
-                inner.monthly_error = None;
-                monthly_success = true;
-            }
-            MonthlyOutcome::Unauthorized => {
-                inner.monthly_error = Some("网页登录态已过期，请到设置页更新".to_string());
-            }
-            MonthlyOutcome::Failed => {
-                inner.monthly_error = Some("月度数据刷新失败".to_string());
-            }
-        }
-
-        // 配额或月度任一成功：把最新内存态落盘（月度挂在配额缓存上，向后兼容；
-        // 配额失败但月度成功时沿用旧配额数据，fetched_at 不变）
-        if quota_success || monthly_success {
-            if let Some((quota, fetched_at)) = &inner.last_quota {
-                let _ = storage::save_cache(&CachedQuota {
-                    quota: quota.clone(),
-                    fetched_at: *fetched_at,
-                    monthly: inner.monthly.clone(),
-                });
-            }
-        }
-
-        // 配额刷新成功：追加一条本地历史采样（用量趋势图数据，纯事实不预测）。
-        // 月度取本轮最终值（失败沿用旧值，未配置为 None）；t 用本轮成功时刻。
-        // 历史是派生数据，读写失败只记日志，不影响刷新主流程
-        if quota_success {
-            if let Some((quota, fetched_at)) = &inner.last_quota {
-                let mut store = history::HistoryStore::load();
-                store.append(history::sample_point(
-                    quota,
-                    inner.monthly.as_ref(),
-                    *fetched_at,
-                ));
-                if let Err(e) = store.save() {
-                    tracing::warn!("保存用量历史失败: {e}");
+            // 月度结果：成功才覆盖数据；失败一律保留旧数据，仅记原因
+            let mut monthly_success = false;
+            match monthly_outcome {
+                // 未配置网页 token：清空月度展示
+                MonthlyOutcome::NoToken => {
+                    runtime.monthly = None;
+                    runtime.monthly_error = None;
+                }
+                MonthlyOutcome::Success(info) => {
+                    runtime.monthly = Some(info);
+                    runtime.monthly_error = None;
+                    monthly_success = true;
+                }
+                MonthlyOutcome::Unauthorized => {
+                    runtime.monthly_error = Some("网页登录态已过期，请到设置页更新".to_string());
+                }
+                MonthlyOutcome::Failed => {
+                    runtime.monthly_error = Some("月度数据刷新失败".to_string());
                 }
             }
+
+            // 配额或月度任一成功：把最新内存态落盘到该账号的 cache-<id>.json
+            // （月度挂在配额缓存上；配额失败但月度成功时沿用旧配额数据，fetched_at 不变）
+            if quota_success || monthly_success {
+                if let Some((quota, fetched_at)) = &runtime.last_quota {
+                    let _ = storage::save_cache(
+                        &account_id,
+                        &CachedQuota {
+                            quota: quota.clone(),
+                            fetched_at: *fetched_at,
+                            monthly: runtime.monthly.clone(),
+                        },
+                    );
+                }
+            }
+
+            // 配额刷新成功：给该账号追加一条历史采样（用量趋势图数据，纯事实不预测）。
+            // 月度取本轮最终值（失败沿用旧值，未配置为 None）；t 用本轮成功时刻。
+            // 历史是派生数据，读写失败只记日志，不影响刷新主流程
+            if quota_success {
+                any_quota_success = true;
+                if let Some((quota, fetched_at)) = &runtime.last_quota {
+                    let mut store = history::HistoryStore::load(&account_id);
+                    store.append(history::sample_point(
+                        quota,
+                        runtime.monthly.as_ref(),
+                        *fetched_at,
+                    ));
+                    if let Err(e) = store.save(&account_id) {
+                        tracing::warn!("保存用量历史失败: {e}");
+                    }
+                }
+            }
+        }
+
+        if any_quota_success {
+            tracing::info!("配额已更新");
             // 顺手增量扫一次本地 token 统计（扫描自带 180s 节流与增量续读，
             // 开销可忽略；派生数据，失败不影响刷新主流程）
             tauri::async_runtime::spawn(async move {
@@ -380,7 +446,7 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
         assemble_panel_state(&inner)
     };
 
-    // 更新托盘（图标 + tooltip 摘要）；失败时 quota 未变，属幂等重刷。
+    // 更新托盘（图标 + tooltip 摘要）：任一账号低额即变红，tooltip 取最差账号摘要。
     // tooltip 文案语言随设置现读现解析，与 assemble_panel_state 的"设置现读"语义一致
     let lang = i18n::resolve(
         storage::load_settings()
@@ -390,8 +456,8 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
     );
     tray::update_tray_state(
         app,
-        panel.low_warning,
-        tooltip_extra(panel.quota.as_ref(), lang),
+        any_low_warning(&panel),
+        worst_account_tooltip(&panel, lang),
     );
 
     // 通知前端状态已变化
@@ -400,16 +466,24 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
     panel
 }
 
-/// 面板即将由隐藏变显示时调用：无缓存或数据陈旧（>60s）则后台刷新；
+/// 面板即将由隐藏变显示时调用：任一账号无缓存或数据陈旧（>60s）则后台刷新；
 /// 距上次成功更新检查 ≥6 小时时顺带后台查一次更新
 pub fn refresh_if_stale(app: &AppHandle) {
     let stale = {
         let state = app.state::<AppState>();
         let inner = state.inner.lock().unwrap();
-        match inner.last_quota {
-            Some((_, fetched_at)) => now_unix() - fetched_at > STALE_SECS,
-            None => true,
-        }
+        let settings = storage::load_settings().unwrap_or_default();
+        !settings.accounts.is_empty()
+            && settings.accounts.iter().any(|account| {
+                match inner
+                    .accounts
+                    .get(&account.id)
+                    .and_then(|rt| rt.last_quota.as_ref())
+                {
+                    Some((_, fetched_at)) => now_unix() - fetched_at > STALE_SECS,
+                    None => true,
+                }
+            })
     };
     if stale {
         let app = app.clone();
@@ -445,21 +519,19 @@ fn check_update_if_stale(app: &AppHandle) {
     });
 }
 
-// 托盘 tooltip / 通知正文共用的窗口摘要已移至 crate::i18n::quota_summary（按语言出中英文案）
-
 #[tauri::command]
 pub fn get_panel_state(state: State<'_, AppState>) -> PanelState {
     state.snapshot()
 }
 
-/// 用量趋势历史（本地累积的成功刷新采样，纯事实不预测）：
+/// 用量趋势历史（按账号；本地累积的成功刷新采样，纯事实不预测）：
 /// load 后按 t 升序返回；无历史或文件损坏为空数组
 #[tauri::command]
-pub fn get_usage_history() -> Vec<history::HistoryPoint> {
-    history::HistoryStore::load().into_points()
+pub fn get_usage_history(account_id: String) -> Vec<history::HistoryPoint> {
+    history::HistoryStore::load(&account_id).into_points()
 }
 
-/// 本地 token 消耗统计（扫描 wire.jsonl，不依赖 API）：
+/// 本地 token 消耗统计（扫描 wire.jsonl，不依赖 API；机器级数据，各账号页显示同一份）：
 /// 增量扫描 + 180s 节流在 local_usage::scan 内部生效
 #[tauri::command]
 pub async fn get_local_usage() -> kimicodebar::local_usage::LocalUsageStats {
@@ -546,11 +618,16 @@ async fn fetch_update_info() -> UpdateInfo {
     }
 }
 
+/// 打开设置窗口；section 指定定位分区（如 "account-add" 定位到账号添加表单），
+/// 经 settings-navigate 事件通知设置页（设置窗自启动常驻，JS 监听始终在线）
 #[tauri::command]
-pub fn open_settings(app: AppHandle) {
+pub fn open_settings(app: AppHandle, section: Option<String>) {
     if let Some(window) = app.get_webview_window("settings") {
         let _ = window.show();
         let _ = window.set_focus();
+    }
+    if let Some(section) = section {
+        let _ = app.emit("settings-navigate", section);
     }
 }
 
@@ -561,7 +638,14 @@ pub fn get_settings() -> AppSettings {
 
 #[tauri::command]
 pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
-    let mut settings: storage::Settings = settings.into();
+    // 先读后写：AppSettings 不含账号列表，必须保留磁盘上的 accounts
+    let mut settings: storage::Settings = {
+        let current = storage::load_settings().unwrap_or_default();
+        storage::Settings {
+            accounts: current.accounts,
+            ..settings.into()
+        }
+    };
     // 钳制非法值（与 load_settings 的加载钳制语义一致）
     settings.refresh_interval_min = settings.refresh_interval_min.clamp(
         storage::MIN_REFRESH_INTERVAL_MIN,
@@ -643,38 +727,150 @@ pub fn set_background_preset(app: AppHandle, preset: Option<String>) -> Result<(
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// 账号管理命令
+// ---------------------------------------------------------------------------
+
+/// 账号列表（顺序 = 面板页顺序）
 #[tauri::command]
-pub fn set_api_key(key: String) -> Result<(), String> {
+pub fn list_accounts() -> Vec<Account> {
+    storage::load_settings().unwrap_or_default().accounts
+}
+
+/// 新增账号（超上限 5 个报错；名称为空默认「账号 N」），返回新建账号
+#[tauri::command]
+pub fn add_account(app: AppHandle, name: Option<String>) -> Result<Account, String> {
+    let mut settings = storage::load_settings().unwrap_or_default();
+    let account = settings.add_account(name.as_deref())?;
+    storage::save_settings(&settings)?;
+    tracing::info!("账号已添加: {}（{}）", account.name, account.id);
+    emit_snapshot(&app);
+    Ok(account)
+}
+
+/// 账号改名（空名 / 不存在报错）
+#[tauri::command]
+pub fn rename_account(app: AppHandle, account_id: String, name: String) -> Result<(), String> {
+    let mut settings = storage::load_settings().unwrap_or_default();
+    settings.rename_account(&account_id, &name)?;
+    storage::save_settings(&settings)?;
+    tracing::info!("账号已改名: {account_id}");
+    emit_snapshot(&app);
+    Ok(())
+}
+
+/// 账号上移/下移（direction 取符号；越界为无操作）
+#[tauri::command]
+pub fn move_account(app: AppHandle, account_id: String, direction: i32) -> Result<(), String> {
+    let mut settings = storage::load_settings().unwrap_or_default();
+    if settings.move_account(&account_id, direction) {
+        storage::save_settings(&settings)?;
+        emit_snapshot(&app);
+    }
+    Ok(())
+}
+
+/// 删除账号：先改设置落盘，再清该账号全部本地数据（keyring 槽位 / OAuth 文件 /
+/// cache / history），内存态同步收敛；最后广播最新面板状态
+#[tauri::command]
+pub fn delete_account(app: AppHandle, account_id: String) -> Result<(), String> {
+    let mut settings = storage::load_settings().unwrap_or_default();
+    let Some(removed) = settings.remove_account(&account_id) else {
+        return Err("账号不存在".to_string());
+    };
+    storage::save_settings(&settings)?;
+    tracing::info!("账号已删除: {}（{}）", removed.name, removed.id);
+
+    // 该账号若有进行中的设备码登录流程，一并取消
+    {
+        let state = app.state::<AppState>();
+        let mut dl = state.device_login.lock().unwrap();
+        if dl.account_id.as_deref() == Some(account_id.as_str()) {
+            if let Some(tx) = dl.cancel.take() {
+                let _ = tx.send(true);
+            }
+            dl.state = DeviceLoginState::idle();
+            dl.account_id = None;
+        }
+    }
+
+    kimicodebar::accounts::purge_account_data(&account_id);
+    // 进程内的网页 access_token 缓存同样按账号收敛，不留残留
+    WEB_ACCESS_CACHE.lock().unwrap().remove(&account_id);
+    app.state::<AppState>().remove_account_runtime(&account_id);
+    emit_snapshot(&app);
+    Ok(())
+}
+
+/// 切换该账号的登录方式（"api_key" / "oauth"；其他值视为未显式选择）
+#[tauri::command]
+pub fn set_account_login_method(
+    app: AppHandle,
+    account_id: String,
+    method: Option<String>,
+) -> Result<(), String> {
+    let method = match method.as_deref() {
+        Some("api_key") => Some("api_key".to_string()),
+        Some("oauth") => Some("oauth".to_string()),
+        _ => None,
+    };
+    let mut settings = storage::load_settings().unwrap_or_default();
+    let Some(account) = settings.accounts.iter_mut().find(|a| a.id == account_id) else {
+        return Err("账号不存在".to_string());
+    };
+    account.login_method = method;
+    storage::save_settings(&settings)?;
+    emit_snapshot(&app);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// 凭证命令（全部按账号 id 定位槽位/文件）
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+pub fn set_api_key(account_id: String, key: String) -> Result<(), String> {
+    if storage::load_settings()
+        .unwrap_or_default()
+        .account(&account_id)
+        .is_none()
+    {
+        return Err("账号不存在".to_string());
+    }
     let key = validate_api_key(&key)?;
-    creds::save_api_key(key).map_err(|e| e.to_string())?;
+    creds::save_api_key(&account_id, key).map_err(|e| e.to_string())?;
     // 只记"已配置"，严禁记录 Key 本身
-    tracing::info!("API Key 已配置");
+    tracing::info!("API Key 已配置（账号 {account_id}）");
     Ok(())
 }
 
 #[tauri::command]
-pub fn clear_api_key() -> Result<(), String> {
-    creds::clear_api_key().map_err(|e| e.to_string())?;
-    tracing::info!("API Key 已清除");
+pub fn clear_api_key(app: AppHandle, account_id: String) -> Result<(), String> {
+    creds::clear_api_key(&account_id).map_err(|e| e.to_string())?;
+    tracing::info!("API Key 已清除（账号 {account_id}）");
+    emit_snapshot(&app);
     Ok(())
 }
 
+/// 该账号的凭证配置状态（脱敏 Key + 各方式是否已配置）
 #[tauri::command]
-pub fn get_credential_status() -> CredentialStatus {
+pub fn get_credential_status(account_id: String) -> CredentialStatus {
     let settings = storage::load_settings().unwrap_or_default();
-    let api_key = creds::load_api_key().ok().flatten();
+    let api_key = creds::load_api_key(&account_id).ok().flatten();
     CredentialStatus {
-        login_method: settings.login_method,
+        login_method: settings
+            .account(&account_id)
+            .and_then(|a| a.login_method.clone()),
         api_key_configured: api_key.is_some(),
         api_key_masked: api_key.as_deref().map(mask_api_key),
-        oauth_configured: matches!(oauth::load_credentials(), Ok(Some(_))),
+        oauth_configured: matches!(oauth::load_credentials(&account_id), Ok(Some(_))),
         // 新旧体系任一配置都算"已配置"（web_token=kimi-auth / web_refresh_token）
-        web_token_configured: matches!(creds::load_web_token(), Ok(Some(_)))
-            || matches!(creds::load_web_refresh_token(), Ok(Some(_))),
+        web_token_configured: matches!(creds::load_web_token(&account_id), Ok(Some(_)))
+            || matches!(creds::load_web_refresh_token(&account_id), Ok(Some(_))),
     }
 }
 
-/// 保存网页 token（月度总量用）：接受新体系 refresh_token 或旧体系 kimi-auth。
+/// 保存该账号的网页 token（月度总量用）：接受新体系 refresh_token 或旧体系 kimi-auth。
 /// 先规范化，再真实调接口校验；通过后存凭据管理器并触发一次刷新，让月度数据立刻上面板。
 ///
 /// 校验策略（新旧兼容）：
@@ -682,19 +878,27 @@ pub fn get_credential_status() -> CredentialStatus {
 ///   成功后落盘 refresh_token 并用 access_token 拉一次月度；
 /// - 输入是旧体系 kimi-auth（JWT 未过期仍可作 Bearer 用）→ 直接调 GetSubscriptionStats 校验。
 #[tauri::command]
-pub async fn set_web_token(app: AppHandle, token: String) -> Result<MonthlyInfo, String> {
+pub async fn set_web_token(
+    app: AppHandle,
+    account_id: String,
+    token: String,
+) -> Result<MonthlyInfo, String> {
     let token = web::normalize_web_token(&token)?;
 
     // 优先按新体系处理：refresh_token 续期成功 → 存 refresh_token + 拉月度
     match web::refresh_access_token(&token).await {
         Ok(session) => {
-            creds::save_web_refresh_token(&session.refresh_token).map_err(|e| e.to_string())?;
-            // 预热 access_token 缓存，避免随后的 do_refresh 再续一次
+            creds::save_web_refresh_token(&account_id, &session.refresh_token)
+                .map_err(|e| e.to_string())?;
+            // 预热该账号的 access_token 缓存，避免随后的 do_refresh 再续一次
             let exp = web::jwt_exp_secs(&session.access_token)
                 .unwrap_or(now_unix() + WEB_ACCESS_TOKEN_TTL_SECS);
-            *WEB_ACCESS_CACHE.lock().unwrap() = Some((session.access_token.clone(), exp));
+            WEB_ACCESS_CACHE
+                .lock()
+                .unwrap()
+                .insert(account_id.clone(), (session.access_token.clone(), exp));
             // 只记"已配置"，严禁记录 token 本身
-            tracing::info!("网页 refresh_token 已配置");
+            tracing::info!("网页 refresh_token 已配置（账号 {account_id}）");
             let info = web::fetch_subscription_stats(&session.access_token)
                 .await
                 .map_err(|e| web_error_message(&e))?;
@@ -704,8 +908,8 @@ pub async fn set_web_token(app: AppHandle, token: String) -> Result<MonthlyInfo,
         // 续期 401/403：可能是旧体系 kimi-auth（JWT 未过期仍可作 Bearer 用），回退直接校验
         Err(WebError::Unauthorized) => match web::fetch_subscription_stats(&token).await {
             Ok(info) => {
-                creds::save_web_token(&token).map_err(|e| e.to_string())?;
-                tracing::info!("网页 kimi-auth token 已配置");
+                creds::save_web_token(&account_id, &token).map_err(|e| e.to_string())?;
+                tracing::info!("网页 kimi-auth token 已配置（账号 {account_id}）");
                 do_refresh(&app).await;
                 Ok(info)
             }
@@ -722,13 +926,13 @@ pub async fn set_web_token(app: AppHandle, token: String) -> Result<MonthlyInfo,
     }
 }
 
-/// 清除网页 token（新旧体系都清）并触发一次刷新（面板回到无月度数据态）
+/// 清除该账号的网页 token（新旧体系都清）并触发一次刷新（该页回到无月度数据态）
 #[tauri::command]
-pub async fn clear_web_token(app: AppHandle) -> Result<(), String> {
-    creds::clear_web_token().map_err(|e| e.to_string())?;
-    creds::clear_web_refresh_token().map_err(|e| e.to_string())?;
-    *WEB_ACCESS_CACHE.lock().unwrap() = None;
-    tracing::info!("网页 token 已清除");
+pub async fn clear_web_token(app: AppHandle, account_id: String) -> Result<(), String> {
+    creds::clear_web_token(&account_id).map_err(|e| e.to_string())?;
+    creds::clear_web_refresh_token(&account_id).map_err(|e| e.to_string())?;
+    WEB_ACCESS_CACHE.lock().unwrap().remove(&account_id);
+    tracing::info!("网页 token 已清除（账号 {account_id}）");
     do_refresh(&app).await;
     Ok(())
 }
@@ -744,10 +948,18 @@ fn web_error_message(e: &WebError) -> String {
     }
 }
 
-/// 发起设备码登录：先取设备授权码，立即返回 waiting 状态；
-/// 后台任务轮询 token，结果经 device-login-updated 事件推送
+/// 发起设备码登录（绑定指定账号）：先取设备授权码，立即返回 waiting 状态；
+/// 后台任务轮询 token，结果经 device-login-updated 事件推送。
+/// 交互式弹窗流程，同一时间只跑一个（新发起的会顶替旧流程）
 #[tauri::command]
-pub async fn start_device_login(app: AppHandle) -> DeviceLoginState {
+pub async fn start_device_login(app: AppHandle, account_id: String) -> DeviceLoginState {
+    if storage::load_settings()
+        .unwrap_or_default()
+        .account(&account_id)
+        .is_none()
+    {
+        return DeviceLoginState::error("账号不存在".to_string());
+    }
     let info = match oauth::start_device_auth().await {
         Ok(info) => info,
         Err(e) => {
@@ -755,7 +967,7 @@ pub async fn start_device_login(app: AppHandle) -> DeviceLoginState {
             return DeviceLoginState::error(e.to_string());
         }
     };
-    tracing::info!("设备码登录已发起，等待用户授权");
+    tracing::info!("设备码登录已发起（账号 {account_id}），等待用户授权");
 
     let waiting = DeviceLoginState::waiting(&info);
     let (tx, rx) = watch::channel(false);
@@ -769,6 +981,7 @@ pub async fn start_device_login(app: AppHandle) -> DeviceLoginState {
         }
         dl.state = waiting.clone();
         dl.cancel = Some(tx.clone());
+        dl.account_id = Some(account_id.clone());
     }
 
     let app_task = app.clone();
@@ -789,28 +1002,30 @@ pub fn cancel_device_login(app: AppHandle) {
             let _ = tx.send(true);
         }
         dl.state = DeviceLoginState::idle();
+        dl.account_id = None;
     }
     let _ = app.emit("device-login-updated", DeviceLoginState::idle());
 }
 
 #[tauri::command]
-pub fn oauth_logout(app: AppHandle) {
-    if let Err(e) = oauth::clear_credentials() {
+pub fn oauth_logout(app: AppHandle, account_id: String) {
+    if let Err(e) = oauth::clear_credentials(&account_id) {
         tracing::warn!("清除 OAuth 凭证失败: {e}");
     } else {
-        tracing::info!("OAuth 凭证已清除");
+        tracing::info!("OAuth 凭证已清除（账号 {account_id}）");
     }
-    // 当前以 oauth 登录：回退为未显式选择（自动优先 api_key）
+    // 该账号以 oauth 登录：回退为未显式选择（自动优先 api_key）
     let mut settings = storage::load_settings().unwrap_or_default();
-    if settings.login_method.as_deref() == Some("oauth") {
-        settings.login_method = None;
-        if let Err(e) = storage::save_settings(&settings) {
-            tracing::warn!("保存登录方式失败: {e}");
+    if let Some(account) = settings.accounts.iter_mut().find(|a| a.id == account_id) {
+        if account.login_method.as_deref() == Some("oauth") {
+            account.login_method = None;
+            if let Err(e) = storage::save_settings(&settings) {
+                tracing::warn!("保存登录方式失败: {e}");
+            }
         }
     }
-    // 让面板回到无凭证态（do_refresh 对无凭证分支不发事件，这里手动组状态发）
-    let panel = app.state::<AppState>().snapshot();
-    let _ = app.emit("quota-updated", &panel);
+    // 让该页回到无凭证态（手动组状态发事件）
+    emit_snapshot(&app);
 }
 
 /// 打开日志目录（确保存在后用系统文件管理器定位）
@@ -831,7 +1046,7 @@ pub fn open_log_dir(app: AppHandle) -> Result<(), String> {
 pub fn export_diagnostics(app: AppHandle) -> Result<String, String> {
     use tauri_plugin_opener::OpenerExt;
     let state = app.state::<AppState>();
-    let path = crate::diagnostics::export(&state.snapshot(), state.raw_response())?;
+    let path = crate::diagnostics::export(&state.snapshot(), state.raw_responses())?;
     // 文件已写好；定位失败只记日志，不影响返回路径
     if let Err(e) = app.opener().reveal_item_in_dir(&path) {
         tracing::warn!("定位诊断文件失败: {e}");
@@ -840,7 +1055,7 @@ pub fn export_diagnostics(app: AppHandle) -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
-/// 导出用量报告：history.json 采样点写为 CSV（附 history.json 原文）到
+/// 导出用量报告：各账号 history-<id>.json 采样点写为 CSV（附原文）到
 /// {config_dir}/exports/，用系统文件管理器定位目录，返回目录路径
 #[tauri::command]
 pub fn export_usage_report(app: AppHandle) -> Result<String, String> {
@@ -857,6 +1072,12 @@ pub fn export_usage_report(app: AppHandle) -> Result<String, String> {
 // ---------------------------------------------------------------------------
 // 以下为内部实现
 // ---------------------------------------------------------------------------
+
+/// 把当前内存态广播给前端（账号/凭证变更后调用，面板页即时收敛）
+fn emit_snapshot(app: &AppHandle) {
+    let panel = app.state::<AppState>().snapshot();
+    let _ = app.emit("quota-updated", &panel);
+}
 
 /// Kimi Code API Key 前缀（与开放平台 sk- 不通用）
 const API_KEY_PREFIX: &str = "sk-kimi-";
@@ -897,17 +1118,30 @@ async fn run_device_login(
     let outcome = tokio::select! {
         result = oauth::poll_device_token(&info) => match result {
             Ok(credentials) => {
-                match oauth::save_credentials(&credentials) {
-                    Ok(()) => {
-                        // 登录方式切到 oauth 并落盘，数据链路随即生效
-                        let mut settings = storage::load_settings().unwrap_or_default();
-                        settings.login_method = Some("oauth".to_string());
-                        if let Err(e) = storage::save_settings(&settings) {
-                            tracing::warn!("保存登录方式失败: {e}");
+                // 取本流程绑定的账号：丢失（被顶替）时不落盘
+                let account_id = {
+                    let state = app.state::<AppState>();
+                    let dl = state.device_login.lock().unwrap();
+                    dl.account_id.clone()
+                };
+                match account_id {
+                    Some(account_id) => match oauth::save_credentials(&account_id, &credentials) {
+                        Ok(()) => {
+                            // 该账号登录方式切到 oauth 并落盘，数据链路随即生效
+                            let mut settings = storage::load_settings().unwrap_or_default();
+                            if let Some(account) =
+                                settings.accounts.iter_mut().find(|a| a.id == account_id)
+                            {
+                                account.login_method = Some("oauth".to_string());
+                                if let Err(e) = storage::save_settings(&settings) {
+                                    tracing::warn!("保存登录方式失败: {e}");
+                                }
+                            }
+                            DeviceLoginState::success()
                         }
-                        DeviceLoginState::success()
-                    }
-                    Err(e) => DeviceLoginState::error(format!("保存凭证失败: {e}")),
+                        Err(e) => DeviceLoginState::error(format!("保存凭证失败: {e}")),
+                    },
+                    None => DeviceLoginState::idle(),
                 }
             }
             // Expired / Denied / Api / Http：文案直接取自 OAuthError 的 Display
@@ -938,6 +1172,9 @@ async fn run_device_login(
         {
             dl.cancel = None;
             dl.state = outcome.clone();
+            if outcome.status != "waiting" {
+                dl.account_id = None;
+            }
             true
         } else {
             false
@@ -957,7 +1194,7 @@ async fn run_device_login(
     }
 }
 
-/// 单次刷新的三种结局
+/// 单次单账号配额刷新的三种结局
 enum FetchOutcome {
     /// 未配置任何凭证
     NoCredential,
@@ -967,7 +1204,7 @@ enum FetchOutcome {
     Failed(String),
 }
 
-/// 月度刷新的四种结局（独立于配额刷新结果处理）
+/// 单账号月度刷新的四种结局（独立于配额刷新结果处理）
 enum MonthlyOutcome {
     /// 未配置网页 token（新旧体系均无）
     NoToken,
@@ -983,20 +1220,45 @@ enum MonthlyOutcome {
 const WEB_REFRESH_MARGIN_SECS: i64 = 300;
 /// access_token 兜底有效期（秒）：JWT 解不出 exp 时按新体系 15 分钟估算
 const WEB_ACCESS_TOKEN_TTL_SECS: i64 = 15 * 60;
-/// 进程内网页 access_token 缓存（access_token, expires_at 秒）。
+/// 进程内网页 access_token 缓存：账号 id → (access_token, expires_at 秒)。
+/// BTreeMap::new 是 const，可直接静态初始化（无新依赖）。
 /// refresh_token 轮换后的新值由调用方负责落盘（见 fetch_monthly_with_refresh）。
-static WEB_ACCESS_CACHE: std::sync::Mutex<Option<(String, i64)>> = std::sync::Mutex::new(None);
+static WEB_ACCESS_CACHE: Mutex<BTreeMap<String, (String, i64)>> = Mutex::new(BTreeMap::new());
 
-/// 取网页 token 并拉取月度总量；未配置 token → NoToken。
+/// 缓存命中（纯函数便于单测）：存在且剩余有效期大于续期余量才可用
+fn web_cache_fresh<'a>(
+    cache: &'a BTreeMap<String, (String, i64)>,
+    account_id: &str,
+    now: i64,
+) -> Option<&'a str> {
+    cache
+        .get(account_id)
+        .filter(|(_, exp)| *exp - now > WEB_REFRESH_MARGIN_SECS)
+        .map(|(token, _)| token.as_str())
+}
+
+/// 缓存兜底（纯函数）：未过期即可用（续期失败时的网络抖动场景）
+fn web_cache_stale<'a>(
+    cache: &'a BTreeMap<String, (String, i64)>,
+    account_id: &str,
+    now: i64,
+) -> Option<&'a str> {
+    cache
+        .get(account_id)
+        .filter(|(_, exp)| *exp > now)
+        .map(|(token, _)| token.as_str())
+}
+
+/// 取该账号的网页 token 并拉取月度总量；未配置 token → NoToken。
 ///
-/// 新鉴权体系（refresh_token）优先：进程内缓存 access_token，临期自动调
+/// 新鉴权体系（refresh_token）优先：进程内按账号缓存 access_token，临期自动调
 /// RefreshToken 续期并把轮换后的新 refresh_token 落盘（轮换制丢旧即失效）；
 /// 旧体系（kimi-auth，未过期仍可作 Bearer 用）作为兼容路径保留。
-async fn fetch_monthly() -> MonthlyOutcome {
-    if let Ok(Some(refresh_token)) = creds::load_web_refresh_token() {
-        return fetch_monthly_with_refresh(&refresh_token).await;
+async fn fetch_monthly(account_id: &str) -> MonthlyOutcome {
+    if let Ok(Some(refresh_token)) = creds::load_web_refresh_token(account_id) {
+        return fetch_monthly_with_refresh(account_id, &refresh_token).await;
     }
-    let token = match creds::load_web_token() {
+    let token = match creds::load_web_token(account_id) {
         Ok(Some(token)) => token,
         Ok(None) => return MonthlyOutcome::NoToken,
         Err(_) => return MonthlyOutcome::Failed,
@@ -1009,14 +1271,14 @@ async fn fetch_monthly() -> MonthlyOutcome {
 }
 
 /// 新鉴权体系月度刷新：access_token 未临期直接用缓存，否则续期后查询。
-async fn fetch_monthly_with_refresh(refresh_token: &str) -> MonthlyOutcome {
+async fn fetch_monthly_with_refresh(account_id: &str, refresh_token: &str) -> MonthlyOutcome {
     let now = now_unix();
-    let access_token = match web_access_token(refresh_token, now).await {
+    let access_token = match web_access_token(account_id, refresh_token, now).await {
         Ok(token) => token,
         Err(MonthlyOutcome::Unauthorized) => {
             // refresh_token 已失效：清掉本地凭证，下次引导重新粘贴
-            tracing::warn!("网页 refresh_token 已失效，已清除本地凭证");
-            let _ = creds::clear_web_refresh_token();
+            tracing::warn!("网页 refresh_token 已失效，已清除本地凭证（账号 {account_id}）");
+            let _ = creds::clear_web_refresh_token(account_id);
             return MonthlyOutcome::Unauthorized;
         }
         Err(other) => return other,
@@ -1024,22 +1286,24 @@ async fn fetch_monthly_with_refresh(refresh_token: &str) -> MonthlyOutcome {
 
     match web::fetch_subscription_stats(&access_token).await {
         Ok(info) => MonthlyOutcome::Success(info),
-        // access_token 已过期（缓存判定后提前失效等罕见情况）：清缓存，
+        // access_token 已过期（缓存判定后提前失效等罕见情况）：清该账号缓存，
         // 用当前 refresh_token 再续一次；仍 401 则判 refresh_token 失效
         Err(WebError::Unauthorized) => {
-            *WEB_ACCESS_CACHE.lock().unwrap() = None;
-            match web_access_token(refresh_token, now_unix()).await {
+            WEB_ACCESS_CACHE.lock().unwrap().remove(account_id);
+            match web_access_token(account_id, refresh_token, now_unix()).await {
                 Ok(token) => match web::fetch_subscription_stats(&token).await {
                     Ok(info) => MonthlyOutcome::Success(info),
                     Err(WebError::Unauthorized) => {
-                        tracing::warn!("网页 refresh_token 已失效，已清除本地凭证");
-                        let _ = creds::clear_web_refresh_token();
+                        tracing::warn!(
+                            "网页 refresh_token 已失效，已清除本地凭证（账号 {account_id}）"
+                        );
+                        let _ = creds::clear_web_refresh_token(account_id);
                         MonthlyOutcome::Unauthorized
                     }
                     Err(_) => MonthlyOutcome::Failed,
                 },
                 Err(MonthlyOutcome::Unauthorized) => {
-                    let _ = creds::clear_web_refresh_token();
+                    let _ = creds::clear_web_refresh_token(account_id);
                     MonthlyOutcome::Unauthorized
                 }
                 Err(other) => other,
@@ -1049,15 +1313,16 @@ async fn fetch_monthly_with_refresh(refresh_token: &str) -> MonthlyOutcome {
     }
 }
 
-/// 取可用的网页 access_token：缓存未临期直接复用，否则调 RefreshToken 续期。
+/// 取该账号可用的网页 access_token：缓存未临期直接复用，否则调 RefreshToken 续期。
 /// 续期成功后把轮换的新 refresh_token 落盘（丢旧即失效）。
-async fn web_access_token(refresh_token: &str, now: i64) -> Result<String, MonthlyOutcome> {
+async fn web_access_token(
+    account_id: &str,
+    refresh_token: &str,
+    now: i64,
+) -> Result<String, MonthlyOutcome> {
     let cached = {
         let cache = WEB_ACCESS_CACHE.lock().unwrap();
-        cache
-            .as_ref()
-            .filter(|(_, exp)| *exp - now > WEB_REFRESH_MARGIN_SECS)
-            .map(|(token, _)| token.clone())
+        web_cache_fresh(&cache, account_id, now).map(str::to_string)
     };
     if let Some(token) = cached {
         return Ok(token);
@@ -1066,54 +1331,63 @@ async fn web_access_token(refresh_token: &str, now: i64) -> Result<String, Month
     match web::refresh_access_token(refresh_token).await {
         Ok(session) => {
             // 轮换后的新 refresh_token 必须落盘，否则旧值失效后无法再续期
-            if let Err(e) = creds::save_web_refresh_token(&session.refresh_token) {
+            if let Err(e) = creds::save_web_refresh_token(account_id, &session.refresh_token) {
                 tracing::warn!("保存轮换后的 refresh_token 失败: {e}");
             }
             let exp =
                 web::jwt_exp_secs(&session.access_token).unwrap_or(now + WEB_ACCESS_TOKEN_TTL_SECS);
-            *WEB_ACCESS_CACHE.lock().unwrap() = Some((session.access_token.clone(), exp));
+            WEB_ACCESS_CACHE
+                .lock()
+                .unwrap()
+                .insert(account_id.to_string(), (session.access_token.clone(), exp));
             // 续期成功留痕（严禁记录 token 本身），便于诊断"自动续期是否在跑"
-            tracing::info!("网页 access_token 续期成功");
+            tracing::info!("网页 access_token 续期成功（账号 {account_id}）");
             Ok(session.access_token)
         }
         Err(WebError::Unauthorized) => {
-            *WEB_ACCESS_CACHE.lock().unwrap() = None;
+            WEB_ACCESS_CACHE.lock().unwrap().remove(account_id);
             Err(MonthlyOutcome::Unauthorized)
         }
         // 网络/解析失败：若缓存里还有未过期的 access_token 可先用（网络抖动场景）
         Err(_) => {
-            let stale = WEB_ACCESS_CACHE.lock().unwrap().clone();
+            let stale = {
+                let cache = WEB_ACCESS_CACHE.lock().unwrap();
+                web_cache_stale(&cache, account_id, now).map(str::to_string)
+            };
             match stale {
-                Some((token, exp)) if exp > now => Ok(token),
+                Some(token) => Ok(token),
                 _ => Err(MonthlyOutcome::Failed),
             }
         }
     }
 }
 
-/// 取 token 并拉取配额；失败分支记 warn（错误类型与文案，严禁记录 token）
-async fn fetch_with_credential() -> FetchOutcome {
-    let token = match creds::get_active_token().await {
+/// 取该账号 token 并拉取配额；失败分支记 warn（错误类型与文案，严禁记录 token）
+async fn fetch_with_credential(account: &Account) -> FetchOutcome {
+    let token = match creds::get_active_token(account).await {
         Ok(Some((_, token))) => token,
         Ok(None) => return FetchOutcome::NoCredential,
         Err(e) => {
-            tracing::warn!("配额刷新失败: 读取凭证失败: {e}");
+            tracing::warn!("配额刷新失败（账号 {}）: 读取凭证失败: {e}", account.id);
             return FetchOutcome::Failed(e.to_string());
         }
     };
     match KimiClient::new().fetch_quota_with_raw(&token).await {
         Ok((quota, raw)) => FetchOutcome::Success(Box::new((quota, now_unix(), raw))),
         Err(QuotaError::Unauthorized) => {
-            tracing::warn!("配额刷新失败: 凭证无效或已过期 (Unauthorized)");
+            tracing::warn!(
+                "配额刷新失败（账号 {}）: 凭证无效或已过期 (Unauthorized)",
+                account.id
+            );
             FetchOutcome::Failed("凭证无效或已过期，请在设置中重新配置".to_string())
         }
         Err(QuotaError::Http(e)) => {
-            tracing::warn!("配额刷新失败: 网络错误: {e}");
+            tracing::warn!("配额刷新失败（账号 {}）: 网络错误: {e}", account.id);
             FetchOutcome::Failed("网络错误，展示缓存数据".to_string())
         }
         // Parse / Api：展示原始错误文本
         Err(other) => {
-            tracing::warn!("配额刷新失败: {other}");
+            tracing::warn!("配额刷新失败（账号 {}）: {other}", account.id);
             FetchOutcome::Failed(other.to_string())
         }
     }
@@ -1135,47 +1409,103 @@ fn truncate_raw_body(mut body: String) -> String {
 /// 由内存态 + 当前设置/凭证组装 PanelState
 fn assemble_panel_state(inner: &Inner) -> PanelState {
     let settings = storage::load_settings().unwrap_or_default();
-    let (quota, fetched_at) = match &inner.last_quota {
-        Some((quota, fetched_at)) => (Some(quota.clone()), Some(*fetched_at)),
-        None => (None, None),
-    };
-    // 低额判定：任一时间窗剩余低于阈值，或月度已用超过 100 - 阈值
-    let low_warning = quota
-        .as_ref()
-        .is_some_and(|q| needs_low_warning(q, settings.warn_threshold_pct))
-        || inner
-            .monthly
-            .as_ref()
-            .is_some_and(|m| m.total_pct >= 100.0 - settings.warn_threshold_pct);
+    assemble_panel_state_with(inner, &settings, &has_any_credential)
+}
+
+/// 组装实现（设置与凭证查询入参化，纯函数便于单测）：
+/// 按 settings.accounts 顺序逐账号取运行时快照；低额判定要求该账号最近一次
+/// 刷新成功（error 为空）——拉取失败/凭证无效的账号不算低额（GOAL 拍板）
+fn assemble_panel_state_with(
+    inner: &Inner,
+    settings: &storage::Settings,
+    has_credential: &dyn Fn(&str) -> bool,
+) -> PanelState {
+    let threshold = settings.warn_threshold_pct;
+    let accounts = settings
+        .accounts
+        .iter()
+        .map(|account| {
+            let runtime = inner.accounts.get(&account.id);
+            let (quota, fetched_at) = match runtime.and_then(|rt| rt.last_quota.as_ref()) {
+                Some((quota, fetched_at)) => (Some(quota.clone()), Some(*fetched_at)),
+                None => (None, None),
+            };
+            let error = runtime.and_then(|rt| rt.error.clone());
+            let monthly = runtime.and_then(|rt| rt.monthly.clone());
+            let monthly_error = runtime.and_then(|rt| rt.monthly_error.clone());
+            let low_warning = error.is_none()
+                && (quota
+                    .as_ref()
+                    .is_some_and(|q| needs_low_warning(q, threshold))
+                    || monthly
+                        .as_ref()
+                        .is_some_and(|m| m.total_pct >= 100.0 - threshold));
+            AccountPanel {
+                account: account.clone(),
+                credential: has_credential(&account.id),
+                quota,
+                fetched_at,
+                error,
+                low_warning,
+                monthly,
+                monthly_error,
+            }
+        })
+        .collect();
     PanelState {
-        credential: has_any_credential(),
         loading: inner.loading,
-        quota,
-        fetched_at,
-        error: inner.error.clone(),
-        low_warning,
-        monthly: inner.monthly.clone(),
-        monthly_error: inner.monthly_error.clone(),
+        accounts,
     }
 }
 
-/// 是否已配置任一凭证（API Key 或 OAuth 本地凭证）
-fn has_any_credential() -> bool {
-    if matches!(creds::load_api_key(), Ok(Some(_))) {
-        return true;
-    }
-    matches!(oauth::load_credentials(), Ok(Some(_)))
+/// 托盘变红判定：任一账号低额（低额本身已排除刷新失败的账号）
+pub(crate) fn any_low_warning(panel: &PanelState) -> bool {
+    panel.accounts.iter().any(|a| a.low_warning)
 }
 
-/// 托盘 tooltip 的附加行："\n7天剩余 87% · 5h剩余 36%"（英文 "\n7D left 87% · 5H left 36%"，
-/// 无数据时为 None）；摘要文案按 lang 由 i18n::quota_summary 生成
-fn tooltip_extra(quota: Option<&KimiQuota>, lang: i18n::Lang) -> Option<String> {
-    let summary = quota.map(|q| i18n::quota_summary(lang, q))?;
+/// 该账号配额中最差（最低）的剩余百分比：weekly / five_hour / total 三者最小
+fn worst_window_pct(quota: &KimiQuota) -> Option<f64> {
+    [
+        quota.weekly.as_ref().map(|d| d.percent_remaining),
+        quota.five_hour.as_ref().map(|d| d.percent_remaining),
+        quota.total.as_ref().map(|t| t.percent_remaining),
+    ]
+    .into_iter()
+    .flatten()
+    .reduce(f64::min)
+}
+
+/// 托盘 tooltip 的附加行：最差账号（剩余百分比最低、且最近刷新成功）的摘要，
+/// 如 "\n7天剩余 87% · 5h剩余 36%"；多账号时前缀账号名（"\n账号 1 · 7天剩余 8%"）。
+/// 全部账号无可用数据时为 None
+pub(crate) fn worst_account_tooltip(panel: &PanelState, lang: i18n::Lang) -> Option<String> {
+    let (account, quota) = panel
+        .accounts
+        .iter()
+        .filter(|a| a.error.is_none())
+        .filter_map(|a| {
+            let quota = a.quota.as_ref()?;
+            worst_window_pct(quota).map(|pct| (a, quota, pct))
+        })
+        .min_by(|x, y| x.2.partial_cmp(&y.2).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(a, quota, _)| (a, quota))?;
+    let summary = i18n::quota_summary(lang, quota);
     if summary.is_empty() {
-        None
+        return None;
+    }
+    if panel.accounts.len() > 1 {
+        Some(format!("\n{} · {}", account.account.name, summary))
     } else {
         Some(format!("\n{summary}"))
     }
+}
+
+/// 该账号是否已配置任一凭证（API Key 或 OAuth 本地凭证）
+fn has_any_credential(account_id: &str) -> bool {
+    if matches!(creds::load_api_key(account_id), Ok(Some(_))) {
+        return true;
+    }
+    matches!(oauth::load_credentials(account_id), Ok(Some(_)))
 }
 
 fn now_unix() -> i64 {
@@ -1185,6 +1515,7 @@ fn now_unix() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kimicodebar::quota::{QuotaDetail, TotalQuotaInfo};
 
     // ---- API Key 校验 ----
 
@@ -1238,5 +1569,297 @@ mod tests {
     #[test]
     fn mask_api_key_empty() {
         assert_eq!(mask_api_key(""), "");
+    }
+
+    // ---- 多账号状态组装 ----
+
+    fn account(id: &str, name: &str) -> Account {
+        Account {
+            id: id.to_string(),
+            name: name.to_string(),
+            login_method: None,
+        }
+    }
+
+    fn quota_with_weekly(percent_remaining: f64) -> KimiQuota {
+        KimiQuota {
+            weekly: Some(QuotaDetail {
+                used: 100.0 - percent_remaining,
+                limit: 100.0,
+                remaining: percent_remaining,
+                reset_time: None,
+                percent_remaining,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn settings_with_accounts(accounts: Vec<Account>, threshold: f64) -> storage::Settings {
+        storage::Settings {
+            accounts,
+            warn_threshold_pct: threshold,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn assemble_multi_account_panel_state() {
+        let a1 = account("id-1", "账号 1");
+        let a2 = account("id-2", "工作号");
+        let settings = settings_with_accounts(vec![a1.clone(), a2.clone()], 20.0);
+
+        let mut inner = Inner {
+            loading: true,
+            ..Inner::default()
+        };
+        // 账号 1：健康数据（剩余 87%），月度有值
+        inner.accounts.insert(
+            "id-1".to_string(),
+            AccountRuntime {
+                error: None,
+                last_quota: Some((quota_with_weekly(87.0), 1_900_000_000)),
+                last_raw_response: Some(("raw".to_string(), 1_900_000_000)),
+                monthly: Some(MonthlyInfo {
+                    total_pct: 16.12,
+                    kimi_pct: 11.12,
+                    code_pct: 5.0,
+                    reset_time: None,
+                }),
+                monthly_error: None,
+            },
+        );
+        // 账号 2：拉取失败（无效 token），残留旧缓存数据
+        inner.accounts.insert(
+            "id-2".to_string(),
+            AccountRuntime {
+                error: Some("凭证无效或已过期，请在设置中重新配置".to_string()),
+                last_quota: Some((quota_with_weekly(5.0), 1_899_000_000)),
+                last_raw_response: None,
+                monthly: None,
+                monthly_error: Some("月度数据刷新失败".to_string()),
+            },
+        );
+
+        let panel = assemble_panel_state_with(&inner, &settings, &|id| id == "id-1");
+
+        assert!(panel.loading);
+        assert_eq!(panel.accounts.len(), 2);
+
+        let p1 = &panel.accounts[0];
+        assert_eq!(p1.account.id, "id-1");
+        assert_eq!(p1.account.name, "账号 1");
+        assert!(p1.credential);
+        assert!(p1.error.is_none());
+        assert_eq!(p1.fetched_at, Some(1_900_000_000));
+        assert!(!p1.low_warning, "剩余 87% 不应低额");
+        assert!((p1.monthly.as_ref().unwrap().total_pct - 16.12).abs() < 1e-9);
+        assert!(p1.monthly_error.is_none());
+
+        let p2 = &panel.accounts[1];
+        assert_eq!(p2.account.id, "id-2");
+        assert!(!p2.credential);
+        assert_eq!(
+            p2.error.as_deref(),
+            Some("凭证无效或已过期，请在设置中重新配置")
+        );
+        // 缓存数据照常展示
+        assert!(p2.quota.is_some());
+        assert!(!p2.low_warning, "拉取失败的账号不算低额（GOAL 拍板）");
+        assert_eq!(p2.monthly_error.as_deref(), Some("月度数据刷新失败"));
+    }
+
+    #[test]
+    fn low_warning_any_account_triggers_alert_but_failed_account_never_low() {
+        let a1 = account("id-1", "账号 1");
+        let a2 = account("id-2", "账号 2");
+        let settings = settings_with_accounts(vec![a1, a2], 20.0);
+
+        let mut inner = Inner::default();
+        // 账号 1：刷新成功但剩余 8%（低额）→ 该账号 low
+        inner.accounts.insert(
+            "id-1".to_string(),
+            AccountRuntime {
+                error: None,
+                last_quota: Some((quota_with_weekly(8.0), 1_900_000_000)),
+                ..AccountRuntime::default()
+            },
+        );
+        // 账号 2：刷新失败 + 缓存剩余 3% → 不算低额
+        inner.accounts.insert(
+            "id-2".to_string(),
+            AccountRuntime {
+                error: Some("网络错误，展示缓存数据".to_string()),
+                last_quota: Some((quota_with_weekly(3.0), 1_899_000_000)),
+                ..AccountRuntime::default()
+            },
+        );
+
+        let panel = assemble_panel_state_with(&inner, &settings, &|_| true);
+        assert!(panel.accounts[0].low_warning);
+        assert!(!panel.accounts[1].low_warning);
+        assert!(any_low_warning(&panel), "任一账号低额 → 托盘变红");
+
+        // 反向验证场景：唯一"低额"的账号是拉取失败的账号 → 托盘不变红
+        let settings2 = settings_with_accounts(vec![account("id-2", "账号 2")], 20.0);
+        let panel2 = assemble_panel_state_with(&inner, &settings2, &|_| true);
+        assert!(!panel2.accounts[0].low_warning);
+        assert!(!any_low_warning(&panel2), "失败账号的低额不触发变红");
+    }
+
+    #[test]
+    fn low_warning_monthly_counts_when_fresh() {
+        let settings = settings_with_accounts(vec![account("id-1", "账号 1")], 20.0);
+        let mut inner = Inner::default();
+        inner.accounts.insert(
+            "id-1".to_string(),
+            AccountRuntime {
+                error: None,
+                monthly: Some(MonthlyInfo {
+                    total_pct: 85.0, // 已用 85% ≥ 100-20 → 低额
+                    kimi_pct: 80.0,
+                    code_pct: 5.0,
+                    reset_time: None,
+                }),
+                ..AccountRuntime::default()
+            },
+        );
+        let panel = assemble_panel_state_with(&inner, &settings, &|_| true);
+        assert!(panel.accounts[0].low_warning);
+    }
+
+    #[test]
+    fn tooltip_picks_worst_account_and_prefixes_name_only_when_multi() {
+        let a1 = account("id-1", "账号 1");
+        let a2 = account("id-2", "工作号");
+        let settings = settings_with_accounts(vec![a1, a2], 20.0);
+
+        let mut inner = Inner::default();
+        inner.accounts.insert(
+            "id-1".to_string(),
+            AccountRuntime {
+                error: None,
+                last_quota: Some((quota_with_weekly(50.0), 1)),
+                ..AccountRuntime::default()
+            },
+        );
+        inner.accounts.insert(
+            "id-2".to_string(),
+            AccountRuntime {
+                error: None,
+                last_quota: Some((quota_with_weekly(9.0), 1)),
+                ..AccountRuntime::default()
+            },
+        );
+
+        let panel = assemble_panel_state_with(&inner, &settings, &|_| true);
+        let tip = worst_account_tooltip(&panel, i18n::Lang::Zh).unwrap();
+        // 最差账号是"工作号"（9%），多账号时前缀账号名
+        assert!(tip.starts_with("\n工作号 · "), "实际: {tip}");
+        assert!(tip.contains("9%"), "实际: {tip}");
+
+        // 单账号无前缀
+        let settings1 = settings_with_accounts(vec![account("id-1", "账号 1")], 20.0);
+        let panel1 = assemble_panel_state_with(&inner, &settings1, &|_| true);
+        let tip1 = worst_account_tooltip(&panel1, i18n::Lang::Zh).unwrap();
+        assert!(tip1.starts_with("\n7天剩余"), "实际: {tip1}");
+
+        // 全部账号刷新失败：无 tooltip 摘要
+        let mut inner_fail = Inner::default();
+        inner_fail.accounts.insert(
+            "id-1".to_string(),
+            AccountRuntime {
+                error: Some("网络错误，展示缓存数据".to_string()),
+                last_quota: Some((quota_with_weekly(9.0), 1)),
+                ..AccountRuntime::default()
+            },
+        );
+        let panel_fail = assemble_panel_state_with(&inner_fail, &settings1, &|_| true);
+        assert!(worst_account_tooltip(&panel_fail, i18n::Lang::Zh).is_none());
+    }
+
+    #[test]
+    fn assemble_without_accounts_is_empty_page_list() {
+        let inner = Inner::default();
+        let settings = storage::Settings::default();
+        let panel = assemble_panel_state_with(&inner, &settings, &|_| false);
+        assert!(panel.accounts.is_empty());
+        assert!(!panel.loading);
+        assert!(!any_low_warning(&panel));
+        assert!(worst_account_tooltip(&panel, i18n::Lang::En).is_none());
+    }
+
+    // ---- 月度 access_token 缓存按账号隔离 ----
+
+    #[test]
+    fn web_access_cache_isolated_per_account() {
+        let mut cache: BTreeMap<String, (String, i64)> = BTreeMap::new();
+        let now = 1_000_000;
+        let valid_a = now + 3600;
+        let soon_b = now + 100; // 余 100s < 300s 余量：fresh 不命中、stale 命中
+
+        cache.insert("acc-a".to_string(), ("token-a".to_string(), valid_a));
+        cache.insert("acc-b".to_string(), ("token-b".to_string(), soon_b));
+
+        assert_eq!(web_cache_fresh(&cache, "acc-a", now), Some("token-a"));
+        assert_eq!(web_cache_fresh(&cache, "acc-b", now), None, "临期不应命中");
+        assert_eq!(web_cache_stale(&cache, "acc-b", now), Some("token-b"));
+        assert_eq!(web_cache_fresh(&cache, "acc-c", now), None);
+
+        // 清 acc-a 不影响 acc-b
+        cache.remove("acc-a");
+        assert_eq!(web_cache_fresh(&cache, "acc-a", now), None);
+        assert_eq!(web_cache_stale(&cache, "acc-b", now), Some("token-b"));
+
+        // 已过期（exp ≤ now）：stale 也不命中
+        cache.insert("acc-d".to_string(), ("token-d".to_string(), now - 1));
+        assert_eq!(web_cache_stale(&cache, "acc-d", now), None);
+    }
+
+    // ---- 删账号后内存态收敛 ----
+
+    #[test]
+    fn remove_account_runtime_leaves_no_residue() {
+        let state = AppState {
+            inner: Mutex::new(Inner::default()),
+            device_login: Mutex::new(DeviceLoginInner::default()),
+            refresh_lock: tokio::sync::Mutex::new(()),
+        };
+        {
+            let mut inner = state.inner.lock().unwrap();
+            inner
+                .accounts
+                .insert("id-1".to_string(), AccountRuntime::default());
+            inner
+                .accounts
+                .insert("id-2".to_string(), AccountRuntime::default());
+        }
+
+        state.remove_account_runtime("id-1");
+        let inner = state.inner.lock().unwrap();
+        assert!(!inner.accounts.contains_key("id-1"));
+        assert!(inner.accounts.contains_key("id-2"));
+        // 幂等：再删一次不 panic
+        drop(inner);
+        state.remove_account_runtime("id-1");
+    }
+
+    // ---- total 窗口也参与最差百分比（worst_window_pct） ----
+
+    #[test]
+    fn worst_window_pct_covers_total() {
+        let q = KimiQuota {
+            weekly: Some(QuotaDetail {
+                percent_remaining: 50.0,
+                ..Default::default()
+            }),
+            total: Some(TotalQuotaInfo {
+                limit: 500.0,
+                remaining: 25.0,
+                percent_remaining: 5.0,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(worst_window_pct(&q), Some(5.0));
+        assert_eq!(worst_window_pct(&KimiQuota::default()), None);
     }
 }

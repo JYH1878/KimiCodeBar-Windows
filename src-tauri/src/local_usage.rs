@@ -116,17 +116,41 @@ pub fn scan() -> LocalUsageStats {
     stats
 }
 
-/// 导出用量报告：history.json 采样点写为 CSV 到 `{config_dir}/exports/usage-YYYYMMDD-HHmmss.csv`，
-/// 并把 history.json 原文复制到同目录；返回 exports 目录路径（reveal 由命令层负责）
+/// 导出用量报告：每个账号的历史采样各写一个 CSV 到 `{config_dir}/exports/`
+/// （`usage-YYYYMMDD-HHmmss-<账号名>.csv`），并把对应 history-<id>.json 原文复制到同目录；
+/// 返回 exports 目录路径（reveal 由命令层负责）
 pub fn export_usage_report() -> Result<PathBuf, String> {
     let config_dir = crate::storage::config_dir();
-    let points = crate::history::HistoryStore::load().into_points();
-    export_report_to(
-        &config_dir.join("exports"),
-        &config_dir.join("history.json"),
-        &points,
-        chrono::Local::now(),
-    )
+    let settings = crate::storage::load_settings().unwrap_or_default();
+    let exports_dir = config_dir.join("exports");
+    let now = chrono::Local::now();
+    let mut any = false;
+    for account in &settings.accounts {
+        let points = crate::history::HistoryStore::load(&account.id).into_points();
+        let history_src = config_dir.join(format!("history-{}.json", account.id));
+        if points.is_empty() && !history_src.exists() {
+            continue;
+        }
+        export_report_to(
+            &exports_dir,
+            &history_src,
+            &points,
+            now,
+            Some(&account.name),
+        )?;
+        any = true;
+    }
+    if !any {
+        // 无账号或全无历史：仍产出一个空 CSV（保持旧版"空历史也导出空表"的行为）
+        export_report_to(
+            &exports_dir,
+            &config_dir.join("history.json"),
+            &[],
+            now,
+            None,
+        )?;
+    }
+    Ok(exports_dir)
 }
 
 // ---------------------------------------------------------------------------
@@ -483,26 +507,48 @@ fn state_file_path() -> PathBuf {
     crate::storage::config_dir().join("scan-state.json")
 }
 
-/// 导出实现（目录/时间入参化以便单测）：写 CSV + 复制 history.json，返回 exports 目录路径
+/// 导出实现（目录/时间入参化以便单测）：写 CSV + 复制历史原文，返回 exports 目录路径。
+/// name_suffix 为账号名（多账号每账号一份文件，文件名带后缀区分；None = 无账号兜底）
 fn export_report_to<Tz: TimeZone>(
     exports_dir: &Path,
     history_src: &Path,
     points: &[HistoryPoint],
     now: DateTime<Tz>,
+    name_suffix: Option<&str>,
 ) -> Result<PathBuf, String>
 where
     Tz::Offset: std::fmt::Display,
 {
+    let suffix = name_suffix
+        .map(sanitize_filename)
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("-{s}"))
+        .unwrap_or_default();
     std::fs::create_dir_all(exports_dir).map_err(|e| format!("创建导出目录失败: {e}"))?;
-    let csv_path = exports_dir.join(format!("usage-{}.csv", now.format("%Y%m%d-%H%M%S")));
+    let csv_path = exports_dir.join(format!(
+        "usage-{}{}.csv",
+        now.format("%Y%m%d-%H%M%S"),
+        suffix
+    ));
     std::fs::write(&csv_path, build_history_csv(points, &now.timezone()))
         .map_err(|e| format!("写入 CSV 失败: {e}"))?;
-    // history.json 原文一并复制（排查对数用）；源不存在（从未刷新成功过）跳过
+    // 历史原文一并复制（排查对数用）；源不存在（从未刷新成功过）跳过
     if history_src.exists() {
-        std::fs::copy(history_src, exports_dir.join("history.json"))
-            .map_err(|e| format!("复制 history.json 失败: {e}"))?;
+        std::fs::copy(
+            history_src,
+            exports_dir.join(format!("history{suffix}.json")),
+        )
+        .map_err(|e| format!("复制历史原文失败: {e}"))?;
     }
     Ok(exports_dir.to_path_buf())
+}
+
+/// 文件名净化：去掉 Windows 文件名非法字符（/\:*?"<>|）与控制字符
+fn sanitize_filename(name: &str) -> String {
+    name.trim()
+        .chars()
+        .filter(|c| !r#"/\:*?"<>|"#.contains(*c) && !c.is_control())
+        .collect()
 }
 
 /// 由采样点生成 CSV 文本（时区入参化，测试用固定偏移复现本地时间列）：
@@ -1071,19 +1117,19 @@ mod tests {
             five_hour: None,
             monthly: None,
         }];
-        let out = export_report_to(&exports, &history_src, &points, now).unwrap();
+        let out = export_report_to(&exports, &history_src, &points, now, Some("账号 1")).unwrap();
         assert_eq!(out, exports);
 
-        // CSV 文件名带本地时间戳，内容表头 + 一行
-        let csv_path = exports.join("usage-20260727-123456.csv");
+        // CSV 文件名带本地时间戳与账号名后缀，内容表头 + 一行
+        let csv_path = exports.join("usage-20260727-123456-账号 1.csv");
         let csv = std::fs::read_to_string(&csv_path).unwrap();
         assert_eq!(
             csv,
             "time,weekly,five_hour,monthly\n2026-07-27T12:34:56,42.5,,\n"
         );
-        // history.json 原文已复制到同目录
+        // history-账号 1.json 原文已复制到同目录
         assert_eq!(
-            std::fs::read_to_string(exports.join("history.json")).unwrap(),
+            std::fs::read_to_string(exports.join("history-账号 1.json")).unwrap(),
             r#"{"points":[{"t":1,"weekly":1.0}]}"#
         );
 
@@ -1096,7 +1142,7 @@ mod tests {
         let exports = dir.join("exports");
         let now = tz8().with_ymd_and_hms(2026, 7, 27, 12, 0, 0).unwrap();
         // history.json 不存在（从未刷新成功过）：CSV 照常导出，复制跳过
-        export_report_to(&exports, &dir.join("history.json"), &[], now).unwrap();
+        export_report_to(&exports, &dir.join("history.json"), &[], now, None).unwrap();
         assert!(exports.join("usage-20260727-120000.csv").exists());
         assert!(!exports.join("history.json").exists());
 

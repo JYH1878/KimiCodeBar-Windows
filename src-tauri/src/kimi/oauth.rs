@@ -205,14 +205,49 @@ pub fn is_expiring_soon(creds: &Credentials, margin_secs: i64) -> bool {
     }
 }
 
-/// 从 %APPDATA%\KimiCodeBar\credentials.json 读取（不存在返回 Ok(None)）。
+/// 从该账号的凭证文件（credentials-<id>.json）读取（不存在返回 Ok(None)）。
 ///
 /// 当前格式：DPAPI（CurrentUser 作用域）加密的二进制密文。
 /// 兼容旧版本写出的明文 JSON：DPAPI 解密失败则回退按明文解析，
 /// 解析成功立刻以加密形式原地重写（透明迁移）；明文也解析失败按损坏处理返回 None。
-pub fn load_credentials() -> Result<Option<Credentials>, OAuthError> {
-    let path = credentials_file_path();
-    let bytes = match std::fs::read(&path) {
+pub fn load_credentials(account_id: &str) -> Result<Option<Credentials>, OAuthError> {
+    load_from(&credentials_file_path(account_id))
+}
+
+/// 原子写入（临时文件 + rename）到该账号的 credentials-<id>.json。
+/// 内容：JSON 序列化 → UTF-8 字节 → DPAPI 加密后的二进制密文；
+/// DPAPI 失败时宁可报错也不落明文。
+pub fn save_credentials(account_id: &str, creds: &Credentials) -> Result<(), OAuthError> {
+    save_to(&credentials_file_path(account_id), creds)
+}
+
+/// 删除该账号的本地凭证（授权吊销 / 用户退出登录 / 删除账号时调用）。
+pub fn clear_credentials(account_id: &str) -> Result<(), OAuthError> {
+    remove_file(&credentials_file_path(account_id))
+}
+
+/// 旧单账号凭证文件路径（仅迁移用）：{config_dir}/credentials.json
+pub(crate) fn legacy_credentials_file_path() -> PathBuf {
+    config_dir().join("credentials.json")
+}
+
+/// 迁移用：读取旧单账号凭证（含明文原地升级语义，升级写回旧路径）
+pub(crate) fn load_legacy_credentials() -> Result<Option<Credentials>, OAuthError> {
+    load_from(&legacy_credentials_file_path())
+}
+
+/// 迁移用：删除旧单账号凭证文件
+pub(crate) fn clear_legacy_credentials() -> Result<(), OAuthError> {
+    remove_file(&legacy_credentials_file_path())
+}
+
+// ---------------------------------------------------------------------------
+// 以下为内部实现（文件读写按路径参数化，账号无关）
+// ---------------------------------------------------------------------------
+
+/// 从指定路径读取凭证（语义见 load_credentials 注释）
+fn load_from(path: &std::path::Path) -> Result<Option<Credentials>, OAuthError> {
+    let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(OAuthError::Io(e.to_string())),
@@ -225,7 +260,7 @@ pub fn load_credentials() -> Result<Option<Credentials>, OAuthError> {
     match serde_json::from_slice::<Credentials>(&bytes) {
         Ok(creds) => {
             // 原地升级为密文；重写失败不算致命（下次 load 还会再试）
-            let _ = save_credentials(&creds);
+            let _ = save_to(path, &creds);
             Ok(Some(creds))
         }
         // 3) 明文也解析失败：按无凭证/损坏处理（与 Mac 版 `try?` 解码语义一致）
@@ -233,29 +268,25 @@ pub fn load_credentials() -> Result<Option<Credentials>, OAuthError> {
     }
 }
 
-/// 原子写入（临时文件 + rename）到 %APPDATA%\KimiCodeBar\credentials.json。
-/// 内容：JSON 序列化 → UTF-8 字节 → DPAPI 加密后的二进制密文；
-/// DPAPI 失败时宁可报错也不落明文。
-pub fn save_credentials(creds: &Credentials) -> Result<(), OAuthError> {
-    let path = credentials_file_path();
+/// 原子写入（临时文件 + rename）到指定路径；DPAPI 失败时宁可报错也不落明文
+fn save_to(path: &std::path::Path, creds: &Credentials) -> Result<(), OAuthError> {
     let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
     std::fs::create_dir_all(dir).map_err(|e| OAuthError::Io(e.to_string()))?;
 
     let json = serde_json::to_string_pretty(creds).map_err(|e| OAuthError::Io(e.to_string()))?;
     let blob = dpapi::protect(json.as_bytes()).map_err(OAuthError::Io)?;
-    let tmp_path = dir.join("credentials.json.tmp");
+    let tmp_path = path.with_extension("json.tmp");
     std::fs::write(&tmp_path, blob).map_err(|e| OAuthError::Io(e.to_string()))?;
     // Windows 上 rename 不允许目标已存在，先删再改名
     if path.exists() {
-        std::fs::remove_file(&path).map_err(|e| OAuthError::Io(e.to_string()))?;
+        std::fs::remove_file(path).map_err(|e| OAuthError::Io(e.to_string()))?;
     }
-    std::fs::rename(&tmp_path, &path).map_err(|e| OAuthError::Io(e.to_string()))
+    std::fs::rename(&tmp_path, path).map_err(|e| OAuthError::Io(e.to_string()))
 }
 
-/// 删除本地凭证（授权吊销 / 用户退出登录时调用）。
-pub fn clear_credentials() -> Result<(), OAuthError> {
-    let path = credentials_file_path();
-    match std::fs::remove_file(&path) {
+/// 删除指定凭证文件：不存在也算成功
+fn remove_file(path: &std::path::Path) -> Result<(), OAuthError> {
+    match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(OAuthError::Io(e.to_string())),
@@ -536,8 +567,9 @@ fn config_dir() -> PathBuf {
     std::env::temp_dir().join("KimiCodeBar")
 }
 
-fn credentials_file_path() -> PathBuf {
-    config_dir().join("credentials.json")
+/// 该账号的凭证文件路径：{config_dir}/credentials-<id>.json
+fn credentials_file_path(account_id: &str) -> PathBuf {
+    config_dir().join(format!("credentials-{account_id}.json"))
 }
 
 fn now_unix() -> i64 {
@@ -630,7 +662,7 @@ mod tests {
         std::env::set_var("KIMICODEBAR_CONFIG_DIR", &dir);
 
         // 未保存时读取为 None
-        assert!(load_credentials().unwrap().is_none());
+        assert!(load_credentials("acc1").unwrap().is_none());
 
         let creds = Credentials {
             access_token: "access-123".into(),
@@ -639,31 +671,34 @@ mod tests {
             scope: Some("scope".into()),
             token_type: Some("Bearer".into()),
         };
-        save_credentials(&creds).unwrap();
-        assert!(dir.join("credentials.json").exists());
+        save_credentials("acc1", &creds).unwrap();
+        assert!(dir.join("credentials-acc1.json").exists());
         // 临时文件不应残留
-        assert!(!dir.join("credentials.json.tmp").exists());
+        assert!(!dir.join("credentials-acc1.json.tmp").exists());
 
-        let loaded = load_credentials().unwrap().expect("应能读回凭证");
+        let loaded = load_credentials("acc1").unwrap().expect("应能读回凭证");
         assert_eq!(loaded.access_token, "access-123");
         assert_eq!(loaded.refresh_token.as_deref(), Some("refresh-456"));
         assert_eq!(loaded.expires_at, Some(1_900_000_000));
         assert_eq!(loaded.scope.as_deref(), Some("scope"));
         assert_eq!(loaded.token_type.as_deref(), Some("Bearer"));
 
+        // 另一个账号不受污染
+        assert!(load_credentials("acc2").unwrap().is_none());
+
         // 覆盖写入（rename 目标已存在的路径）
         let updated = Credentials {
             access_token: "access-789".into(),
             ..creds.clone()
         };
-        save_credentials(&updated).unwrap();
+        save_credentials("acc1", &updated).unwrap();
         assert_eq!(
-            load_credentials().unwrap().unwrap().access_token,
+            load_credentials("acc1").unwrap().unwrap().access_token,
             "access-789"
         );
 
         // 磁盘格式为 DPAPI 密文：不含任何明文 token / JSON 键名（Windows 上）
-        let raw = std::fs::read(dir.join("credentials.json")).unwrap();
+        let raw = std::fs::read(dir.join("credentials-acc1.json")).unwrap();
         #[cfg(windows)]
         {
             let raw_text = String::from_utf8_lossy(&raw);
@@ -682,10 +717,10 @@ mod tests {
             assert!(raw_text.contains("\"expires_at\""));
         }
 
-        clear_credentials().unwrap();
-        assert!(load_credentials().unwrap().is_none());
+        clear_credentials("acc1").unwrap();
+        assert!(load_credentials("acc1").unwrap().is_none());
         // 重复删除也应成功
-        clear_credentials().unwrap();
+        clear_credentials("acc1").unwrap();
 
         std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&dir);
@@ -697,14 +732,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("kimicodebar-test-{}", uuid::Uuid::new_v4()));
         std::env::set_var("KIMICODEBAR_CONFIG_DIR", &dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("credentials.json"), "not json").unwrap();
+        std::fs::write(dir.join("credentials-acc1.json"), "not json").unwrap();
 
-        assert!(load_credentials().unwrap().is_none());
+        assert!(load_credentials("acc1").unwrap().is_none());
 
         // 随机二进制（既非 DPAPI 密文也非明文 JSON）同样按损坏处理
         let garbage: Vec<u8> = (0u8..=255).collect();
-        std::fs::write(dir.join("credentials.json"), garbage).unwrap();
-        assert!(load_credentials().unwrap().is_none());
+        std::fs::write(dir.join("credentials-acc1.json"), garbage).unwrap();
+        assert!(load_credentials("acc1").unwrap().is_none());
 
         std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
         let _ = std::fs::remove_dir_all(&dir);
@@ -725,17 +760,19 @@ mod tests {
   "scope": "legacy-scope",
   "token_type": "Bearer"
 }"#;
-        std::fs::write(dir.join("credentials.json"), plaintext).unwrap();
+        std::fs::write(dir.join("credentials-acc1.json"), plaintext).unwrap();
 
         // 明文旧文件可正常读出
-        let creds = load_credentials().unwrap().expect("明文旧文件应能读出");
+        let creds = load_credentials("acc1")
+            .unwrap()
+            .expect("明文旧文件应能读出");
         assert_eq!(creds.access_token, "legacy-access");
         assert_eq!(creds.refresh_token.as_deref(), Some("legacy-refresh"));
         assert_eq!(creds.expires_at, Some(1_900_000_000));
         assert_eq!(creds.scope.as_deref(), Some("legacy-scope"));
 
         // 读取后文件已被原地升级为密文
-        let raw = std::fs::read(dir.join("credentials.json")).unwrap();
+        let raw = std::fs::read(dir.join("credentials-acc1.json")).unwrap();
         let raw_text = String::from_utf8_lossy(&raw);
         assert!(
             !raw_text.contains("legacy-access"),
@@ -745,7 +782,9 @@ mod tests {
         assert!(serde_json::from_slice::<serde_json::Value>(&raw).is_err());
 
         // 升级后的密文仍可正常读回
-        let creds = load_credentials().unwrap().expect("迁移后的密文应能读回");
+        let creds = load_credentials("acc1")
+            .unwrap()
+            .expect("迁移后的密文应能读回");
         assert_eq!(creds.access_token, "legacy-access");
         assert_eq!(creds.refresh_token.as_deref(), Some("legacy-refresh"));
         assert_eq!(creds.expires_at, Some(1_900_000_000));

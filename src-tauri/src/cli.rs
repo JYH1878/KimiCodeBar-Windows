@@ -73,25 +73,41 @@ fn run_status() -> i32 {
 }
 
 /// 拉取配额并序列化为成功 JSON；失败返回 (退出码, 错误 JSON)。
+/// 多账号：输出第一个账号（保持旧版单账号输出契约不变，见 GOAL 拍板）
 async fn fetch_status() -> Result<String, (i32, String)> {
-    // 凭证解析顺序：环境变量 KIMI_API_KEY（非空）→ keyring / OAuth 存储凭证
+    let first_account = kimicodebar::storage::load_settings()
+        .unwrap_or_default()
+        .accounts
+        .into_iter()
+        .next();
+    // 凭证解析顺序：环境变量 KIMI_API_KEY（非空）→ 第一个账号的 keyring / OAuth 存储凭证
     let token = match env_token("KIMI_API_KEY") {
         Some(token) => token,
-        None => match creds::get_active_token().await {
-            Ok(Some((_kind, token))) => token,
-            Ok(None) => {
+        None => {
+            let Some(account) = &first_account else {
                 return Err((
                     EXIT_NO_CREDENTIALS,
                     error_json("无可用凭证：请设置 KIMI_API_KEY 环境变量，或先在托盘应用中登录"),
                 ));
+            };
+            match creds::get_active_token(account).await {
+                Ok(Some((_kind, token))) => token,
+                Ok(None) => {
+                    return Err((
+                        EXIT_NO_CREDENTIALS,
+                        error_json(
+                            "无可用凭证：请设置 KIMI_API_KEY 环境变量，或先在托盘应用中登录",
+                        ),
+                    ));
+                }
+                Err(e) => {
+                    return Err((
+                        EXIT_NO_CREDENTIALS,
+                        error_json(&format!("读取本地凭证失败: {e}")),
+                    ));
+                }
             }
-            Err(e) => {
-                return Err((
-                    EXIT_NO_CREDENTIALS,
-                    error_json(&format!("读取本地凭证失败: {e}")),
-                ));
-            }
-        },
+        }
     };
 
     let quota = KimiClient::new()
@@ -101,9 +117,10 @@ async fn fetch_status() -> Result<String, (i32, String)> {
 
     // 月度总量是可选增强：无网页凭证或拉取失败都退化为 null，不影响主结果。
     // 新体系（refresh_token）优先自动续期；旧体系 kimi-auth / 环境变量直接当 Bearer 用。
-    let monthly = match web_monthly().await {
+    let account_id = first_account.as_ref().map(|a| a.id.as_str());
+    let monthly = match web_monthly(account_id).await {
         Some(info) => Some(info),
-        None => match web_token() {
+        None => match web_token(account_id) {
             Some(token) => web::fetch_subscription_stats(&token).await.ok(),
             None => None,
         },
@@ -112,15 +129,16 @@ async fn fetch_status() -> Result<String, (i32, String)> {
     Ok(success_json(quota, monthly, Utc::now().timestamp()))
 }
 
-/// 新鉴权体系月度拉取：keyring 有 refresh_token 则自动续期后查询。
+/// 新鉴权体系月度拉取：该账号 keyring 有 refresh_token 则自动续期后查询。
 /// refresh_token 续期轮换，新值必须写回 keyring（丢旧即失效）。
 /// 返回 Some(月度) 表示成功；None 表示未配置 refresh_token 或拉取失败（调用方回退旧路径）。
-async fn web_monthly() -> Option<MonthlyInfo> {
-    let refresh_token = creds::load_web_refresh_token().ok().flatten()?;
+async fn web_monthly(account_id: Option<&str>) -> Option<MonthlyInfo> {
+    let account_id = account_id?;
+    let refresh_token = creds::load_web_refresh_token(account_id).ok().flatten()?;
     match web::refresh_access_token(&refresh_token).await {
         Ok(session) => {
             // 轮换后的新 refresh_token 必须落盘，否则旧值失效后无法再续期
-            if let Err(e) = creds::save_web_refresh_token(&session.refresh_token) {
+            if let Err(e) = creds::save_web_refresh_token(account_id, &session.refresh_token) {
                 tracing::warn!("保存轮换后的 refresh_token 失败: {e}");
             }
             // 续期成功留痕（严禁记录 token 本身），便于诊断"自动续期是否在跑"
@@ -132,7 +150,7 @@ async fn web_monthly() -> Option<MonthlyInfo> {
         // refresh_token 已失效：清掉本地凭证，回退旧路径（可能有 kimi-auth / 环境变量）
         Err(web::WebError::Unauthorized) => {
             tracing::warn!("网页 refresh_token 已失效，已清除本地凭证");
-            let _ = creds::clear_web_refresh_token();
+            let _ = creds::clear_web_refresh_token(account_id);
             None
         }
         // 网络抖动：暂用旧路径兜底（可能同样失败，月度退化为 null）
@@ -140,14 +158,14 @@ async fn web_monthly() -> Option<MonthlyInfo> {
     }
 }
 
-/// 旧体系 web token 解析顺序：环境变量 KIMI_WEB_TOKEN（非空）→ keyring web_token。
+/// 旧体系 web token 解析顺序：环境变量 KIMI_WEB_TOKEN（非空）→ 该账号 keyring web_token。
 /// keyring 读取失败按"无 web token"处理，不阻断主流程。
 /// 仅在新体系 refresh_token 未配置或续期失败时作为兼容路径调用。
-fn web_token() -> Option<String> {
+fn web_token(account_id: Option<&str>) -> Option<String> {
     if let Some(token) = env_token("KIMI_WEB_TOKEN") {
         return Some(token);
     }
-    creds::load_web_token().ok().flatten()
+    creds::load_web_token(account_id?).ok().flatten()
 }
 
 /// 读取非空环境变量（trim 后为空视为未设置）

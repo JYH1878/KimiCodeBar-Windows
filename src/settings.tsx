@@ -6,24 +6,23 @@ import { useTranslation } from "react-i18next";
 import "./styles.css";
 import i18n, { resolveLang } from "./i18n";
 import { applyTheme, useTheme } from "./theme";
-import type { AppSettings, CredentialStatus, LoginMethod, ThemeMode, UpdateInfo } from "./types";
+import type { AppSettings, ThemeMode, UpdateInfo } from "./types";
 import {
   checkUpdate,
   exportDiagnostics,
   exportUsageReport,
-  getCredentialStatus,
   getSettings,
   isTauri,
+  listAccounts,
   onSettingsChanged,
+  onSettingsNavigate,
   openExternalUrl,
   openLogDir,
   saveSettings,
 } from "./ipc";
-import { ApiKeySection } from "./components/ApiKeySection";
+import { AccountsCard } from "./components/AccountsCard";
 import { BackgroundRow } from "./components/BackgroundRow";
-import { DeviceLoginSection } from "./components/DeviceLoginSection";
 import { HotkeyInput } from "./components/HotkeyInput";
-import { WebTokenSection } from "./components/WebTokenSection";
 
 /** 预设背景白名单（与后端 background.rs PRESETS / styles.css .bg-<id> 渐变一致；非法 id 按无背景处理） */
 const BG_PRESETS = ["night", "aurora", "violet", "ember"];
@@ -49,14 +48,9 @@ function SettingsApp() {
   const { t } = useTranslation();
   // 主题：读设置 + 跟随 settings-changed + system 模式跟随系统明暗
   useTheme();
-  // settings = 最近一次从后端读到/保存成功的设置；status = 凭证配置状态
+  // settings = 最近一次从后端读到/保存成功的设置
   const [settings, setSettings] = useState<AppSettings | null>(null);
-  const [status, setStatus] = useState<CredentialStatus | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  // 登录方式选中态（本地控制，初始值由凭证状态推导）
-  const [method, setMethod] = useState<LoginMethod>("api_key");
-  const [methodMsg, setMethodMsg] = useState<string | null>(null);
-  const [methodError, setMethodError] = useState<string | null>(null);
   // 通用设置表单
   const [form, setForm] = useState<GeneralForm>({
     refreshMin: "5",
@@ -90,10 +84,12 @@ function SettingsApp() {
   const [updateFound, setUpdateFound] = useState<UpdateInfo | null>(null);
   const [updateMsg, setUpdateMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const updateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // 折叠卡片展开态：登录 / 通用设置 / 诊断与日志（默认收起；无任何凭证时登录卡自动展开引导配置）
-  const [loginOpen, setLoginOpen] = useState(false);
+  // 折叠卡片展开态：账号 / 通用设置 / 诊断与日志（默认收起；首装无账号时账号卡自动展开引导添加）
+  const [accountsOpen, setAccountsOpen] = useState(false);
   const [generalOpen, setGeneralOpen] = useState(false);
   const [diagOpen, setDiagOpen] = useState(false);
+  // 面板「+」定位信号：收到 settings-navigate("account-add") 时递增，账号卡滚动聚焦添加表单
+  const [addFocusTick, setAddFocusTick] = useState(0);
   // 预设背景 id（纯 CSS 渐变 class）；null = 未选预设
   const [bgPreset, setBgPreset] = useState<string | null>(null);
   // 自定义背景图（kimibg:// 协议 URL）；null = 无图
@@ -116,15 +112,6 @@ function SettingsApp() {
     setBgImage(`${convertFileSrc("bg", "kimibg")}?v=${Date.now()}`);
   }, []);
 
-  /** 重新拉取凭证状态（Key 保存/清除、OAuth 登录/退出后调用） */
-  const reloadStatus = useCallback(async () => {
-    try {
-      setStatus(await getCredentialStatus());
-    } catch {
-      // 状态拉取失败不打断设置页，下次操作时再试
-    }
-  }, []);
-
   /** 背景图上传/清除后重拉设置：保持 settings 状态新鲜，保存通用设置时原样透传不丢字段 */
   const reloadSettings = useCallback(async () => {
     try {
@@ -134,20 +121,14 @@ function SettingsApp() {
     }
   }, []);
 
-  // 设置窗为持久隐藏复用：组件挂载时重新拉取设置与凭证状态
+  // 设置窗为持久隐藏复用：组件挂载时重新拉取设置
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const [s, st] = await Promise.all([getSettings(), getCredentialStatus()]);
+        const [s, accountList] = await Promise.all([getSettings(), listAccounts()]);
         if (!alive) return;
         setSettings(s);
-        setStatus(st);
-        // 初始登录方式：显式设置 > 已配 API Key > 已配 OAuth > 默认方式A
-        setMethod(
-          st.login_method ??
-            (st.api_key_configured ? "api_key" : st.oauth_configured ? "oauth" : "api_key"),
-        );
         setForm({
           refreshMin: String(s.refresh_interval_min),
           adaptiveRefresh: s.adaptive_refresh,
@@ -162,8 +143,8 @@ function SettingsApp() {
         void i18n.changeLanguage(resolveLang(s.language));
         // 背景（预设/图片）与面板同步应用
         syncBackground(s.background_preset, s.background_image);
-        // 两种凭证都没配过（首装）：登录卡自动展开，引导先配置
-        if (!st.api_key_configured && !st.oauth_configured) setLoginOpen(true);
+        // 首装还没有任何账号：账号卡自动展开，引导先添加
+        if (accountList.length === 0) setAccountsOpen(true);
       } catch (e) {
         if (alive) setLoadError(String(e));
       }
@@ -173,9 +154,17 @@ function SettingsApp() {
       void i18n.changeLanguage(resolveLang(s.language));
       syncBackground(s.background_preset, s.background_image);
     });
+    // 面板「+」等入口的定位请求：展开账号卡并滚动聚焦添加表单
+    const unlistenNavigate = onSettingsNavigate((section) => {
+      if (section === "account-add") {
+        setAccountsOpen(true);
+        setAddFocusTick((n) => n + 1);
+      }
+    });
     return () => {
       alive = false;
       unlistenSettings();
+      unlistenNavigate();
     };
   }, [syncBackground]);
 
@@ -230,29 +219,12 @@ function SettingsApp() {
     }
   };
 
-  /** 切换登录方式：本地选中态立即更新，并把 login_method 持久化 */
-  const switchMethod = async (m: LoginMethod) => {
-    if (settings === null || m === method) return;
-    setMethod(m);
-    setMethodMsg(null);
-    setMethodError(null);
-    try {
-      const next: AppSettings = { ...settings, login_method: m };
-      await saveSettings(next);
-      setSettings(next);
-      setMethodMsg(t("settings.loginMethod.switched"));
-    } catch (e) {
-      setMethodError(String(e));
-    }
-  };
-
   /** 保存通用设置：数字项解析后钳制（间隔 1–60 分钟，阈值 1–99） */
   const saveGeneral = async () => {
     if (settings === null) return;
     const refreshMin = Math.min(60, Math.max(1, Math.floor(Number(form.refreshMin)) || 5));
     const threshold = Math.min(99, Math.max(1, Math.floor(Number(form.threshold)) || 20));
     const next: AppSettings = {
-      login_method: method,
       refresh_interval_min: refreshMin,
       adaptive_refresh: form.adaptiveRefresh,
       low_warn_enabled: form.lowWarn,
@@ -375,62 +347,15 @@ function SettingsApp() {
     <div className={settingsCls} style={bgStyle}>
       <h1 className="settings-title">{t("settings.title")}</h1>
 
-      {/* A. 登录方式 + 登录信息（单卡片折叠：标题行显示当前方式与配置徽标，展开后是方式单选 + 对应配置区） */}
-      <section className="scard">
-        <button
-          type="button"
-          className="collapse-head"
-          onClick={() => setLoginOpen((v) => !v)}
-          aria-expanded={loginOpen}
-        >
-          <span className="scard-title">{t("settings.loginMethod.title")}</span>
-          <span className="muted-text">
-            {t(method === "api_key" ? "settings.loginMethod.apiKey" : "settings.loginMethod.oauth")}
-          </span>
-          {method === "api_key" && (status?.api_key_configured ?? false) && (
-            <span className="badge">{t("apiKey.configured")}</span>
-          )}
-          {method === "oauth" && (status?.oauth_configured ?? false) && (
-            <span className="badge">{t("deviceLogin.signedIn")}</span>
-          )}
-          <span className={`chevron${loginOpen ? " open" : ""}`}>▸</span>
-        </button>
-        {loginOpen && (
-          <>
-            <label className={`radio-row${method === "api_key" ? " active" : ""}`}>
-              <input
-                type="radio"
-                name="login-method"
-                checked={method === "api_key"}
-                onChange={() => void switchMethod("api_key")}
-              />
-              <span>{t("settings.loginMethod.apiKey")}</span>
-            </label>
-            <label className={`radio-row${method === "oauth" ? " active" : ""}`}>
-              <input
-                type="radio"
-                name="login-method"
-                checked={method === "oauth"}
-                onChange={() => void switchMethod("oauth")}
-              />
-              <span>{t("settings.loginMethod.oauth")}</span>
-            </label>
-            {methodMsg !== null && <p className="hint-ok">{methodMsg}</p>}
-            {methodError !== null && <p className="hint-err">{methodError}</p>}
-            {/* B/C. 按选中方式展示对应凭证配置区（嵌在本卡片内，不再自带卡片外壳） */}
-            {method === "api_key" ? (
-              <ApiKeySection status={status} onChanged={reloadStatus} />
-            ) : (
-              <DeviceLoginSection
-                oauthConfigured={status?.oauth_configured ?? false}
-                onChanged={reloadStatus}
-              />
-            )}
-          </>
-        )}
-      </section>
+      {/* A. 账号管理卡：账号列表（改名/排序/二次确认删除）+ 添加表单 + 按账号的凭证配置区
+             （登录方式 / API Key / OAuth / 网页 token 全部在本卡内按账号配置） */}
+      <AccountsCard
+        open={accountsOpen}
+        onToggle={() => setAccountsOpen((v) => !v)}
+        addFocusTick={addFocusTick}
+      />
 
-      {/* D. 通用设置（折叠卡片，位于高级设置前） */}
+      {/* D. 通用设置（折叠卡片） */}
       <section className="scard">
         <button
           type="button"
@@ -551,12 +476,6 @@ function SettingsApp() {
           </>
         )}
       </section>
-
-      {/* 高级：月度总量（网页 token，默认收起的折叠卡片） */}
-      <WebTokenSection
-        configured={status?.web_token_configured ?? false}
-        onChanged={reloadStatus}
-      />
 
       {/* E. 诊断与日志（折叠卡片） */}
       <section className="scard">

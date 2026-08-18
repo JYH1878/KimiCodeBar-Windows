@@ -18,12 +18,33 @@ pub const MIN_REFRESH_INTERVAL_MIN: u32 = 1;
 pub const MAX_REFRESH_INTERVAL_MIN: u32 = 60;
 /// 默认低额度告警阈值（剩余百分比）
 pub const DEFAULT_WARN_THRESHOLD_PCT: f64 = 20.0;
+/// 账号数量上限（面板一页一个账号 + 末尾「+」）
+pub const MAX_ACCOUNTS: usize = 5;
+
+/// 单个账号（settings.json 的 accounts 数组元素，snake_case）。
+/// 凭证本体不落盘到这里：API Key / 网页 token 在 Windows 凭据管理器（槽位名带账号 id，
+/// 见 creds.rs），OAuth 在每账号一个 DPAPI 文件 credentials-<id>.json（见 kimi::oauth）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Account {
+    /// 稳定标识（uuid v4），keyring 槽位 / 文件名 / 内存状态都按它索引
+    pub id: String,
+    /// 展示名（面板页头、通知文案），默认「账号 N」
+    pub name: String,
+    /// 登录方式："api_key" / "oauth"；None 表示未显式选择（优先 api_key，其次 oauth）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login_method: Option<String>,
+}
 
 /// 应用设置（settings.json，snake_case）
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
-    /// 登录方式："api_key" / "oauth"；None 表示未显式选择（优先 api_key，其次 oauth）
+    /// 账号列表（面板页顺序 = 列表顺序）；旧版设置文件无此字段，读回空数组，
+    /// 由 migrate::migrate_legacy_to_accounts 把旧单账号数据迁移为「账号 1」
     #[serde(default)]
+    pub accounts: Vec<Account>,
+    /// 【已废弃】全局登录方式已迁移到 Account.login_method；保留字段仅为读取旧版
+    /// 设置文件（迁移用），新代码一律不写（None 时不序列化）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_method: Option<String>,
     /// 后台轮询间隔（分钟），默认 5，范围 1–60
     #[serde(default = "default_refresh_interval_min")]
@@ -78,6 +99,7 @@ const fn default_warn_threshold_pct() -> f64 {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            accounts: Vec::new(),
             login_method: None,
             refresh_interval_min: DEFAULT_REFRESH_INTERVAL_MIN,
             adaptive_refresh: true,
@@ -97,6 +119,64 @@ impl Settings {
     /// 轮询间隔（秒），供 tokio interval 使用；保证至少 1 分钟
     pub fn refresh_interval_secs(&self) -> u64 {
         u64::from(self.refresh_interval_min.max(MIN_REFRESH_INTERVAL_MIN)) * 60
+    }
+
+    /// 按 id 查账号
+    pub fn account(&self, account_id: &str) -> Option<&Account> {
+        self.accounts.iter().find(|a| a.id == account_id)
+    }
+
+    /// 新增账号：超上限（5 个）报错；名称为空时默认「账号 N」（N = 当前数量 + 1）。
+    /// 返回新建账号的克隆（id 为 uuid v4）
+    pub fn add_account(&mut self, name: Option<&str>) -> Result<Account, String> {
+        if self.accounts.len() >= MAX_ACCOUNTS {
+            return Err(format!("最多支持 {MAX_ACCOUNTS} 个账号"));
+        }
+        let name = name
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("账号 {}", self.accounts.len() + 1));
+        let account = Account {
+            id: uuid::Uuid::new_v4().to_string(),
+            name,
+            login_method: None,
+        };
+        self.accounts.push(account.clone());
+        Ok(account)
+    }
+
+    /// 改名：名称 trim 后为空报错；账号不存在报错
+    pub fn rename_account(&mut self, account_id: &str, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("账号名称不能为空".to_string());
+        }
+        let Some(account) = self.accounts.iter_mut().find(|a| a.id == account_id) else {
+            return Err("账号不存在".to_string());
+        };
+        account.name = name.to_string();
+        Ok(())
+    }
+
+    /// 上移/下移一个位次（direction 仅取 -1 / +1 的符号，0 或越界为无操作）。
+    /// 返回是否发生了移动
+    pub fn move_account(&mut self, account_id: &str, direction: i32) -> bool {
+        let Some(index) = self.accounts.iter().position(|a| a.id == account_id) else {
+            return false;
+        };
+        let target = index as i32 + direction.signum();
+        if direction == 0 || target < 0 || target >= self.accounts.len() as i32 {
+            return false;
+        }
+        self.accounts.swap(index, target as usize);
+        true
+    }
+
+    /// 删除账号（仅移除设置项；凭证/缓存等残留清理由调用方负责），返回被删账号
+    pub fn remove_account(&mut self, account_id: &str) -> Option<Account> {
+        let index = self.accounts.iter().position(|a| a.id == account_id)?;
+        Some(self.accounts.remove(index))
     }
 }
 
@@ -134,16 +214,20 @@ pub fn save_settings(settings: &Settings) -> Result<(), String> {
     save_json(&settings_file_path(), "settings.json.tmp", settings)
 }
 
-/// 读取配额缓存：文件不存在或损坏均为 None；其他 IO 错误同样按 None 容忍
-/// （缓存不是关键数据，丢了重新拉即可）
-pub fn load_cache() -> Option<CachedQuota> {
-    let text = std::fs::read_to_string(cache_file_path()).ok()?;
+/// 读取配额缓存（每账号一个文件 cache-<id>.json）：文件不存在或损坏均为 None；
+/// 其他 IO 错误同样按 None 容忍（缓存不是关键数据，丢了重新拉即可）
+pub fn load_cache(account_id: &str) -> Option<CachedQuota> {
+    let text = std::fs::read_to_string(cache_file_path(account_id)).ok()?;
     serde_json::from_str(&text).ok()
 }
 
-/// 原子写入 cache.json（临时文件 + rename）
-pub fn save_cache(cache: &CachedQuota) -> Result<(), String> {
-    save_json(&cache_file_path(), "cache.json.tmp", cache)
+/// 原子写入该账号的 cache-<id>.json（临时文件 + rename）
+pub fn save_cache(account_id: &str, cache: &CachedQuota) -> Result<(), String> {
+    save_json(
+        &cache_file_path(account_id),
+        &format!("cache-{account_id}.json.tmp"),
+        cache,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -182,11 +266,19 @@ pub fn config_dir() -> PathBuf {
     std::env::temp_dir().join("KimiCodeBar")
 }
 
-fn settings_file_path() -> PathBuf {
+/// settings.json 路径（pub(crate)：迁移模块要读原文判断有无 accounts 键）
+pub(crate) fn settings_file_path() -> PathBuf {
     config_dir().join("settings.json")
 }
 
-fn cache_file_path() -> PathBuf {
+/// 该账号的配额缓存路径：{config_dir}/cache-<id>.json
+/// （pub(crate)：删账号清理残留用，见 accounts::purge_account_data）
+pub(crate) fn cache_file_path(account_id: &str) -> PathBuf {
+    config_dir().join(format!("cache-{account_id}.json"))
+}
+
+/// 旧单账号时代的配额缓存路径（仅迁移用）：{config_dir}/cache.json
+pub(crate) fn legacy_cache_file_path() -> PathBuf {
     config_dir().join("cache.json")
 }
 
@@ -227,6 +319,11 @@ mod tests {
         let dir = use_temp_config_dir();
 
         let settings = Settings {
+            accounts: vec![Account {
+                id: "acc-1".to_string(),
+                name: "账号 1".to_string(),
+                login_method: Some("oauth".to_string()),
+            }],
             login_method: Some("oauth".to_string()),
             refresh_interval_min: 15,
             adaptive_refresh: false,
@@ -259,6 +356,7 @@ mod tests {
 
         // 磁盘格式为 snake_case JSON
         let raw = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(raw.contains("\"accounts\""));
         assert!(raw.contains("\"login_method\""));
         assert!(raw.contains("\"refresh_interval_min\""));
         assert!(raw.contains("\"low_warn_enabled\""));
@@ -289,6 +387,8 @@ mod tests {
 
         let settings = load_settings().unwrap();
         assert_eq!(settings.login_method.as_deref(), Some("oauth"));
+        // 旧版设置文件无 accounts 字段：#[serde(default)] 读回空数组
+        assert!(settings.accounts.is_empty());
         assert_eq!(settings.refresh_interval_min, DEFAULT_REFRESH_INTERVAL_MIN);
         // 旧版设置文件无 adaptive_refresh 字段：读回默认 true（自适应）
         assert!(settings.adaptive_refresh);
@@ -349,9 +449,10 @@ mod tests {
     fn cache_save_load_roundtrip() {
         let _guard = ENV_LOCK.lock().unwrap();
         let dir = use_temp_config_dir();
+        let acc = "acc-cache";
 
         // 未保存时读取为 None
-        assert!(load_cache().is_none());
+        assert!(load_cache(acc).is_none());
 
         let quota = crate::quota::parse_usage(r#"{"usage":{"limit":"100","used":"30"}}"#).unwrap();
         let cache = CachedQuota {
@@ -359,11 +460,11 @@ mod tests {
             fetched_at: 1_900_000_000,
             monthly: None,
         };
-        save_cache(&cache).unwrap();
-        assert!(dir.join("cache.json").exists());
-        assert!(!dir.join("cache.json.tmp").exists());
+        save_cache(acc, &cache).unwrap();
+        assert!(dir.join("cache-acc-cache.json").exists());
+        assert!(!dir.join("cache-acc-cache.json.tmp").exists());
 
-        let loaded = load_cache().expect("应能读回缓存");
+        let loaded = load_cache(acc).expect("应能读回缓存");
         assert_eq!(loaded.fetched_at, 1_900_000_000);
         assert!(loaded.monthly.is_none());
         let weekly = loaded.quota.weekly.as_ref().expect("weekly 应存在");
@@ -371,16 +472,19 @@ mod tests {
         assert!((weekly.percent_remaining - 70.0).abs() < 1e-9);
 
         // 覆盖写入
-        save_cache(&CachedQuota {
-            quota: loaded.quota.clone(),
-            fetched_at: 1_900_000_100,
-            monthly: None,
-        })
+        save_cache(
+            acc,
+            &CachedQuota {
+                quota: loaded.quota.clone(),
+                fetched_at: 1_900_000_100,
+                monthly: None,
+            },
+        )
         .unwrap();
-        assert_eq!(load_cache().unwrap().fetched_at, 1_900_000_100);
+        assert_eq!(load_cache(acc).unwrap().fetched_at, 1_900_000_100);
 
         // 磁盘格式为 snake_case JSON（与 types.ts 契约一致）
-        let raw = std::fs::read_to_string(dir.join("cache.json")).unwrap();
+        let raw = std::fs::read_to_string(dir.join("cache-acc-cache.json")).unwrap();
         assert!(raw.contains("\"fetched_at\""));
         assert!(raw.contains("\"percent_remaining\""));
 
@@ -392,9 +496,9 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let dir = use_temp_config_dir();
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("cache.json"), "not json").unwrap();
+        std::fs::write(dir.join("cache-acc-x.json"), "not json").unwrap();
 
-        assert!(load_cache().is_none());
+        assert!(load_cache("acc-x").is_none());
 
         cleanup(&dir);
     }
@@ -404,14 +508,15 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap();
         let dir = use_temp_config_dir();
         std::fs::create_dir_all(&dir).unwrap();
+        let acc = "acc-m";
 
         // 旧版缓存文件没有 monthly 字段：#[serde(default)] 保证读回 None
         std::fs::write(
-            dir.join("cache.json"),
+            dir.join("cache-acc-m.json"),
             r#"{"quota":{},"fetched_at":1900000000}"#,
         )
         .unwrap();
-        let loaded = load_cache().expect("旧格式缓存应能读回");
+        let loaded = load_cache(acc).expect("旧格式缓存应能读回");
         assert!(loaded.monthly.is_none());
 
         // 带月度数据写入 → 读回一致
@@ -421,13 +526,16 @@ mod tests {
             code_pct: 5.0,
             reset_time: Some("2026-08-01T00:00:00Z".to_string()),
         };
-        save_cache(&CachedQuota {
-            quota: crate::quota::KimiQuota::default(),
-            fetched_at: 1_900_000_000,
-            monthly: Some(monthly),
-        })
+        save_cache(
+            acc,
+            &CachedQuota {
+                quota: crate::quota::KimiQuota::default(),
+                fetched_at: 1_900_000_000,
+                monthly: Some(monthly),
+            },
+        )
         .unwrap();
-        let loaded = load_cache().expect("应能读回缓存");
+        let loaded = load_cache(acc).expect("应能读回缓存");
         let m = loaded.monthly.expect("monthly 应存在");
         assert!((m.total_pct - 16.12).abs() < 1e-9);
         assert!((m.kimi_pct - 11.12).abs() < 1e-9);
@@ -435,5 +543,76 @@ mod tests {
         assert_eq!(m.reset_time.as_deref(), Some("2026-08-01T00:00:00Z"));
 
         cleanup(&dir);
+    }
+
+    // ---- 账号列表操作 ----
+
+    #[test]
+    fn add_account_default_name_and_cap() {
+        let mut settings = Settings::default();
+        let a1 = settings.add_account(None).unwrap();
+        assert_eq!(a1.name, "账号 1");
+        assert!(!a1.id.is_empty());
+        let a2 = settings.add_account(Some("  工作号  ")).unwrap();
+        assert_eq!(a2.name, "工作号");
+        assert_ne!(a1.id, a2.id);
+        // 默认名 N = 当前数量 + 1
+        let a3 = settings.add_account(Some("")).unwrap();
+        assert_eq!(a3.name, "账号 3");
+        settings.add_account(None).unwrap();
+        settings.add_account(None).unwrap();
+        // 第 6 个超上限
+        assert!(settings.add_account(None).is_err());
+        assert_eq!(settings.accounts.len(), MAX_ACCOUNTS);
+    }
+
+    #[test]
+    fn rename_account_trims_and_validates() {
+        let mut settings = Settings::default();
+        let a = settings.add_account(None).unwrap();
+        settings.rename_account(&a.id, "  主号 ").unwrap();
+        assert_eq!(settings.account(&a.id).unwrap().name, "主号");
+        assert!(settings.rename_account(&a.id, "   ").is_err());
+        assert!(settings.rename_account("no-such-id", "x").is_err());
+        // 失败不改名
+        assert_eq!(settings.account(&a.id).unwrap().name, "主号");
+    }
+
+    #[test]
+    fn move_account_swaps_with_neighbor() {
+        let mut settings = Settings::default();
+        let a = settings.add_account(Some("a")).unwrap();
+        let b = settings.add_account(Some("b")).unwrap();
+        let c = settings.add_account(Some("c")).unwrap();
+
+        // 上移第二位 → 与第一位交换
+        assert!(settings.move_account(&b.id, -1));
+        let names: Vec<&str> = settings.accounts.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(names, ["b", "a", "c"]);
+
+        // 顶部再上移 / 底部再下移：无操作
+        assert!(!settings.move_account(&b.id, -1));
+        assert!(!settings.move_account(&c.id, 1));
+        // direction 0 / 未知 id：无操作
+        assert!(!settings.move_account(&a.id, 0));
+        assert!(!settings.move_account("no-such-id", 1));
+
+        // 下移
+        assert!(settings.move_account(&b.id, 1));
+        let names: Vec<&str> = settings.accounts.iter().map(|x| x.name.as_str()).collect();
+        assert_eq!(names, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn remove_account_returns_removed() {
+        let mut settings = Settings::default();
+        let a = settings.add_account(Some("a")).unwrap();
+        let b = settings.add_account(Some("b")).unwrap();
+        let removed = settings.remove_account(&a.id).unwrap();
+        assert_eq!(removed.name, "a");
+        assert!(settings.account(&a.id).is_none());
+        assert_eq!(settings.accounts.len(), 1);
+        assert_eq!(settings.accounts[0].id, b.id);
+        assert!(settings.remove_account("no-such-id").is_none());
     }
 }

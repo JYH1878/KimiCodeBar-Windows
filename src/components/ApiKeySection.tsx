@@ -47,14 +47,16 @@ function EyeOffIcon() {
 }
 
 interface ApiKeySectionProps {
+  /** 目标账号 id（凭证按账号隔离） */
+  accountId: string;
   /** 凭证状态（尚未加载完时为 null） */
   status: CredentialStatus | null;
   /** 保存/清除成功后回调，父组件重新拉取凭证状态 */
   onChanged: () => void;
 }
 
-/** 设置页"方式A：API Key"分区 */
-export function ApiKeySection({ status, onChanged }: ApiKeySectionProps) {
+/** 设置页"方式A：API Key"分区（按账号配置） */
+export function ApiKeySection({ accountId, status, onChanged }: ApiKeySectionProps) {
   const { t } = useTranslation();
   const [keyInput, setKeyInput] = useState("");
   const [showKey, setShowKey] = useState(false);
@@ -76,7 +78,7 @@ export function ApiKeySection({ status, onChanged }: ApiKeySectionProps) {
     setErrMsg(null);
     setOkMsg(null);
     try {
-      await setApiKey(key);
+      await setApiKey(accountId, key);
       setKeyInput("");
       setOkMsg(t("apiKey.saved"));
       onChanged();
@@ -93,7 +95,7 @@ export function ApiKeySection({ status, onChanged }: ApiKeySectionProps) {
     setErrMsg(null);
     setOkMsg(null);
     try {
-      await clearApiKey();
+      await clearApiKey(accountId);
       setOkMsg(t("apiKey.cleared"));
       onChanged();
     } catch (e) {

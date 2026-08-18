@@ -11,7 +11,9 @@
     "settings": "设置",
     "settingsTitle": "打开设置",
     "updateBadgeTitle": "发现新版本，点击打开发布页",
-    "mascotTitle": "KimiCodeBar 吉祥物"
+    "mascotTitle": "KimiCodeBar 吉祥物",
+    "pagesAria": "账号页面",
+    "addAccountTitle": "添加账号"
   },
   "usage": {
     "remaining": "剩余 {{remaining}}/{{limit}}",
@@ -53,6 +55,28 @@
   },
   "error": {
     "retry": "重试"
+  },
+  "accounts": {
+    "title": "账号",
+    "count": "{{count}} 个",
+    "empty": "暂无账号，先在下方添加一个",
+    "monthlyBadge": "月度",
+    "rename": "改名",
+    "moveUp": "上移",
+    "moveDown": "下移",
+    "delete": "删除",
+    "deleteConfirm": "确认删除「{{name}}」？其凭证与本地数据将一并清除。",
+    "confirmDelete": "确认删除",
+    "cancel": "取消",
+    "addTitle": "添加账号",
+    "namePlaceholder": "账号名称（留空默认「账号 N」）",
+    "oauthHint": "创建后将自动发起浏览器授权（设备码登录）。",
+    "webTokenPlaceholder": "月度总量 refresh_token（可选，保存时自动校验）",
+    "create": "创建",
+    "creating": "创建中…",
+    "created": "已创建「{{name}}」，可在上方列表中继续完善配置",
+    "createdButCredFailed": "已创建「{{name}}」，但凭证保存失败：{{error}}",
+    "maxReached": "最多支持 5 个账号"
   },
   "settings": {
     "title": "KimiCodeBar 设置",

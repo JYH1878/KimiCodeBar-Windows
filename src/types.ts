@@ -36,19 +36,29 @@ export interface KimiQuota {
   booster?: BoosterInfo;
 }
 
-/** 面板状态：get_panel_state / refresh_now 的返回，quota-updated 事件的 payload */
-export interface PanelState {
-  /** 是否已配置任一凭证（API Key 或 OAuth） */
+/** 单个账号（settings.json 的 accounts 数组元素；凭证本体不落盘在这里） */
+export interface Account {
+  /** 稳定标识（uuid），keyring 槽位 / 文件名 / 命令参数都按它索引 */
+  id: string;
+  /** 展示名（面板页头、通知文案），默认「账号 N」 */
+  name: string;
+  /** 登录方式："api_key" / "oauth"；缺省表示未显式选择（优先 api_key，其次 oauth） */
+  login_method?: LoginMethod | null;
+}
+
+/** 单个账号的面板快照（PanelState.accounts 的元素） */
+export interface AccountPanel {
+  /** 账号元数据（id / name / login_method） */
+  account: Account;
+  /** 该账号是否已配置任一凭证（API Key 或 OAuth） */
   credential: boolean;
-  /** 是否正在后台刷新 */
-  loading: boolean;
   /** 最近一次成功的配额（可能来自缓存；断网时依然展示） */
   quota: KimiQuota | null;
   /** 上次成功刷新时间（epoch 秒） */
   fetched_at: number | null;
   /** 最近一次错误信息（与缓存并存，用于非阻断横幅） */
   error: string | null;
-  /** 任一窗口剩余低于阈值（默认 20%），UI 标红 */
+  /** 任一窗口剩余低于阈值（默认 20%），UI 标红；刷新失败的账号恒为 false */
   low_warning: boolean;
   /** 月度总量（已配置网页凭证且有数据时展示；可能为 null） */
   monthly?: MonthlyInfo | null;
@@ -56,15 +66,22 @@ export interface PanelState {
   monthly_error?: string | null;
 }
 
+/** 面板状态：get_panel_state / refresh_now 的返回，quota-updated 事件的 payload */
+export interface PanelState {
+  /** 是否正在后台刷新（整轮全部账号，单航班） */
+  loading: boolean;
+  /** 各账号快照（顺序 = 账号列表顺序 = 面板页顺序） */
+  accounts: AccountPanel[];
+}
+
 // ============ 第 5 步：设置与凭证契约 ============
 
 /** 登录方式：A=手动 API Key，B=OAuth 设备码授权 */
 export type LoginMethod = "api_key" | "oauth";
 
-/** 应用设置：get_settings / save_settings 的载荷（与 Rust Settings 一致） */
+/** 应用设置：get_settings / save_settings 的载荷（与 Rust AppSettings 一致）。
+ *  注意：账号列表与登录方式不在此（属 Account / 账号命令管理） */
 export interface AppSettings {
-  /** 未设置时为 null，后端自动优先 api_key 其次 oauth */
-  login_method: LoginMethod | null;
   /** 自动刷新间隔（分钟，最小 1，默认 5） */
   refresh_interval_min: number;
   /** 刷新模式：true=自适应（近 10 分钟有消耗按 1 分钟轮询，静默按固定间隔），默认 true */
@@ -87,9 +104,9 @@ export interface AppSettings {
   background_preset?: string | null;
 }
 
-/** 凭证配置状态：get_credential_status 的返回 */
+/** 凭证配置状态：get_credential_status(account_id) 的返回 */
 export interface CredentialStatus {
-  /** 当前生效的登录方式（settings.login_method） */
+  /** 该账号当前生效的登录方式（account.login_method） */
   login_method: LoginMethod | null;
   api_key_configured: boolean;
   /** 脱敏展示，如 sk-kimi-****…a4nr；未配置为 null */

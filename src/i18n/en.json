@@ -11,7 +11,9 @@
     "settings": "Settings",
     "settingsTitle": "Open settings",
     "updateBadgeTitle": "New version available — click to open the release page",
-    "mascotTitle": "KimiCodeBar mascot"
+    "mascotTitle": "KimiCodeBar mascot",
+    "pagesAria": "Account pages",
+    "addAccountTitle": "Add account"
   },
   "usage": {
     "remaining": "{{remaining}}/{{limit}} left",
@@ -53,6 +55,28 @@
   },
   "error": {
     "retry": "Retry"
+  },
+  "accounts": {
+    "title": "Accounts",
+    "count": "{{count}}",
+    "empty": "No accounts yet — add one below",
+    "monthlyBadge": "Monthly",
+    "rename": "Rename",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "delete": "Delete",
+    "deleteConfirm": "Delete \"{{name}}\"? Its credentials and local data will be removed.",
+    "confirmDelete": "Confirm",
+    "cancel": "Cancel",
+    "addTitle": "Add account",
+    "namePlaceholder": "Account name (empty = \"Account N\")",
+    "oauthHint": "Browser authorization (device code) starts automatically after creation.",
+    "webTokenPlaceholder": "Monthly-total refresh_token (optional, verified on save)",
+    "create": "Create",
+    "creating": "Creating…",
+    "created": "\"{{name}}\" created — finish setup in the list above",
+    "createdButCredFailed": "\"{{name}}\" created, but saving the credential failed: {{error}}",
+    "maxReached": "Up to 5 accounts"
   },
   "settings": {
     "title": "KimiCodeBar Settings",

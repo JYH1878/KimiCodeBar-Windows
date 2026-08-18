@@ -1,10 +1,11 @@
-//! 后台定时轮询：按设置间隔刷新配额，低额度由无到有时发系统通知；
-//! 5 小时窗口重置前 15 分钟内（且剩余量 > 0）提醒一次"建议用完"。
+//! 后台定时轮询：按设置间隔刷新全部账号；某账号低额度由无到有时发一次系统通知
+//! （文案带账号名）；某账号 5 小时窗口重置前 15 分钟内（且剩余量 > 0）提醒一次"建议用完"。
 //!
 //! 刷新模式（settings.adaptive_refresh，默认开）：
 //! 自适应 = 近 10 分钟内有新 token 消耗（本地 wire.jsonl 扫描的 last_event_at）按 1 分钟轮询，
 //! 静默按用户配置间隔；固定 = 恒按用户配置间隔。
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -15,7 +16,7 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 use tokio::time::{interval, MissedTickBehavior};
 
-use crate::commands::{do_refresh, AppState, PanelState};
+use crate::commands::{do_refresh, AccountPanel, AppState};
 use crate::i18n;
 
 /// 重置提醒提前量：进入重置前 15 分钟窗口才提醒
@@ -36,31 +37,54 @@ pub fn start(app: AppHandle) {
         // 单次刷新可能超过间隔时，错过的 tick 顺延而非补发，避免连续重刷
         timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
-        // 告警基线取启动时的内存态（cache.json 预热）：已处于低额不重复提醒，
-        // 只在"由正常变低额"的跳变瞬间通知一次
-        let mut prev_low = app.state::<AppState>().snapshot().low_warning;
+        // 告警基线取启动时的内存态（各账号 cache-<id>.json 预热）：已处于低额的账号
+        // 不重复提醒，只在某账号"由正常变低额"的跳变瞬间通知一次（按账号 id 跟踪）
+        let mut prev_low: HashMap<String, bool> = app
+            .state::<AppState>()
+            .snapshot()
+            .accounts
+            .iter()
+            .map(|a| (a.account.id.clone(), a.low_warning))
+            .collect();
 
-        // 5h 重置提醒去重：已提醒过的重置时刻。轮询任务是唯一读写方，
+        // 5h 重置提醒去重：各账号已提醒过的重置时刻。轮询任务是唯一读写方，
         // 用循环局部变量即可（进程内记忆，重启后允许重发），无需 Mutex/static
-        let mut last_reminded: Option<DateTime<Utc>> = None;
+        let mut last_reminded: HashMap<String, DateTime<Utc>> = HashMap::new();
 
         loop {
             // tokio interval 首个 tick 立即完成：启动即刷一次
             timer.tick().await;
 
             let panel = do_refresh(&app).await;
+            let multi = panel.accounts.len() > 1;
 
-            if panel.low_warning && !prev_low {
-                notify_low_warning(&app, &panel);
-            }
-            prev_low = panel.low_warning;
-
-            // 5h 窗口重置前提醒：只在刷新成功（error 为空）后检查，避免拿陈旧缓存误报
-            if panel.error.is_none() {
-                if let Some(reset_time) = notify_reset_reminder(&app, &panel, last_reminded) {
-                    last_reminded = Some(reset_time);
+            // 低额跳变通知：逐账号比较（拉取失败的账号 low_warning 恒为 false，不会触发）
+            for account in &panel.accounts {
+                let was_low = prev_low.get(&account.account.id).copied().unwrap_or(false);
+                if account.low_warning && !was_low {
+                    notify_low_warning(&app, account, multi);
                 }
             }
+            // 重建基线：收敛掉已删除账号的条目，不留残留
+            prev_low = panel
+                .accounts
+                .iter()
+                .map(|a| (a.account.id.clone(), a.low_warning))
+                .collect();
+
+            // 5h 窗口重置前提醒：逐账号检查，且只在该账号刷新成功（error 为空）后，
+            // 避免拿陈旧缓存误报
+            for account in &panel.accounts {
+                if account.error.is_some() {
+                    continue;
+                }
+                let last = last_reminded.get(&account.account.id).copied();
+                if let Some(reset_time) = notify_reset_reminder(&app, account, last, multi) {
+                    last_reminded.insert(account.account.id.clone(), reset_time);
+                }
+            }
+            // 收敛已删除账号的去重条目
+            last_reminded.retain(|id, _| panel.accounts.iter().any(|a| &a.account.id == id));
 
             // 设置页改了间隔 / 自适应活跃度翻转：重建 interval
             // （下一次 tick 立即触发，顺带马上刷一次，活跃期加密即时生效）
@@ -74,13 +98,14 @@ pub fn start(app: AppHandle) {
     });
 }
 
-/// low_warn_enabled 且配额存在时发系统通知，正文为各窗口剩余百分比（语言随设置）
-fn notify_low_warning(app: &AppHandle, panel: &crate::commands::PanelState) {
+/// low_warn_enabled 且该账号配额存在时发系统通知，正文为各窗口剩余百分比（语言随设置）；
+/// 多账号时正文前缀账号名（"工作号 · 7天剩余 8%"），单账号只给摘要
+fn notify_low_warning(app: &AppHandle, account: &AccountPanel, multi: bool) {
     let settings = storage::load_settings().unwrap_or_default();
     if !settings.low_warn_enabled {
         return;
     }
-    let Some(quota) = &panel.quota else {
+    let Some(quota) = &account.quota else {
         return;
     };
     let lang = i18n::resolve(settings.language.as_deref());
@@ -88,12 +113,22 @@ fn notify_low_warning(app: &AppHandle, panel: &crate::commands::PanelState) {
     if summary.is_empty() {
         return;
     }
+    let body = with_account_name(multi, &account.account.name, &summary);
     let _ = app
         .notification()
         .builder()
         .title(i18n::low_warning_title(lang))
-        .body(i18n::low_warning_body(lang, &summary))
+        .body(i18n::low_warning_body(lang, &body))
         .show();
+}
+
+/// 多账号时给通知正文加账号名前缀（"·" 分隔，语言中立）；单账号原样返回
+fn with_account_name(multi: bool, name: &str, body: &str) -> String {
+    if multi {
+        format!("{name} · {body}")
+    } else {
+        body.to_string()
+    }
 }
 
 /// 当前应使用的轮询间隔（秒）：固定模式直接用用户配置；
@@ -147,13 +182,14 @@ fn reset_remind_due(
     now < reset_time && reset_time - now <= chrono::Duration::minutes(RESET_REMIND_WINDOW_MIN)
 }
 
-/// 5h 窗口重置前提醒：low_warn_enabled 开着、5h 窗口剩余量 > 0（已烧完没必要提醒）
-/// 且进入重置前 15 分钟窗口时，发系统通知。
+/// 该账号 5h 窗口重置前提醒：low_warn_enabled 开着、5h 窗口剩余量 > 0（已烧完没必要提醒）
+/// 且进入重置前 15 分钟窗口时，发系统通知；多账号时正文前缀账号名。
 /// 返回本次提醒针对的重置时刻（调用方用于去重）；未提醒返回 None。
 fn notify_reset_reminder(
     app: &AppHandle,
-    panel: &PanelState,
+    account: &AccountPanel,
     last_reminded: Option<DateTime<Utc>>,
+    multi: bool,
 ) -> Option<DateTime<Utc>> {
     // 与低额度预警共用同一个通知总开关，不新增设置项
     let settings = storage::load_settings().unwrap_or_default();
@@ -161,7 +197,7 @@ fn notify_reset_reminder(
         return None;
     }
     // 仅 5 小时窗口：7 天窗口周期太长，"用完"语义弱，不提醒
-    let five_hour: &QuotaDetail = panel.quota.as_ref()?.five_hour.as_ref()?;
+    let five_hour: &QuotaDetail = account.quota.as_ref()?.five_hour.as_ref()?;
     if five_hour.remaining <= 0.0 {
         return None;
     }
@@ -183,6 +219,7 @@ fn notify_reset_reminder(
         mins,
         &five_hour.reset_time_text(),
     );
+    let body = with_account_name(multi, &account.account.name, &body);
     let _ = app
         .notification()
         .builder()
@@ -249,6 +286,22 @@ mod tests {
         let old_reset = now - Duration::hours(5);
         let new_reset = now + Duration::minutes(10);
         assert!(reset_remind_due(now, new_reset, Some(old_reset)));
+    }
+
+    // ---- 多账号通知正文：账号名前缀 ----
+
+    #[test]
+    fn account_name_prefixed_only_when_multi() {
+        // 多账号：前缀账号名消歧（GOAL 拍板"文案带账号名"）
+        assert_eq!(
+            with_account_name(true, "工作号", "7天剩余 8%"),
+            "工作号 · 7天剩余 8%"
+        );
+        // 单账号：无前缀（无可消歧对象，保持旧版文案）
+        assert_eq!(
+            with_account_name(false, "账号 1", "7天剩余 8%"),
+            "7天剩余 8%"
+        );
     }
 
     // ---- 自适应刷新：活跃判定与间隔选择 ----
