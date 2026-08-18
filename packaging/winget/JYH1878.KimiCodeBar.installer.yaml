@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.12.0.schema.json
 PackageIdentifier: JYH1878.KimiCodeBar
-PackageVersion: 1.1.3
+PackageVersion: 1.2.0
 InstallerType: nullsoft
 Scope: user
 InstallModes:
@@ -15,8 +15,8 @@ Dependencies:
   - PackageIdentifier: Microsoft.EdgeWebView2Runtime
 Installers:
 - Architecture: x64
-  InstallerUrl: https://github.com/JYH1878/KimiCodeBar-Windows/releases/download/v1.1.3/KimiCodeBar_1.1.3_x64-setup.exe
-  InstallerSha256: 48477AE503F47E4AF8BC392103FED557B156E7A9E766C226DE3694D29B9D0747
+  InstallerUrl: https://github.com/JYH1878/KimiCodeBar-Windows/releases/download/v1.2.0/KimiCodeBar_1.2.0_x64-setup.exe
+  InstallerSha256: 35C69933BF65C6E446D4F7A62307DAB6D2221178FC93903B3AB6B282A7BB8C32
   ProductCode: KimiCodeBar
 ManifestType: installer
 ManifestVersion: 1.12.0

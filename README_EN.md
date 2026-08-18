@@ -28,11 +28,13 @@ Built with **Tauri 2 + Rust + React**: installer under 4 MB, ~10–20 MB RAM in 
 - **Light / dark theme**: follows the system or switch manually
 - **Panel background**: preset gradients (Night / Aurora / Violet / Ember, each adapted to light & dark themes) or a custom image (PNG / JPG / WebP, ≤10MB), with translucent frosted cards
 - **Panel mascot**: an animated blue dumpling (vector SVG) in the bottom-left corner of the panel — blinks and glances around, adapts to light/dark themes; purely decorative
+- **Multi-account**: up to 5 accounts, one per panel page with a phone-style horizontal pager (wheel / drag / dot navigation, plus a trailing "+" for quick add); manage accounts in Settings (rename / reorder / delete). Legacy single-account data migrates to "Account 1" automatically on upgrade
 - **Two sign-in methods**
   - **API Key**: paste a `sk-kimi-` key, stored in Windows Credential Manager
   - **Account authorization**: OAuth device flow (same as the Kimi Code CLI), one-click browser authorization with automatic token refresh
+  - Credentials are configured per account; each account can also paste a web refresh_token to view its monthly totals
 - **Adaptive refresh**: polls every 5 minutes by default (1–60 min configurable); tightens to 1-minute polling while a local Kimi session is active (new token usage within the last 10 minutes) and relaxes back when idle — switchable to fixed mode in Settings (adaptive by default)
-- **Low-quota alerts**: tray icon turns red and a system notification fires when any window drops below the threshold (default 20%, configurable)
+- **Low-quota alerts**: the tray icon turns red and a system notification fires (naming the account) when any account's window drops below the threshold (default 20%, configurable); failed fetches never trigger a false alert
 - **Works offline**: last successful result is cached locally and shown without errors when the network is down
 - **Auto update**: silently checks GitHub Releases; an update badge appears in the panel when a new version is available
 - **Global hotkey**: summon/dismiss the panel anywhere (e.g. `Ctrl+Shift+K`, record it by pressing the combo in Settings, off by default)
