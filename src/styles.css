@@ -117,20 +117,25 @@ body,
   gap: 10px;
 }
 
-/* 页头：账号名（低额时标红，与托盘告警一致） */
+/* 页头：账号名 */
 .page-head {
   text-align: center;
 }
 
+/* 账号名胶囊徽章：主题色淡底圆角胶囊；超长名省略号截断（恒为主题色，不随低额告警变色） */
 .page-title {
+  display: inline-block;
+  padding: 3px 12px;
+  border-radius: 999px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--muted);
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   letter-spacing: 0.02em;
-}
-
-.page-title.low {
-  color: var(--danger);
+  max-width: 260px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .page-loading {

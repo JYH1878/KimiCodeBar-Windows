@@ -54,7 +54,7 @@ function AccountPage({
   return (
     <section className="page">
       <header className="page-head">
-        <span className={`page-title${panel.low_warning ? " low" : ""}`}>{panel.account.name}</span>
+        <span className="page-title">{panel.account.name}</span>
       </header>
       {/* 该账号未配置任何凭证：页内引导（不挡其他账号页） */}
       {!panel.credential ? (

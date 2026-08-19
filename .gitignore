@@ -14,3 +14,4 @@ target/
 # 本地协作文件（不进仓库）
 HANDOFF.md
 AGENTS.md
+GOAL.md
