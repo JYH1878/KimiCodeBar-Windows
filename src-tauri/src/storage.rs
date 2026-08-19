@@ -62,6 +62,9 @@ pub struct Settings {
     /// 开机自启动，默认关
     #[serde(default)]
     pub autostart: bool,
+    /// 极简模式：开后面板只显示 7 天 / 5 小时额度条（窗口压矮），默认关
+    #[serde(default)]
+    pub minimal_mode: bool,
     /// 全局热键（如 "Ctrl+Shift+K"），None/空串表示禁用
     #[serde(default)]
     pub hotkey: Option<String>,
@@ -106,6 +109,7 @@ impl Default for Settings {
             low_warn_enabled: true,
             warn_threshold_pct: DEFAULT_WARN_THRESHOLD_PCT,
             autostart: false,
+            minimal_mode: false,
             hotkey: None,
             language: None,
             theme: None,
@@ -330,6 +334,8 @@ mod tests {
             low_warn_enabled: false,
             warn_threshold_pct: 33.5,
             autostart: true,
+            // 顺手覆盖极简模式的落盘/读回（true 值往返一致）
+            minimal_mode: true,
             hotkey: Some("Ctrl+Shift+K".to_string()),
             language: Some("zh".to_string()),
             theme: Some("light".to_string()),
@@ -373,6 +379,27 @@ mod tests {
         std::fs::write(dir.join("settings.json"), "not json").unwrap();
 
         assert_eq!(load_settings().unwrap(), Settings::default());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn settings_minimal_mode_defaults_to_false() {
+        // 新字段默认值：缺省构造为关（普通模式）
+        assert!(!Settings::default().minimal_mode);
+    }
+
+    #[test]
+    fn settings_legacy_json_without_minimal_mode_loads() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = use_temp_config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        // 旧版设置文件无 minimal_mode 字段：#[serde(default)] 读回 false，其余字段不受影响
+        std::fs::write(dir.join("settings.json"), r#"{"refresh_interval_min":10}"#).unwrap();
+
+        let settings = load_settings().unwrap();
+        assert_eq!(settings.refresh_interval_min, 10);
+        assert!(!settings.minimal_mode);
 
         cleanup(&dir);
     }

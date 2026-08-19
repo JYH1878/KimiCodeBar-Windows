@@ -35,6 +35,8 @@ interface GeneralForm {
   lowWarn: boolean;
   threshold: string;
   autostart: boolean;
+  /** 极简模式：开后面板只显示 7 天 / 5 小时额度条（窗口压矮），默认关 */
+  minimalMode: boolean;
   /** 全局热键文本（由 HotkeyInput 录制写入，保存时 trim，空串→null 禁用） */
   hotkey: string;
   /** 界面语言（"system"/"zh"/"en"，改动立即本地预览，随保存持久化） */
@@ -58,6 +60,7 @@ function SettingsApp() {
     lowWarn: true,
     threshold: "20",
     autostart: false,
+    minimalMode: false,
     hotkey: "",
     language: "system",
     theme: "system",
@@ -135,6 +138,7 @@ function SettingsApp() {
           lowWarn: s.low_warn_enabled,
           threshold: String(s.warn_threshold_pct),
           autostart: s.autostart,
+          minimalMode: s.minimal_mode,
           hotkey: s.hotkey ?? "",
           language: s.language ?? "system",
           theme: s.theme ?? "system",
@@ -230,6 +234,7 @@ function SettingsApp() {
       low_warn_enabled: form.lowWarn,
       warn_threshold_pct: threshold,
       autostart: form.autostart,
+      minimal_mode: form.minimalMode,
       // 热键 trim 后提交，空串→null 禁用；后端保存时重新注册，冲突会抛中文错误
       hotkey: form.hotkey.trim() === "" ? null : form.hotkey.trim(),
       // 语言随通用设置一起持久化；保存成功后后端广播 settings-changed
@@ -424,6 +429,15 @@ function SettingsApp() {
                 type="checkbox"
                 checked={form.autostart}
                 onChange={(e) => setForm((f) => ({ ...f, autostart: e.target.checked }))}
+              />
+            </div>
+            <div className="form-row">
+              <label htmlFor="minimal-mode">{t("settings.general.minimalMode")}</label>
+              <input
+                id="minimal-mode"
+                type="checkbox"
+                checked={form.minimalMode}
+                onChange={(e) => setForm((f) => ({ ...f, minimalMode: e.target.checked }))}
               />
             </div>
             <HotkeyInput

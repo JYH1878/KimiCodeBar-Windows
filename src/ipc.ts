@@ -256,6 +256,7 @@ const mockDb = {
     low_warn_enabled: true,
     warn_threshold_pct: 20,
     autostart: false,
+    minimal_mode: false,
     hotkey: null,
     language: "system",
     theme: "system",

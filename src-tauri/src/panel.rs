@@ -3,6 +3,9 @@ use tauri::{AppHandle, LogicalSize, Manager, PhysicalPosition, Position, Size, W
 /// 面板边缘与托盘图标 / 屏幕边缘之间保留的间距（物理像素）。
 const EDGE_MARGIN: i32 = 8;
 
+/// 极简模式的面板紧凑逻辑高度（只显示页头 + 7天/5小时额度条 + 翻页圆点 + 底栏）。
+const MINIMAL_PANEL_HEIGHT: f64 = 350.0;
+
 /// 托盘图标的物理像素区域（由 tray-icon 事件的 rect 转换而来）。
 #[derive(Clone, Copy)]
 pub struct TrayRect {
@@ -55,6 +58,15 @@ pub fn show_panel(app: &AppHandle, tray: TrayRect) {
     let _ = window.set_focus();
 }
 
+/// 面板基准逻辑高：极简模式取紧凑高，普通模式取配置高。
+fn base_panel_height(config_height: f64, minimal_mode: bool) -> f64 {
+    if minimal_mode {
+        MINIMAL_PANEL_HEIGHT
+    } else {
+        config_height
+    }
+}
+
 /// 小屏兜底：面板实际可用的逻辑像素高度。
 /// 显示器物理高按缩放比换算成逻辑高、减去边缘间距后，与配置高取小，避免矮屏把面板裁掉。
 fn effective_panel_height(config_height: f64, monitor_height_px: u32, monitor_scale: f64) -> f64 {
@@ -62,7 +74,8 @@ fn effective_panel_height(config_height: f64, monitor_height_px: u32, monitor_sc
     config_height.min(cap).max(1.0)
 }
 
-/// 每次显示面板前校准窗口尺寸：宽恒取配置值，高在显示器可用高度内取配置值（小屏压高）。
+/// 每次显示面板前校准窗口尺寸：宽恒取配置值，高取基准高（极简模式为紧凑高，
+/// 否则为配置高）并在显示器可用高度内取小（小屏压高）。
 /// 全程只用逻辑像素 + 托盘所在显示器的缩放比：此时窗口可能还停在别的显示器上，
 /// `window.scale_factor()` 是错的；也不把量到的窗口尺寸喂回去（outer_size 与
 /// `set_size(Size::Physical)` 单位语义不一致会把窗口越撑越宽，面板两侧露白边）。
@@ -74,7 +87,15 @@ fn fit_panel_to_screen(app: &AppHandle, window: &WebviewWindow, tray: TrayRect) 
         return; // 取不到显示器：保持配置尺寸，不压高
     };
     let scale = monitor.scale_factor();
-    let target_h = effective_panel_height(conf.height, monitor.size().height, scale);
+    // 极简模式读当前设置（读失败按普通模式兜底，不压矮）
+    let minimal_mode = kimicodebar::storage::load_settings()
+        .map(|s| s.minimal_mode)
+        .unwrap_or(false);
+    let target_h = effective_panel_height(
+        base_panel_height(conf.height, minimal_mode),
+        monitor.size().height,
+        scale,
+    );
     // 已接近目标尺寸就不动（当前尺寸按窗口自己所在显示器的缩放比换算）
     let cur_scale = window.scale_factor().unwrap_or(scale);
     if let Ok(inner) = window.inner_size() {
@@ -85,6 +106,27 @@ fn fit_panel_to_screen(app: &AppHandle, window: &WebviewWindow, tray: TrayRect) 
         }
     }
     let _ = window.set_size(Size::Logical(LogicalSize::new(conf.width, target_h)));
+}
+
+/// 设置变更后即时重算面板尺寸并重定位（仅面板可见时；极简模式切换压矮/恢复用）。
+/// 尺寸与定位走与 show_panel 完全相同的链路：conf 逻辑像素 + 托盘所在显示器缩放比。
+pub fn refit_open_panel(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if !window.is_visible().unwrap_or(false) {
+        return;
+    }
+    let Some(tray) = app
+        .tray_by_id(crate::tray::TRAY_ID)
+        .and_then(|tray| tray.rect().ok().flatten())
+        .map(|rect| TrayRect::new(rect.position, rect.size))
+    else {
+        return; // 取不到托盘位置：不动，下次打开面板时自然会校准
+    };
+    fit_panel_to_screen(app, &window, tray);
+    // 高度变化后按托盘位置重定位（否则压矮后面板下沿悬空、恢复后可能出屏）
+    position_panel(app, &window, tray);
 }
 
 /// 第二个实例启动时显示主面板：优先按托盘图标当前位置定位，
@@ -174,5 +216,34 @@ mod tests {
     #[test]
     fn never_returns_zero_on_tiny_screen() {
         assert_eq!(effective_panel_height(830.0, 8, 1.0), 1.0);
+    }
+
+    /// 极简模式基准高：开取紧凑高，关取配置高
+    #[test]
+    fn base_height_switches_on_minimal_mode() {
+        assert_eq!(base_panel_height(830.0, true), MINIMAL_PANEL_HEIGHT);
+        assert_eq!(base_panel_height(830.0, false), 830.0);
+    }
+
+    /// 紧凑高在常规 1080p 屏放得下（不压），切回普通模式恢复配置高
+    #[test]
+    fn compact_height_fits_normal_screen() {
+        assert_eq!(
+            effective_panel_height(base_panel_height(830.0, true), 1080, 1.0),
+            MINIMAL_PANEL_HEIGHT
+        );
+        assert_eq!(
+            effective_panel_height(base_panel_height(830.0, false), 1080, 1.0),
+            830.0
+        );
+    }
+
+    /// 紧凑高同样受矮屏压高规则约束（300px 屏：可用 284 < 420 → 压到 屏高-2*EDGE_MARGIN）
+    #[test]
+    fn compact_height_still_clamped_on_short_screen() {
+        assert_eq!(
+            effective_panel_height(base_panel_height(830.0, true), 300, 1.0),
+            (300 - 16) as f64
+        );
     }
 }

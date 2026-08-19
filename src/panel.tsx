@@ -32,11 +32,13 @@ const PAGE_ANIM_MS = 380;
 /** 滚轮/拖拽触发翻页的阈值（像素） */
 const PAGE_FLIP_THRESHOLD = 50;
 
-/** 单账号页：页头账号名 + 该账号的卡片组（复用现有卡片，数据全部按账号取） */
+/** 单账号页：页头账号名 + 该账号的卡片组（复用现有卡片，数据全部按账号取）。
+ *  极简模式只保留页头 / 错误横幅 / 7天·5小时额度条（未配置凭证引导照常） */
 function AccountPage({
   panel,
   history,
   localUsage,
+  minimal,
   onRetry,
   onOpenSettings,
 }: {
@@ -45,6 +47,8 @@ function AccountPage({
   history: HistoryPoint[] | null;
   /** 本地 token 统计（机器级数据，各页同一份） */
   localUsage: LocalUsageStats | null;
+  /** 极简模式：隐藏月度/趋势/本地统计/会员/Booster 等卡片 */
+  minimal: boolean;
   onRetry: () => void;
   onOpenSettings: () => void;
 }) {
@@ -70,31 +74,36 @@ function AccountPage({
           {panel.error !== null && <ErrorBanner error={panel.error} onRetry={onRetry} />}
           {quota?.weekly && <UsageCard title={t("panel.weeklyUsage")} detail={quota.weekly} />}
           {quota?.five_hour && <UsageCard title={t("panel.fiveHourUsage")} detail={quota.five_hour} />}
-          {/* 月度总量（网页 token）：monthly 与 monthly_error 都为空时整卡不渲染 */}
-          {panel.monthly && <MonthlyCard monthly={panel.monthly} />}
-          {panel.monthly_error && <p className="monthly-error">{panel.monthly_error}</p>}
-          {/* 用量趋势（该账号的本地历史采样，纯事实不预测） */}
-          <TrendCard points={history} />
-          {/* 本地 Token 消耗（扫描 wire.jsonl）：机器级数据，每页显示同一份；
-              未扫描过（last_scan_at 为空）时整卡不渲染 */}
-          <LocalUsageCard stats={localUsage} />
-          {quota?.total && (
-            <UsageCard
-              title={t("panel.totalQuota")}
-              // 总额卡复用 UsageCard：拼一个无重置时间的 QuotaDetail（used 由 limit-remaining 推算）
-              detail={{
-                used: quota.total.limit - quota.total.remaining,
-                limit: quota.total.limit,
-                remaining: quota.total.remaining,
-                percent_remaining: quota.total.percent_remaining,
-              } satisfies QuotaDetail}
-            />
-          )}
-          {quota && (
-            <div className="mini-row">
-              <MembershipCard level={quota.membership_level} />
-              <BoosterCard booster={quota.booster} />
-            </div>
+          {/* 以下卡片极简模式全部隐藏：月度总量 / 趋势 / 本地统计 / 总额 / 会员 / Booster */}
+          {!minimal && (
+            <>
+              {/* 月度总量（网页 token）：monthly 与 monthly_error 都为空时整卡不渲染 */}
+              {panel.monthly && <MonthlyCard monthly={panel.monthly} />}
+              {panel.monthly_error && <p className="monthly-error">{panel.monthly_error}</p>}
+              {/* 用量趋势（该账号的本地历史采样，纯事实不预测） */}
+              <TrendCard points={history} />
+              {/* 本地 Token 消耗（扫描 wire.jsonl）：机器级数据，每页显示同一份；
+                  未扫描过（last_scan_at 为空）时整卡不渲染 */}
+              <LocalUsageCard stats={localUsage} />
+              {quota?.total && (
+                <UsageCard
+                  title={t("panel.totalQuota")}
+                  // 总额卡复用 UsageCard：拼一个无重置时间的 QuotaDetail（used 由 limit-remaining 推算）
+                  detail={{
+                    used: quota.total.limit - quota.total.remaining,
+                    limit: quota.total.limit,
+                    remaining: quota.total.remaining,
+                    percent_remaining: quota.total.percent_remaining,
+                  } satisfies QuotaDetail}
+                />
+              )}
+              {quota && (
+                <div className="mini-row">
+                  <MembershipCard level={quota.membership_level} />
+                  <BoosterCard booster={quota.booster} />
+                </div>
+              )}
+            </>
           )}
         </>
       )}
@@ -117,6 +126,8 @@ function PanelApp() {
   const [localUsage, setLocalUsage] = useState<LocalUsageStats | null>(null);
   // 预设背景 id（纯 CSS 渐变 class）；null = 未选预设
   const [bgPreset, setBgPreset] = useState<string | null>(null);
+  // 极简模式（settings-changed 即时切换）：只显示 7 天 / 5 小时额度条
+  const [minimal, setMinimal] = useState(false);
   // 自定义背景图（kimibg:// 协议 URL）；null = 无图
   const [bgImage, setBgImage] = useState<string | null>(null);
   // 当前已加载背景（预设 + 文件名）：settings-changed 时按它判断要不要换（防每次保存都重拉图片）
@@ -218,6 +229,7 @@ function PanelApp() {
       .then((s) => {
         void i18n.changeLanguage(resolveLang(s.language));
         syncBackground(s.background_preset, s.background_image);
+        setMinimal(s.minimal_mode);
       })
       .catch(() => {
         // 设置读取失败保持系统语言，不影响面板功能
@@ -225,6 +237,7 @@ function PanelApp() {
     return onSettingsChanged((s) => {
       void i18n.changeLanguage(resolveLang(s.language));
       syncBackground(s.background_preset, s.background_image);
+      setMinimal(s.minimal_mode);
     });
   }, [syncBackground]);
 
@@ -369,6 +382,7 @@ function PanelApp() {
               panel={a}
               history={historyMap[a.account.id] ?? null}
               localUsage={localUsage}
+              minimal={minimal}
               onRetry={() => void doRefresh()}
               onOpenSettings={() => void openSettings()}
             />

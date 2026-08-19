@@ -96,6 +96,7 @@
       "lowWarn": "Low quota alert",
       "warnThreshold": "Alert threshold (% left, 1–99)",
       "autostart": "Launch at startup",
+      "minimalMode": "Minimal mode (panel shows only 7-day / 5-hour usage)",
       "hotkey": "Global hotkey",
       "hotkeyPlaceholder": "Click here and press a combo; empty = disabled",
       "hotkeyRecordingPlaceholder": "Press a key combo…",

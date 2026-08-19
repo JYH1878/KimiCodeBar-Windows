@@ -43,6 +43,8 @@ pub struct AppSettings {
     pub warn_threshold_pct: f64,
     /// 开机自启（保存时同步注册表）
     pub autostart: bool,
+    /// 极简模式：开后面板只显示 7 天 / 5 小时额度条（窗口压矮），默认关
+    pub minimal_mode: bool,
     /// 全局热键（如 "Ctrl+Shift+K"），None/空串表示禁用；保存时重新注册
     pub hotkey: Option<String>,
     /// 界面语言："system" / "zh" / "en"；None 等同 "system"（跟随系统区域）
@@ -67,6 +69,7 @@ impl From<storage::Settings> for AppSettings {
             low_warn_enabled: s.low_warn_enabled,
             warn_threshold_pct: s.warn_threshold_pct,
             autostart: s.autostart,
+            minimal_mode: s.minimal_mode,
             hotkey: s.hotkey,
             language: s.language,
             theme: s.theme,
@@ -87,6 +90,7 @@ impl From<AppSettings> for storage::Settings {
             low_warn_enabled: s.low_warn_enabled,
             warn_threshold_pct: s.warn_threshold_pct,
             autostart: s.autostart,
+            minimal_mode: s.minimal_mode,
             hotkey: s.hotkey,
             language: s.language,
             theme: s.theme,
@@ -679,6 +683,8 @@ pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String
     // 全部生效后广播 settings-changed（payload 为钳制后的完整设置），
     // 前端两窗口监听后即时切换语言等；热键失败走 ? 提前返回，不会广播半成品
     let _ = app.emit("settings-changed", AppSettings::from(settings));
+    // 面板正开着时即时重算尺寸并重定位（极简模式开关压矮/恢复窗口）
+    crate::panel::refit_open_panel(&app);
     Ok(())
 }
 
@@ -1569,6 +1575,28 @@ mod tests {
     #[test]
     fn mask_api_key_empty() {
         assert_eq!(mask_api_key(""), "");
+    }
+
+    // ---- AppSettings DTO 双向转换 ----
+
+    #[test]
+    fn app_settings_dto_roundtrip_covers_minimal_mode() {
+        // storage → DTO：极简模式字段透出
+        let stored = storage::Settings {
+            minimal_mode: true,
+            ..Default::default()
+        };
+        let dto = AppSettings::from(stored);
+        assert!(dto.minimal_mode);
+
+        // DTO → storage：字段带回（账号列表按约定由调用方补，不在此断言）
+        let back = storage::Settings::from(dto);
+        assert!(back.minimal_mode);
+
+        // 默认（关）双向一致
+        let dto = AppSettings::from(storage::Settings::default());
+        assert!(!dto.minimal_mode);
+        assert!(!storage::Settings::from(dto).minimal_mode);
     }
 
     // ---- 多账号状态组装 ----

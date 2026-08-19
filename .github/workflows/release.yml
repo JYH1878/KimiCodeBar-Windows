@@ -48,7 +48,10 @@ jobs:
           $ver = (Get-Content src-tauri/Cargo.toml | Select-String '^version = "(.+)"').Matches[0].Groups[1].Value
           Compress-Archive -Path "src-tauri/target/release/kimicodebar.exe" -DestinationPath "src-tauri/target/release/KimiCodeBar_${ver}_x64-portable.zip" -Force
 
+      # 显式 draft: true——softprops 默认 draft:false 会把 tauri-action 建的草稿直接发布，
+      # 「核对草稿再 Publish」闸门会名存实亡（v1.2.1 踩过，2026-08-19）
       - name: 上传便携版到 Release
         uses: softprops/action-gh-release@v3
         with:
           files: src-tauri/target/release/KimiCodeBar_*_x64-portable.zip
+          draft: true

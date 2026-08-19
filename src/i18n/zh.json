@@ -96,6 +96,7 @@
       "lowWarn": "低额度告警",
       "warnThreshold": "告警阈值（剩余 %，1–99）",
       "autostart": "开机自启",
+      "minimalMode": "极简模式（面板只显示 7 天 / 5 小时用量）",
       "hotkey": "全局热键",
       "hotkeyPlaceholder": "点击此处后按下组合键，留空禁用",
       "hotkeyRecordingPlaceholder": "请按下组合键…",
