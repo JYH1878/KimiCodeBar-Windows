@@ -26,6 +26,17 @@
   "monthly": {
     "title": "月度总量"
   },
+  "deepseek": {
+    "title": "DeepSeek 余额",
+    "granted": "赠金余额",
+    "toppedUp": "充值余额",
+    "currency": "币种",
+    "status": "状态",
+    "statusOk": "正常",
+    "statusUnavailable": "不可用",
+    "unavailableBanner": "DeepSeek 余额当前不可用，请稍后重试或检查账户状态",
+    "updatedAt": "更新时间"
+  },
   "trend": {
     "title": "用量趋势（近 24 小时）",
     "empty": "数据积累中…",
@@ -95,6 +106,7 @@
       "refreshModeFixed": "固定间隔",
       "lowWarn": "低额度告警",
       "warnThreshold": "告警阈值（剩余 %，1–99）",
+      "deepseekWarnThreshold": "DeepSeek 低余额告警阈值（元）",
       "autostart": "开机自启",
       "minimalMode": "极简模式（面板只显示 7 天 / 5 小时用量）",
       "hotkey": "全局热键",
@@ -149,6 +161,8 @@
     "hideKey": "隐藏明文",
     "hint": "Key 以 sk-kimi- 开头，与开放平台 platform.moonshot.cn 的 sk- Key 不通用。",
     "getKey": "前往 kimi.com/code/console 获取",
+    "deepseekHint": "DeepSeek 开放平台 API Key 以 sk- 开头，用于查询账户余额。",
+    "deepseekGetKey": "前往 platform.deepseek.com/api_keys 获取",
     "errEmpty": "请输入 API Key",
     "saved": "API Key 已保存",
     "cleared": "API Key 已清除",

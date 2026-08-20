@@ -4,6 +4,7 @@
 pub mod accounts;
 pub mod background;
 pub mod creds;
+pub mod deepseek;
 pub mod history;
 pub mod kimi;
 pub mod local_usage;

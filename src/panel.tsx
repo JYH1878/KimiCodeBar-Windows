@@ -15,6 +15,7 @@ import { MembershipCard } from "./components/MembershipCard";
 import { BoosterCard } from "./components/BoosterCard";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { EmptyState } from "./components/EmptyState";
+import { DeepSeekBalanceCard } from "./components/DeepSeekBalanceCard";
 import { Tuanzi } from "./components/Tuanzi";
 
 /** epoch 秒 → 本地时间 HH:mm:ss */
@@ -54,15 +55,40 @@ function AccountPage({
 }) {
   const { t } = useTranslation();
   const quota = panel.quota;
+  const isDeepSeek = panel.account.provider === "deepseek";
+  const balance = panel.deepseek_balance ?? null;
 
   return (
     <section className="page">
       <header className="page-head">
         <span className="page-title">{panel.account.name}</span>
+        {/* 提供商徽章：Kimi / DeepSeek 同款同色的胶囊，样式由 .page-head flex 与名称胶囊居中对齐 */}
+        <span className="badge provider-badge">{isDeepSeek ? "DeepSeek" : "Kimi"}</span>
       </header>
       {/* 该账号未配置任何凭证：页内引导（不挡其他账号页） */}
       {!panel.credential ? (
         <EmptyState onOpenSettings={onOpenSettings} />
+      ) : isDeepSeek ? (
+        /* DeepSeek 页：余额卡 + 不可用横幅 + 错误横幅（极简模式照旧这一张卡） */
+        balance === null && panel.error === null ? (
+          /* 有凭证但还没有任何数据（首刷进行中）：页内加载动画 */
+          <div className="page-loading">
+            <div className="spinner" />
+            <p className="muted-text">{t("panel.loading")}</p>
+          </div>
+        ) : (
+          <>
+            {panel.error !== null && <ErrorBanner error={panel.error} onRetry={onRetry} />}
+            {balance !== null && !balance.is_available && (
+              <div className="error-banner">
+                <span className="error-text">{t("deepseek.unavailableBanner")}</span>
+              </div>
+            )}
+            {balance !== null && (
+              <DeepSeekBalanceCard balance={balance} fetchedAt={panel.fetched_at} low={panel.low_warning} />
+            )}
+          </>
+        )
       ) : quota === null && panel.error === null ? (
         /* 有凭证但还没有任何数据（首刷进行中）：页内加载动画 */
         <div className="page-loading">

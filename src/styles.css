@@ -117,9 +117,11 @@ body,
   gap: 10px;
 }
 
-/* 页头：账号名 */
+/* 页头：账号名胶囊 + 提供商徽章，flex 使两者垂直居中对齐（字号/边框不同也能对齐） */
 .page-head {
-  text-align: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 /* 账号名胶囊徽章：主题色淡底圆角胶囊；超长名省略号截断（恒为主题色，不随低额告警变色） */
@@ -474,13 +476,38 @@ body,
   transition: width 0.3s ease;
 }
 
-/* 月度数据获取失败：卡片下方红色小字（负 margin 抵消部分面板 gap，贴近卡片） */
+/* --- 月度数据获取失败：卡片下方红色小字（负 margin 抵消部分面板 gap，贴近卡片） */
 .monthly-error {
   margin-top: -4px;
   padding: 0 4px;
   font-size: 11px;
   color: var(--danger);
   word-break: break-all;
+}
+
+/* --- DeepSeek 余额卡 --- */
+
+/* 低余额：总金额标红（与 .usage-card.low .usage-pct 同语义） */
+.usage-pct.low-text {
+  color: var(--danger);
+}
+
+.balance-rows {
+  margin-top: 8px;
+  display: grid;
+  gap: 4px;
+}
+
+.balance-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 页头提供商徽章（如 DeepSeek）：与账号名拉开间距 */
+.provider-badge {
+  margin-left: 8px;
 }
 
 /* --- 用量趋势卡（手写 SVG，不引图表库） --- */

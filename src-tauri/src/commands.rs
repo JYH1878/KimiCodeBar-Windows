@@ -10,11 +10,13 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use kimicodebar::creds;
+use kimicodebar::deepseek::client::DeepSeekClient;
+use kimicodebar::deepseek::models::DeepSeekBalance;
 use kimicodebar::history;
 use kimicodebar::kimi::client::KimiClient;
 use kimicodebar::kimi::oauth;
 use kimicodebar::kimi::web::{self, MonthlyInfo, WebError};
-use kimicodebar::quota::{needs_low_warning, KimiQuota, QuotaError};
+use kimicodebar::quota::{deepseek_needs_low_warning, needs_low_warning, KimiQuota, QuotaError};
 use kimicodebar::storage::{self, Account, CachedQuota};
 use kimicodebar::update;
 use serde::{Deserialize, Serialize};
@@ -41,6 +43,8 @@ pub struct AppSettings {
     pub low_warn_enabled: bool,
     /// 告警阈值（剩余百分比，1–99）
     pub warn_threshold_pct: f64,
+    /// DeepSeek 低余额告警阈值（元，0–100000，默认 5）
+    pub deepseek_warn_threshold: f64,
     /// 开机自启（保存时同步注册表）
     pub autostart: bool,
     /// 极简模式：开后面板只显示 7 天 / 5 小时额度条（窗口压矮），默认关
@@ -68,6 +72,7 @@ impl From<storage::Settings> for AppSettings {
             adaptive_refresh: s.adaptive_refresh,
             low_warn_enabled: s.low_warn_enabled,
             warn_threshold_pct: s.warn_threshold_pct,
+            deepseek_warn_threshold: s.deepseek_warn_threshold,
             autostart: s.autostart,
             minimal_mode: s.minimal_mode,
             hotkey: s.hotkey,
@@ -89,6 +94,7 @@ impl From<AppSettings> for storage::Settings {
             adaptive_refresh: s.adaptive_refresh,
             low_warn_enabled: s.low_warn_enabled,
             warn_threshold_pct: s.warn_threshold_pct,
+            deepseek_warn_threshold: s.deepseek_warn_threshold,
             autostart: s.autostart,
             minimal_mode: s.minimal_mode,
             hotkey: s.hotkey,
@@ -213,6 +219,9 @@ pub struct AccountPanel {
     /// 月度数据获取失败原因（如网页登录态过期）；成功为 None
     #[serde(skip_serializing_if = "Option::is_none")]
     pub monthly_error: Option<String>,
+    /// DeepSeek 余额（仅 provider=deepseek 的账号有值；Kimi 账号恒为 None）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deepseek_balance: Option<DeepSeekBalance>,
 }
 
 /// 面板状态（与 src/types.ts 的 PanelState 一一对应，snake_case 序列化）
@@ -253,6 +262,8 @@ struct AccountRuntime {
     monthly: Option<MonthlyInfo>,
     /// 月度数据获取失败原因（如网页登录态过期）；成功为 None
     monthly_error: Option<String>,
+    /// 最近一次成功的 DeepSeek 余额（仅 provider=deepseek 的账号）
+    last_balance: Option<(DeepSeekBalance, i64)>,
 }
 
 #[derive(Default)]
@@ -275,7 +286,11 @@ impl AppState {
             let runtime = AccountRuntime {
                 last_quota: cache.as_ref().map(|c| (c.quota.clone(), c.fetched_at)),
                 // 月度数据随配额缓存一并预热
-                monthly: cache.and_then(|c| c.monthly),
+                monthly: cache.as_ref().and_then(|c| c.monthly.clone()),
+                // DeepSeek 余额同缓存预热（断网/未刷新也能展示）
+                last_balance: cache
+                    .as_ref()
+                    .and_then(|c| c.deepseek_balance.clone().map(|b| (b, c.fetched_at))),
                 ..AccountRuntime::default()
             };
             accounts.insert(account.id.clone(), runtime);
@@ -349,8 +364,13 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
             Ok(outcome) => outcome,
             Err(_) => FetchOutcome::Failed("请求超时，请检查网络".to_string()),
         };
-        // 月度总量（网页 token）：拿到配额后无论成败都继续尝试
-        let monthly_outcome = fetch_monthly(&account.id).await;
+        // 月度总量（网页 token）：拿到配额后无论成败都继续尝试；
+        // DeepSeek 账号无月度概念，直接跳过（GOAL 拍板）
+        let monthly_outcome = if account.is_deepseek() {
+            MonthlyOutcome::NoToken
+        } else {
+            fetch_monthly(&account.id).await
+        };
         outcomes.push((account.id.clone(), outcome, monthly_outcome));
     }
 
@@ -362,6 +382,7 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
         for (account_id, outcome, monthly_outcome) in outcomes {
             let runtime = inner.accounts.entry(account_id.clone()).or_default();
             let quota_success = matches!(outcome, FetchOutcome::Success(..));
+            let balance_success = matches!(outcome, FetchOutcome::DeepSeekSuccess(..));
             match outcome {
                 // 当前登录方式无凭证：若另一种方式有凭证（用户刚切了方式），给引导文案；
                 // 完全没有凭证则 error=None，面板该页显示未配置引导
@@ -378,6 +399,12 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
                     runtime.error = None;
                     runtime.last_raw_response = Some((truncate_raw_body(raw), fetched_at));
                     runtime.last_quota = Some((quota, fetched_at));
+                }
+                // DeepSeek 余额成功：清错误、更新 last_balance（无原始响应/配额概念）
+                FetchOutcome::DeepSeekSuccess(payload) => {
+                    let (balance, fetched_at) = *payload;
+                    runtime.error = None;
+                    runtime.last_balance = Some((balance, fetched_at));
                 }
                 // 失败：保留旧缓存数据，仅记错误（错误类型与文案已在 fetch_with_credential 记 warn）
                 FetchOutcome::Failed(message) => runtime.error = Some(message),
@@ -404,22 +431,34 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
                 }
             }
 
-            // 配额或月度任一成功：把最新内存态落盘到该账号的 cache-<id>.json
-            // （月度挂在配额缓存上；配额失败但月度成功时沿用旧配额数据，fetched_at 不变）
-            if quota_success || monthly_success {
-                if let Some((quota, fetched_at)) = &runtime.last_quota {
+            // 配额或月度或余额任一成功：把最新内存态落盘到该账号的 cache-<id>.json
+            // （月度/余额挂在配额缓存上；配额失败但月度成功时沿用旧配额数据，fetched_at 不变；
+            //   DeepSeek 账号无配额，以空配额占位、余额落盘供断网显示）
+            if quota_success || monthly_success || balance_success {
+                let fetched_at = runtime
+                    .last_quota
+                    .as_ref()
+                    .map(|(_, t)| *t)
+                    .or_else(|| runtime.last_balance.as_ref().map(|(_, t)| *t));
+                if let Some(fetched_at) = fetched_at {
                     let _ = storage::save_cache(
                         &account_id,
                         &CachedQuota {
-                            quota: quota.clone(),
-                            fetched_at: *fetched_at,
+                            quota: runtime
+                                .last_quota
+                                .clone()
+                                .map(|(q, _)| q)
+                                .unwrap_or_default(),
+                            fetched_at,
                             monthly: runtime.monthly.clone(),
+                            deepseek_balance: runtime.last_balance.clone().map(|(b, _)| b),
                         },
                     );
                 }
             }
 
             // 配额刷新成功：给该账号追加一条历史采样（用量趋势图数据，纯事实不预测）。
+            // DeepSeek 账号不写历史（GOAL 拍板，本次无趋势图）。
             // 月度取本轮最终值（失败沿用旧值，未配置为 None）；t 用本轮成功时刻。
             // 历史是派生数据，读写失败只记日志，不影响刷新主流程
             if quota_success {
@@ -479,12 +518,15 @@ pub fn refresh_if_stale(app: &AppHandle) {
         let settings = storage::load_settings().unwrap_or_default();
         !settings.accounts.is_empty()
             && settings.accounts.iter().any(|account| {
-                match inner
-                    .accounts
-                    .get(&account.id)
-                    .and_then(|rt| rt.last_quota.as_ref())
-                {
-                    Some((_, fetched_at)) => now_unix() - fetched_at > STALE_SECS,
+                // Kimi 看配额时间，DeepSeek 看余额时间；两者皆无视为无缓存
+                let fetched_at = inner.accounts.get(&account.id).and_then(|rt| {
+                    rt.last_quota
+                        .as_ref()
+                        .map(|(_, t)| *t)
+                        .or_else(|| rt.last_balance.as_ref().map(|(_, t)| *t))
+                });
+                match fetched_at {
+                    Some(fetched_at) => now_unix() - fetched_at > STALE_SECS,
                     None => true,
                 }
             })
@@ -743,13 +785,23 @@ pub fn list_accounts() -> Vec<Account> {
     storage::load_settings().unwrap_or_default().accounts
 }
 
-/// 新增账号（超上限 5 个报错；名称为空默认「账号 N」），返回新建账号
+/// 新增账号（Kimi + DeepSeek 合计超上限 5 个报错；名称为空默认「账号 N」），返回新建账号。
+/// provider 仅识别 "deepseek"，其余（含缺省）按 "kimi"
 #[tauri::command]
-pub fn add_account(app: AppHandle, name: Option<String>) -> Result<Account, String> {
+pub fn add_account(
+    app: AppHandle,
+    name: Option<String>,
+    provider: Option<String>,
+) -> Result<Account, String> {
     let mut settings = storage::load_settings().unwrap_or_default();
-    let account = settings.add_account(name.as_deref())?;
+    let account = settings.add_account(name.as_deref(), provider.as_deref().unwrap_or("kimi"))?;
     storage::save_settings(&settings)?;
-    tracing::info!("账号已添加: {}（{}）", account.name, account.id);
+    tracing::info!(
+        "账号已添加: {}（{}，{}）",
+        account.name,
+        account.id,
+        account.provider
+    );
     emit_snapshot(&app);
     Ok(account)
 }
@@ -836,14 +888,16 @@ pub fn set_account_login_method(
 
 #[tauri::command]
 pub fn set_api_key(account_id: String, key: String) -> Result<(), String> {
-    if storage::load_settings()
-        .unwrap_or_default()
-        .account(&account_id)
-        .is_none()
-    {
+    let settings = storage::load_settings().unwrap_or_default();
+    let Some(account) = settings.account(&account_id) else {
         return Err("账号不存在".to_string());
-    }
-    let key = validate_api_key(&key)?;
+    };
+    // 按提供商校验前缀：DeepSeek 只查 sk-，Kimi 保持 sk-kimi-（GOAL 拍板）
+    let key = if account.is_deepseek() {
+        validate_deepseek_api_key(&key)?
+    } else {
+        validate_api_key(&key)?
+    };
     creds::save_api_key(&account_id, key).map_err(|e| e.to_string())?;
     // 只记"已配置"，严禁记录 Key 本身
     tracing::info!("API Key 已配置（账号 {account_id}）");
@@ -1090,6 +1144,11 @@ const API_KEY_PREFIX: &str = "sk-kimi-";
 /// Key 校验失败时返回给前端的文案
 const INVALID_API_KEY_MESSAGE: &str =
     "无效 Key：Kimi Code API Key 以 sk-kimi- 开头（与开放平台 sk- 不通用），请到 kimi.com/code/console 获取";
+/// DeepSeek 开放平台 API Key 前缀
+const DEEPSEEK_API_KEY_PREFIX: &str = "sk-";
+/// DeepSeek Key 校验失败时返回给前端的文案
+const INVALID_DEEPSEEK_API_KEY_MESSAGE: &str =
+    "无效 Key：DeepSeek API Key 以 sk- 开头，请到 platform.deepseek.com/api_keys 获取";
 
 /// trim 后校验前缀，返回可用的 Key 切片
 fn validate_api_key(key: &str) -> Result<&str, String> {
@@ -1098,6 +1157,16 @@ fn validate_api_key(key: &str) -> Result<&str, String> {
         Ok(key)
     } else {
         Err(INVALID_API_KEY_MESSAGE.to_string())
+    }
+}
+
+/// DeepSeek Key：trim 后只查 sk- 前缀（GOAL 拍板），返回可用的 Key 切片
+fn validate_deepseek_api_key(key: &str) -> Result<&str, String> {
+    let key = key.trim();
+    if key.starts_with(DEEPSEEK_API_KEY_PREFIX) {
+        Ok(key)
+    } else {
+        Err(INVALID_DEEPSEEK_API_KEY_MESSAGE.to_string())
     }
 }
 
@@ -1206,6 +1275,8 @@ enum FetchOutcome {
     NoCredential,
     /// 拉取成功（配额, epoch 秒, usages 原始响应）；装箱避免撑大枚举
     Success(Box<(KimiQuota, i64, String)>),
+    /// DeepSeek 余额拉取成功（余额, epoch 秒）
+    DeepSeekSuccess(Box<(DeepSeekBalance, i64)>),
     /// 拉取失败（面向用户的中文错误）
     Failed(String),
 }
@@ -1378,6 +1449,28 @@ async fn fetch_with_credential(account: &Account) -> FetchOutcome {
             return FetchOutcome::Failed(e.to_string());
         }
     };
+    // DeepSeek 账号走余额接口（Kimi 逻辑零改动，下方原样）
+    if account.is_deepseek() {
+        return match DeepSeekClient::new().fetch_balance(&token).await {
+            Ok(balance) => FetchOutcome::DeepSeekSuccess(Box::new((balance, now_unix()))),
+            Err(QuotaError::Unauthorized) => {
+                tracing::warn!(
+                    "余额刷新失败（账号 {}）: 凭证无效或已过期 (Unauthorized)",
+                    account.id
+                );
+                FetchOutcome::Failed("凭证无效或已过期，请在设置中重新配置".to_string())
+            }
+            Err(QuotaError::Http(e)) => {
+                tracing::warn!("余额刷新失败（账号 {}）: 网络错误: {e}", account.id);
+                FetchOutcome::Failed("网络错误，展示缓存数据".to_string())
+            }
+            // Parse / Api（含 429 限流）：展示原始错误文本
+            Err(other) => {
+                tracing::warn!("余额刷新失败（账号 {}）: {other}", account.id);
+                FetchOutcome::Failed(other.to_string())
+            }
+        };
+    }
     match KimiClient::new().fetch_quota_with_raw(&token).await {
         Ok((quota, raw)) => FetchOutcome::Success(Box::new((quota, now_unix(), raw))),
         Err(QuotaError::Unauthorized) => {
@@ -1420,13 +1513,15 @@ fn assemble_panel_state(inner: &Inner) -> PanelState {
 
 /// 组装实现（设置与凭证查询入参化，纯函数便于单测）：
 /// 按 settings.accounts 顺序逐账号取运行时快照；低额判定要求该账号最近一次
-/// 刷新成功（error 为空）——拉取失败/凭证无效的账号不算低额（GOAL 拍板）
+/// 刷新成功（error 为空）——拉取失败/凭证无效的账号不算低额（GOAL 拍板）。
+/// DeepSeek 账号改按余额判定（不可用或总余额低于阈值元），Kimi 判定逻辑不变。
 fn assemble_panel_state_with(
     inner: &Inner,
     settings: &storage::Settings,
     has_credential: &dyn Fn(&str) -> bool,
 ) -> PanelState {
     let threshold = settings.warn_threshold_pct;
+    let deepseek_threshold = settings.deepseek_warn_threshold;
     let accounts = settings
         .accounts
         .iter()
@@ -1434,18 +1529,32 @@ fn assemble_panel_state_with(
             let runtime = inner.accounts.get(&account.id);
             let (quota, fetched_at) = match runtime.and_then(|rt| rt.last_quota.as_ref()) {
                 Some((quota, fetched_at)) => (Some(quota.clone()), Some(*fetched_at)),
-                None => (None, None),
+                // 无配额时取余额时间（DeepSeek 账号的"上次成功刷新"）
+                None => (
+                    None,
+                    runtime.and_then(|rt| rt.last_balance.as_ref().map(|(_, t)| *t)),
+                ),
             };
             let error = runtime.and_then(|rt| rt.error.clone());
             let monthly = runtime.and_then(|rt| rt.monthly.clone());
             let monthly_error = runtime.and_then(|rt| rt.monthly_error.clone());
-            let low_warning = error.is_none()
-                && (quota
-                    .as_ref()
-                    .is_some_and(|q| needs_low_warning(q, threshold))
-                    || monthly
+            let deepseek_balance = runtime
+                .and_then(|rt| rt.last_balance.clone())
+                .map(|(b, _)| b);
+            let low_warning = if account.is_deepseek() {
+                error.is_none()
+                    && deepseek_balance
                         .as_ref()
-                        .is_some_and(|m| m.total_pct >= 100.0 - threshold));
+                        .is_some_and(|b| deepseek_needs_low_warning(b, deepseek_threshold))
+            } else {
+                error.is_none()
+                    && (quota
+                        .as_ref()
+                        .is_some_and(|q| needs_low_warning(q, threshold))
+                        || monthly
+                            .as_ref()
+                            .is_some_and(|m| m.total_pct >= 100.0 - threshold))
+            };
             AccountPanel {
                 account: account.clone(),
                 credential: has_credential(&account.id),
@@ -1455,6 +1564,7 @@ fn assemble_panel_state_with(
                 low_warning,
                 monthly,
                 monthly_error,
+                deepseek_balance,
             }
         })
         .collect();
@@ -1483,19 +1593,30 @@ fn worst_window_pct(quota: &KimiQuota) -> Option<f64> {
 
 /// 托盘 tooltip 的附加行：最差账号（剩余百分比最低、且最近刷新成功）的摘要，
 /// 如 "\n7天剩余 87% · 5h剩余 36%"；多账号时前缀账号名（"\n账号 1 · 7天剩余 8%"）。
+/// DeepSeek 账号以总余额参与"最差"比较（余额不可用记 0，与百分比同向即越小越差，
+/// 仅是挑展示对象的启发式），摘要如 "\nDeepSeek 余额 ¥3.20"。
 /// 全部账号无可用数据时为 None
 pub(crate) fn worst_account_tooltip(panel: &PanelState, lang: i18n::Lang) -> Option<String> {
-    let (account, quota) = panel
+    let (account, summary) = panel
         .accounts
         .iter()
         .filter(|a| a.error.is_none())
         .filter_map(|a| {
-            let quota = a.quota.as_ref()?;
-            worst_window_pct(quota).map(|pct| (a, quota, pct))
+            if a.account.is_deepseek() {
+                let balance = a.deepseek_balance.as_ref()?;
+                let severity = if balance.is_available {
+                    balance.total_balance
+                } else {
+                    0.0
+                };
+                Some((a, severity, i18n::deepseek_summary(lang, balance)))
+            } else {
+                let quota = a.quota.as_ref()?;
+                worst_window_pct(quota).map(|pct| (a, pct, i18n::quota_summary(lang, quota)))
+            }
         })
-        .min_by(|x, y| x.2.partial_cmp(&y.2).unwrap_or(std::cmp::Ordering::Equal))
-        .map(|(a, quota, _)| (a, quota))?;
-    let summary = i18n::quota_summary(lang, quota);
+        .min_by(|x, y| x.1.partial_cmp(&y.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(a, _, summary)| (a, summary))?;
     if summary.is_empty() {
         return None;
     }
@@ -1606,6 +1727,24 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             login_method: None,
+            provider: "kimi".to_string(),
+        }
+    }
+
+    fn deepseek_account(id: &str, name: &str) -> Account {
+        Account {
+            provider: "deepseek".to_string(),
+            ..account(id, name)
+        }
+    }
+
+    fn deepseek_balance(is_available: bool, total: f64) -> DeepSeekBalance {
+        DeepSeekBalance {
+            is_available,
+            currency: "CNY".to_string(),
+            total_balance: total,
+            granted_balance: 0.0,
+            topped_up_balance: total,
         }
     }
 
@@ -1654,6 +1793,7 @@ mod tests {
                     reset_time: None,
                 }),
                 monthly_error: None,
+                last_balance: None,
             },
         );
         // 账号 2：拉取失败（无效 token），残留旧缓存数据
@@ -1665,6 +1805,7 @@ mod tests {
                 last_raw_response: None,
                 monthly: None,
                 monthly_error: Some("月度数据刷新失败".to_string()),
+                last_balance: None,
             },
         );
 
@@ -1889,5 +2030,174 @@ mod tests {
         };
         assert_eq!(worst_window_pct(&q), Some(5.0));
         assert_eq!(worst_window_pct(&KimiQuota::default()), None);
+    }
+
+    // ---- DeepSeek Key 校验 ----
+
+    #[test]
+    fn validate_deepseek_api_key_accepts_sk_prefix() {
+        assert_eq!(validate_deepseek_api_key("sk-abc123").unwrap(), "sk-abc123");
+        // trim 后校验
+        assert_eq!(
+            validate_deepseek_api_key("  sk-abc123 \n").unwrap(),
+            "sk-abc123"
+        );
+    }
+
+    #[test]
+    fn validate_deepseek_api_key_rejects_non_sk() {
+        let err = validate_deepseek_api_key("pk-abcdef").unwrap_err();
+        assert_eq!(err, INVALID_DEEPSEEK_API_KEY_MESSAGE);
+        assert!(validate_deepseek_api_key("").is_err());
+        assert!(validate_deepseek_api_key("   ").is_err());
+    }
+
+    // ---- AppSettings DTO：DeepSeek 阈值双向转换 ----
+
+    #[test]
+    fn app_settings_dto_roundtrip_covers_deepseek_threshold() {
+        let stored = storage::Settings {
+            deepseek_warn_threshold: 12.5,
+            ..Default::default()
+        };
+        let dto = AppSettings::from(stored);
+        assert!((dto.deepseek_warn_threshold - 12.5).abs() < 1e-9);
+        let back = storage::Settings::from(dto);
+        assert!((back.deepseek_warn_threshold - 12.5).abs() < 1e-9);
+
+        // 默认 5 元双向一致
+        let dto = AppSettings::from(storage::Settings::default());
+        assert!((dto.deepseek_warn_threshold - 5.0).abs() < 1e-9);
+    }
+
+    // ---- DeepSeek 账号的面板组装与低额判定 ----
+
+    #[test]
+    fn deepseek_panel_low_below_threshold_and_unavailable() {
+        let acc = deepseek_account("ds-1", "DeepSeek 号");
+        let mut settings = settings_with_accounts(vec![acc], 20.0);
+        settings.deepseek_warn_threshold = 5.0;
+
+        let mut inner = Inner::default();
+        // 余额 ¥3.20 < 阈值 ¥5：低额，且余额透传到面板
+        inner.accounts.insert(
+            "ds-1".to_string(),
+            AccountRuntime {
+                error: None,
+                last_balance: Some((deepseek_balance(true, 3.20), 1_900_000_000)),
+                ..AccountRuntime::default()
+            },
+        );
+        let panel = assemble_panel_state_with(&inner, &settings, &|_| true);
+        let p = &panel.accounts[0];
+        assert!(p.low_warning, "余额低于阈值应低额");
+        assert_eq!(p.fetched_at, Some(1_900_000_000), "无配额时取余额时间");
+        assert!(p.quota.is_none(), "DeepSeek 账号 Kimi 字段为空");
+        let b = p.deepseek_balance.as_ref().expect("余额应透传");
+        assert!((b.total_balance - 3.20).abs() < 1e-9);
+
+        // 余额不可用：无论金额都低额
+        inner.accounts.insert(
+            "ds-1".to_string(),
+            AccountRuntime {
+                error: None,
+                last_balance: Some((deepseek_balance(false, 100.0), 1_900_000_000)),
+                ..AccountRuntime::default()
+            },
+        );
+        let panel = assemble_panel_state_with(&inner, &settings, &|_| true);
+        assert!(panel.accounts[0].low_warning, "余额不可用应低额");
+    }
+
+    #[test]
+    fn deepseek_panel_not_low_above_threshold_or_on_error() {
+        let acc = deepseek_account("ds-1", "DeepSeek 号");
+        let mut settings = settings_with_accounts(vec![acc], 20.0);
+        settings.deepseek_warn_threshold = 5.0;
+
+        let mut inner = Inner::default();
+        // 余额 ¥12.34 ≥ 阈值：不红
+        inner.accounts.insert(
+            "ds-1".to_string(),
+            AccountRuntime {
+                error: None,
+                last_balance: Some((deepseek_balance(true, 12.34), 1_900_000_000)),
+                ..AccountRuntime::default()
+            },
+        );
+        let panel = assemble_panel_state_with(&inner, &settings, &|_| true);
+        assert!(!panel.accounts[0].low_warning);
+        assert!(!any_low_warning(&panel));
+
+        // 拉取失败（凭证无效）+ 缓存余额 ¥0：失败账号永不低额（铁律）
+        inner.accounts.insert(
+            "ds-1".to_string(),
+            AccountRuntime {
+                error: Some("凭证无效或已过期，请在设置中重新配置".to_string()),
+                last_balance: Some((deepseek_balance(true, 0.0), 1_899_000_000)),
+                ..AccountRuntime::default()
+            },
+        );
+        let panel = assemble_panel_state_with(&inner, &settings, &|_| true);
+        assert!(!panel.accounts[0].low_warning, "失败账号不算低额");
+        assert!(!any_low_warning(&panel), "托盘不应变红");
+        // 缓存余额照常展示（错误横幅与数据并存）
+        assert!(panel.accounts[0].deepseek_balance.is_some());
+    }
+
+    #[test]
+    fn kimi_account_has_no_deepseek_balance() {
+        let settings = settings_with_accounts(vec![account("id-1", "账号 1")], 20.0);
+        let mut inner = Inner::default();
+        inner.accounts.insert(
+            "id-1".to_string(),
+            AccountRuntime {
+                error: None,
+                last_quota: Some((quota_with_weekly(87.0), 1_900_000_000)),
+                ..AccountRuntime::default()
+            },
+        );
+        let panel = assemble_panel_state_with(&inner, &settings, &|_| true);
+        assert!(panel.accounts[0].deepseek_balance.is_none());
+    }
+
+    #[test]
+    fn tooltip_covers_deepseek_balance() {
+        let kimi = account("id-1", "账号 1");
+        let ds = deepseek_account("ds-1", "DS 号");
+        let settings = settings_with_accounts(vec![kimi, ds], 20.0);
+
+        let mut inner = Inner::default();
+        inner.accounts.insert(
+            "id-1".to_string(),
+            AccountRuntime {
+                error: None,
+                last_quota: Some((quota_with_weekly(50.0), 1)),
+                ..AccountRuntime::default()
+            },
+        );
+        inner.accounts.insert(
+            "ds-1".to_string(),
+            AccountRuntime {
+                error: None,
+                last_balance: Some((deepseek_balance(true, 3.20), 1)),
+                ..AccountRuntime::default()
+            },
+        );
+
+        // 余额 ¥3.20 比 7天剩余 50% 更"差"（启发式同向比较）：tooltip 取 DeepSeek 摘要
+        let panel = assemble_panel_state_with(&inner, &settings, &|_| true);
+        let tip = worst_account_tooltip(&panel, i18n::Lang::Zh).unwrap();
+        assert_eq!(tip, "\nDS 号 · DeepSeek 余额 ¥3.20", "实际: {tip}");
+
+        // 英文摘要
+        let tip_en = worst_account_tooltip(&panel, i18n::Lang::En).unwrap();
+        assert!(tip_en.contains("DeepSeek balance ¥3.20"), "实际: {tip_en}");
+
+        // 单个 DeepSeek 账号：无账号名前缀
+        let settings_ds = settings_with_accounts(vec![deepseek_account("ds-1", "DS 号")], 20.0);
+        let panel_ds = assemble_panel_state_with(&inner, &settings_ds, &|_| true);
+        let tip_ds = worst_account_tooltip(&panel_ds, i18n::Lang::Zh).unwrap();
+        assert_eq!(tip_ds, "\nDeepSeek 余额 ¥3.20", "实际: {tip_ds}");
     }
 }

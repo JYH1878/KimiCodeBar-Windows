@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { CredentialStatus } from "../types";
+import type { AccountProvider, CredentialStatus } from "../types";
 import { clearApiKey, openExternalUrl, setApiKey } from "../ipc";
 
 /** API Key 控制台地址（kimi.com/code 专用，与开放平台不通用） */
 const CONSOLE_URL = "https://www.kimi.com/code/console";
+/** DeepSeek 开放平台 API Key 地址 */
+const DEEPSEEK_KEYS_URL = "https://platform.deepseek.com/api_keys";
 
 /** 眼睛图标：当前为明文，点击隐藏 */
 function EyeIcon() {
@@ -49,14 +51,16 @@ function EyeOffIcon() {
 interface ApiKeySectionProps {
   /** 目标账号 id（凭证按账号隔离） */
   accountId: string;
+  /** 提供商（默认 kimi）：DeepSeek 切换占位符 / 获取链接 / 提示文案 */
+  provider?: AccountProvider;
   /** 凭证状态（尚未加载完时为 null） */
   status: CredentialStatus | null;
   /** 保存/清除成功后回调，父组件重新拉取凭证状态 */
   onChanged: () => void;
 }
 
-/** 设置页"方式A：API Key"分区（按账号配置） */
-export function ApiKeySection({ accountId, status, onChanged }: ApiKeySectionProps) {
+/** 设置页"方式A：API Key"分区（按账号配置）；DeepSeek 账号复用本组件（占位符与链接不同） */
+export function ApiKeySection({ accountId, provider = "kimi", status, onChanged }: ApiKeySectionProps) {
   const { t } = useTranslation();
   const [keyInput, setKeyInput] = useState("");
   const [showKey, setShowKey] = useState(false);
@@ -66,6 +70,7 @@ export function ApiKeySection({ accountId, status, onChanged }: ApiKeySectionPro
 
   const configured = status?.api_key_configured ?? false;
   const masked = status?.api_key_masked ?? null;
+  const isDeepSeek = provider === "deepseek";
 
   const save = async () => {
     const key = keyInput.trim();
@@ -117,7 +122,7 @@ export function ApiKeySection({ accountId, status, onChanged }: ApiKeySectionPro
         <input
           className="input grow"
           type={showKey ? "text" : "password"}
-          placeholder="sk-kimi-…"
+          placeholder={isDeepSeek ? "sk-…" : "sk-kimi-…"}
           value={keyInput}
           onChange={(e) => setKeyInput(e.target.value)}
           spellCheck={false}
@@ -133,10 +138,14 @@ export function ApiKeySection({ accountId, status, onChanged }: ApiKeySectionPro
         </button>
       </div>
       <p className="hint-muted">
-        {t("apiKey.hint")}
+        {isDeepSeek ? t("apiKey.deepseekHint") : t("apiKey.hint")}
         <br />
-        <button type="button" className="link" onClick={() => void openExternalUrl(CONSOLE_URL)}>
-          {t("apiKey.getKey")}
+        <button
+          type="button"
+          className="link"
+          onClick={() => void openExternalUrl(isDeepSeek ? DEEPSEEK_KEYS_URL : CONSOLE_URL)}
+        >
+          {isDeepSeek ? t("apiKey.deepseekGetKey") : t("apiKey.getKey")}
         </button>
       </p>
       {errMsg !== null && <p className="hint-err">{errMsg}</p>}

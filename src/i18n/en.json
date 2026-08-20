@@ -26,6 +26,17 @@
   "monthly": {
     "title": "Monthly total"
   },
+  "deepseek": {
+    "title": "DeepSeek balance",
+    "granted": "Granted",
+    "toppedUp": "Topped up",
+    "currency": "Currency",
+    "status": "Status",
+    "statusOk": "OK",
+    "statusUnavailable": "Unavailable",
+    "unavailableBanner": "DeepSeek balance is currently unavailable — try again later or check your account",
+    "updatedAt": "Updated"
+  },
   "trend": {
     "title": "Usage trend (last 24 hours)",
     "empty": "Collecting data…",
@@ -95,6 +106,7 @@
       "refreshModeFixed": "Fixed interval",
       "lowWarn": "Low quota alert",
       "warnThreshold": "Alert threshold (% left, 1–99)",
+      "deepseekWarnThreshold": "DeepSeek low-balance alert threshold (yuan)",
       "autostart": "Launch at startup",
       "minimalMode": "Minimal mode (panel shows only 7-day / 5-hour usage)",
       "hotkey": "Global hotkey",
@@ -149,6 +161,8 @@
     "hideKey": "Hide key",
     "hint": "Keys start with sk-kimi- and are not interchangeable with sk- keys from the platform.moonshot.cn open platform.",
     "getKey": "Get one at kimi.com/code/console",
+    "deepseekHint": "A DeepSeek open-platform API Key starts with sk- and is used to check your account balance.",
+    "deepseekGetKey": "Get one at platform.deepseek.com/api_keys",
     "errEmpty": "Please enter an API Key",
     "saved": "API Key saved",
     "cleared": "API Key cleared",

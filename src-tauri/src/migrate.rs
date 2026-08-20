@@ -32,11 +32,12 @@ pub fn migrate_legacy_to_accounts() -> Result<bool, String> {
         return Ok(false);
     }
 
-    // 建「账号 1」：继承旧全局登录方式
+    // 建「账号 1」：继承旧全局登录方式；旧单账号一律是 Kimi（DeepSeek 是后加的能力）
     let account = Account {
         id: uuid::Uuid::new_v4().to_string(),
         name: "账号 1".to_string(),
         login_method: legacy.login_method.clone(),
+        provider: "kimi".to_string(),
     };
     tracing::info!("检测到旧单账号数据，迁移为「账号 1」（id={}）", account.id);
 

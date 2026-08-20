@@ -8,6 +8,7 @@ import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
   Account,
+  AccountProvider,
   AppSettings,
   CredentialStatus,
   DailyUsage,
@@ -37,11 +38,21 @@ const MOCK_MONTHLY: MonthlyInfo = {
   reset_time: MOCK_MONTHLY_RESET,
 };
 
-/** 浏览器 mock 的账号列表（两个账号，便于调试翻页） */
+/** 浏览器 mock 的账号列表（两个 Kimi 账号 + 一个 DeepSeek 账号，便于调试翻页与余额页） */
 const MOCK_ACCOUNTS: Account[] = [
-  { id: "mock-acc-1", name: "账号 1", login_method: "api_key" },
-  { id: "mock-acc-2", name: "演示号", login_method: "oauth" },
+  { id: "mock-acc-1", name: "账号 1", login_method: "api_key", provider: "kimi" },
+  { id: "mock-acc-2", name: "演示号", login_method: "oauth", provider: "kimi" },
+  { id: "mock-acc-3", name: "DeepSeek 演示", login_method: "api_key", provider: "deepseek" },
 ];
+
+/** 浏览器 mock 的 DeepSeek 余额假数据（标注：仅浏览器 dev 用，真实数据来自接口/缓存） */
+const MOCK_DEEPSEEK_BALANCE = {
+  is_available: true,
+  currency: "CNY",
+  total_balance: 12.34,
+  granted_balance: 2.0,
+  topped_up_balance: 10.34,
+};
 
 /** 浏览器开发用的 mock 面板状态：账号 1 健康（weekly 87% / five_hour 36% / 中级版），
  *  演示号模拟"无效 token"——缓存数据照显 + 错误横幅，托盘不变红 */
@@ -97,6 +108,16 @@ const MOCK_STATE: PanelState = {
       // 拉取失败的账号不算低额（GOAL 拍板）：缓存剩 5% 也不标红
       low_warning: false,
       monthly_error: "月度数据刷新失败",
+    },
+    {
+      account: MOCK_ACCOUNTS[2],
+      credential: true,
+      // DeepSeek 账号：Kimi 字段为空，余额挂在 deepseek_balance
+      quota: null,
+      fetched_at: Math.floor(Date.now() / 1000),
+      error: null,
+      low_warning: false,
+      deepseek_balance: MOCK_DEEPSEEK_BALANCE,
     },
   ],
 };
@@ -255,6 +276,7 @@ const mockDb = {
     adaptive_refresh: true,
     low_warn_enabled: true,
     warn_threshold_pct: 20,
+    deepseek_warn_threshold: 5,
     autostart: false,
     minimal_mode: false,
     hotkey: null,
@@ -419,8 +441,8 @@ export async function listAccounts(): Promise<Account[]> {
   return invoke<Account[]>("list_accounts");
 }
 
-/** 新增账号（超上限 5 个报错；名称为空默认「账号 N」），返回新建账号 */
-export async function addAccount(name?: string): Promise<Account> {
+/** 新增账号（Kimi + DeepSeek 合计超上限 5 个报错；名称为空默认「账号 N」），返回新建账号 */
+export async function addAccount(name?: string, provider: AccountProvider = "kimi"): Promise<Account> {
   if (!isTauri) {
     if (mockDb.accounts.length >= 5) throw new Error("最多支持 5 个账号");
     const trimmed = name?.trim();
@@ -428,11 +450,12 @@ export async function addAccount(name?: string): Promise<Account> {
       id: `mock-acc-${Date.now()}`,
       name: trimmed || `账号 ${mockDb.accounts.length + 1}`,
       login_method: null,
+      provider,
     };
     mockDb.accounts.push(account);
     return { ...account };
   }
-  return invoke<Account>("add_account", { name: name ?? null });
+  return invoke<Account>("add_account", { name: name ?? null, provider });
 }
 
 /** 账号改名（空名 / 不存在报错） */
@@ -489,9 +512,12 @@ export async function setAccountLoginMethod(
 export async function setApiKey(accountId: string, key: string): Promise<void> {
   if (!isTauri) {
     const k = key.trim();
-    // mock 复刻后端格式校验，便于浏览器下调试错误提示
-    if (!k.startsWith("sk-kimi-")) {
-      throw new Error("API Key 格式不正确：应以 sk-kimi- 开头");
+    // mock 复刻后端格式校验（按提供商分派前缀），便于浏览器下调试错误提示
+    const isDeepSeek = mockDb.accounts.find((a) => a.id === accountId)?.provider === "deepseek";
+    if (isDeepSeek ? !k.startsWith("sk-") : !k.startsWith("sk-kimi-")) {
+      throw new Error(
+        isDeepSeek ? "API Key 格式不正确：应以 sk- 开头" : "API Key 格式不正确：应以 sk-kimi- 开头",
+      );
     }
     if (k.length < 12) {
       throw new Error("API Key 格式不正确：长度过短");

@@ -18,6 +18,10 @@ pub const MIN_REFRESH_INTERVAL_MIN: u32 = 1;
 pub const MAX_REFRESH_INTERVAL_MIN: u32 = 60;
 /// 默认低额度告警阈值（剩余百分比）
 pub const DEFAULT_WARN_THRESHOLD_PCT: f64 = 20.0;
+/// DeepSeek 低余额告警阈值默认值（元）
+pub const DEFAULT_DEEPSEEK_WARN_THRESHOLD: f64 = 5.0;
+/// DeepSeek 低余额告警阈值上限（元，防手改 json 越界）
+pub const MAX_DEEPSEEK_WARN_THRESHOLD: f64 = 100_000.0;
 /// 账号数量上限（面板一页一个账号 + 末尾「+」）
 pub const MAX_ACCOUNTS: usize = 5;
 
@@ -33,6 +37,21 @@ pub struct Account {
     /// 登录方式："api_key" / "oauth"；None 表示未显式选择（优先 api_key，其次 oauth）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_method: Option<String>,
+    /// 提供商："kimi"（默认）/ "deepseek"；旧版设置文件无此字段，serde 默认 "kimi"
+    #[serde(default = "default_provider")]
+    pub provider: String,
+}
+
+/// Account.provider 缺省值：旧版设置文件无此字段的账号一律按 Kimi 处理
+fn default_provider() -> String {
+    "kimi".to_string()
+}
+
+impl Account {
+    /// 是否 DeepSeek 账号（只查余额，无配额/月度/历史）
+    pub fn is_deepseek(&self) -> bool {
+        self.provider == "deepseek"
+    }
 }
 
 /// 应用设置（settings.json，snake_case）
@@ -59,6 +78,9 @@ pub struct Settings {
     /// 低额度告警阈值（剩余百分比，严格小于触发），默认 20.0，范围 1–99
     #[serde(default = "default_warn_threshold_pct")]
     pub warn_threshold_pct: f64,
+    /// DeepSeek 低余额告警阈值（元，严格小于触发），默认 5.0，范围 0–100000
+    #[serde(default = "default_deepseek_warn_threshold")]
+    pub deepseek_warn_threshold: f64,
     /// 开机自启动，默认关
     #[serde(default)]
     pub autostart: bool,
@@ -99,6 +121,10 @@ const fn default_warn_threshold_pct() -> f64 {
     DEFAULT_WARN_THRESHOLD_PCT
 }
 
+const fn default_deepseek_warn_threshold() -> f64 {
+    DEFAULT_DEEPSEEK_WARN_THRESHOLD
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -108,6 +134,7 @@ impl Default for Settings {
             adaptive_refresh: true,
             low_warn_enabled: true,
             warn_threshold_pct: DEFAULT_WARN_THRESHOLD_PCT,
+            deepseek_warn_threshold: DEFAULT_DEEPSEEK_WARN_THRESHOLD,
             autostart: false,
             minimal_mode: false,
             hotkey: None,
@@ -130,9 +157,10 @@ impl Settings {
         self.accounts.iter().find(|a| a.id == account_id)
     }
 
-    /// 新增账号：超上限（5 个）报错；名称为空时默认「账号 N」（N = 当前数量 + 1）。
+    /// 新增账号：超上限（Kimi + DeepSeek 合计 5 个）报错；名称为空时默认「账号 N」
+    /// （N = 当前数量 + 1）。provider 仅识别 "deepseek"，其余一律按 "kimi"（防御性归一）。
     /// 返回新建账号的克隆（id 为 uuid v4）
-    pub fn add_account(&mut self, name: Option<&str>) -> Result<Account, String> {
+    pub fn add_account(&mut self, name: Option<&str>, provider: &str) -> Result<Account, String> {
         if self.accounts.len() >= MAX_ACCOUNTS {
             return Err(format!("最多支持 {MAX_ACCOUNTS} 个账号"));
         }
@@ -145,6 +173,11 @@ impl Settings {
             id: uuid::Uuid::new_v4().to_string(),
             name,
             login_method: None,
+            provider: if provider == "deepseek" {
+                "deepseek".to_string()
+            } else {
+                default_provider()
+            },
         };
         self.accounts.push(account.clone());
         Ok(account)
@@ -193,10 +226,14 @@ pub struct CachedQuota {
     /// 月度总量缓存（网页 token 数据）；旧版缓存文件无此字段，向后兼容
     #[serde(default)]
     pub monthly: Option<crate::kimi::web::MonthlyInfo>,
+    /// DeepSeek 余额缓存（仅 provider=deepseek 的账号有值）；旧版缓存文件无此字段，向后兼容
+    #[serde(default)]
+    pub deepseek_balance: Option<crate::deepseek::models::DeepSeekBalance>,
 }
 
 /// 读取设置：文件不存在 → 默认；损坏 → 默认；其他 IO 错误 → Err。
-/// 加载后刷新间隔钳制到 1–60 分钟、告警阈值钳制到 1–99（防手改 json 越界）。
+/// 加载后刷新间隔钳制到 1–60 分钟、告警阈值钳制到 1–99、DeepSeek 阈值钳制到
+/// 0–100000 元（防手改 json 越界）。
 pub fn load_settings() -> Result<Settings, String> {
     let path = settings_file_path();
     let text = match std::fs::read_to_string(&path) {
@@ -210,6 +247,9 @@ pub fn load_settings() -> Result<Settings, String> {
         .refresh_interval_min
         .clamp(MIN_REFRESH_INTERVAL_MIN, MAX_REFRESH_INTERVAL_MIN);
     settings.warn_threshold_pct = settings.warn_threshold_pct.clamp(1.0, 99.0);
+    settings.deepseek_warn_threshold = settings
+        .deepseek_warn_threshold
+        .clamp(0.0, MAX_DEEPSEEK_WARN_THRESHOLD);
     Ok(settings)
 }
 
@@ -327,12 +367,14 @@ mod tests {
                 id: "acc-1".to_string(),
                 name: "账号 1".to_string(),
                 login_method: Some("oauth".to_string()),
+                provider: "deepseek".to_string(),
             }],
             login_method: Some("oauth".to_string()),
             refresh_interval_min: 15,
             adaptive_refresh: false,
             low_warn_enabled: false,
             warn_threshold_pct: 33.5,
+            deepseek_warn_threshold: 12.5,
             autostart: true,
             // 顺手覆盖极简模式的落盘/读回（true 值往返一致）
             minimal_mode: true,
@@ -367,6 +409,10 @@ mod tests {
         assert!(raw.contains("\"refresh_interval_min\""));
         assert!(raw.contains("\"low_warn_enabled\""));
         assert!(raw.contains("\"warn_threshold_pct\""));
+        // provider 随账号落盘（该用例账号为 deepseek，顺带覆盖序列化）
+        assert!(raw.contains("\"provider\""));
+        assert!(raw.contains("\"deepseek\""));
+        assert!(raw.contains("\"deepseek_warn_threshold\""));
 
         cleanup(&dir);
     }
@@ -486,6 +532,7 @@ mod tests {
             quota,
             fetched_at: 1_900_000_000,
             monthly: None,
+            deepseek_balance: None,
         };
         save_cache(acc, &cache).unwrap();
         assert!(dir.join("cache-acc-cache.json").exists());
@@ -505,6 +552,7 @@ mod tests {
                 quota: loaded.quota.clone(),
                 fetched_at: 1_900_000_100,
                 monthly: None,
+                deepseek_balance: None,
             },
         )
         .unwrap();
@@ -559,6 +607,7 @@ mod tests {
                 quota: crate::quota::KimiQuota::default(),
                 fetched_at: 1_900_000_000,
                 monthly: Some(monthly),
+                deepseek_balance: None,
             },
         )
         .unwrap();
@@ -577,26 +626,46 @@ mod tests {
     #[test]
     fn add_account_default_name_and_cap() {
         let mut settings = Settings::default();
-        let a1 = settings.add_account(None).unwrap();
+        let a1 = settings.add_account(None, "kimi").unwrap();
         assert_eq!(a1.name, "账号 1");
         assert!(!a1.id.is_empty());
-        let a2 = settings.add_account(Some("  工作号  ")).unwrap();
+        assert_eq!(a1.provider, "kimi");
+        let a2 = settings.add_account(Some("  工作号  "), "kimi").unwrap();
         assert_eq!(a2.name, "工作号");
         assert_ne!(a1.id, a2.id);
         // 默认名 N = 当前数量 + 1
-        let a3 = settings.add_account(Some("")).unwrap();
+        let a3 = settings.add_account(Some(""), "kimi").unwrap();
         assert_eq!(a3.name, "账号 3");
-        settings.add_account(None).unwrap();
-        settings.add_account(None).unwrap();
+        settings.add_account(None, "kimi").unwrap();
+        settings.add_account(None, "kimi").unwrap();
         // 第 6 个超上限
-        assert!(settings.add_account(None).is_err());
+        assert!(settings.add_account(None, "kimi").is_err());
         assert_eq!(settings.accounts.len(), MAX_ACCOUNTS);
+    }
+
+    #[test]
+    fn add_account_provider_normalized_and_cap_counts_deepseek() {
+        let mut settings = Settings::default();
+        // provider 归一：仅 "deepseek" 识别为 DeepSeek，其余（含未知值）按 kimi
+        let ds = settings.add_account(Some("DS"), "deepseek").unwrap();
+        assert_eq!(ds.provider, "deepseek");
+        assert!(ds.is_deepseek());
+        let unknown = settings.add_account(Some("X"), "something-else").unwrap();
+        assert_eq!(unknown.provider, "kimi");
+        assert!(!unknown.is_deepseek());
+
+        // 上限按 Kimi + DeepSeek 合计校验：已有 2 个，再补 3 个到 5，第 6 个（deepseek）报错
+        settings.add_account(None, "kimi").unwrap();
+        settings.add_account(None, "deepseek").unwrap();
+        settings.add_account(None, "kimi").unwrap();
+        assert_eq!(settings.accounts.len(), MAX_ACCOUNTS);
+        assert!(settings.add_account(None, "deepseek").is_err());
     }
 
     #[test]
     fn rename_account_trims_and_validates() {
         let mut settings = Settings::default();
-        let a = settings.add_account(None).unwrap();
+        let a = settings.add_account(None, "kimi").unwrap();
         settings.rename_account(&a.id, "  主号 ").unwrap();
         assert_eq!(settings.account(&a.id).unwrap().name, "主号");
         assert!(settings.rename_account(&a.id, "   ").is_err());
@@ -608,9 +677,9 @@ mod tests {
     #[test]
     fn move_account_swaps_with_neighbor() {
         let mut settings = Settings::default();
-        let a = settings.add_account(Some("a")).unwrap();
-        let b = settings.add_account(Some("b")).unwrap();
-        let c = settings.add_account(Some("c")).unwrap();
+        let a = settings.add_account(Some("a"), "kimi").unwrap();
+        let b = settings.add_account(Some("b"), "kimi").unwrap();
+        let c = settings.add_account(Some("c"), "kimi").unwrap();
 
         // 上移第二位 → 与第一位交换
         assert!(settings.move_account(&b.id, -1));
@@ -633,13 +702,121 @@ mod tests {
     #[test]
     fn remove_account_returns_removed() {
         let mut settings = Settings::default();
-        let a = settings.add_account(Some("a")).unwrap();
-        let b = settings.add_account(Some("b")).unwrap();
+        let a = settings.add_account(Some("a"), "kimi").unwrap();
+        let b = settings.add_account(Some("b"), "kimi").unwrap();
         let removed = settings.remove_account(&a.id).unwrap();
         assert_eq!(removed.name, "a");
         assert!(settings.account(&a.id).is_none());
         assert_eq!(settings.accounts.len(), 1);
         assert_eq!(settings.accounts[0].id, b.id);
         assert!(settings.remove_account("no-such-id").is_none());
+    }
+
+    // ---- provider 字段（DeepSeek 账号）----
+
+    #[test]
+    fn settings_legacy_json_without_provider_loads_as_kimi() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = use_temp_config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        // 旧版设置文件的账号无 provider 字段：serde 默认读回 "kimi"，其余字段不受影响
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"accounts":[{"id":"acc-1","name":"账号 1","login_method":"api_key"}],"refresh_interval_min":10}"#,
+        )
+        .unwrap();
+
+        let settings = load_settings().unwrap();
+        assert_eq!(settings.accounts.len(), 1);
+        assert_eq!(settings.accounts[0].provider, "kimi");
+        assert!(!settings.accounts[0].is_deepseek());
+        assert_eq!(
+            settings.accounts[0].login_method.as_deref(),
+            Some("api_key")
+        );
+        assert_eq!(settings.refresh_interval_min, 10);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn deepseek_warn_threshold_default_and_clamped_on_load() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = use_temp_config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 旧版设置文件无该字段：读回默认 5 元
+        std::fs::write(dir.join("settings.json"), r#"{"refresh_interval_min":10}"#).unwrap();
+        assert_eq!(
+            load_settings().unwrap().deepseek_warn_threshold,
+            DEFAULT_DEEPSEEK_WARN_THRESHOLD
+        );
+
+        // 手改 json 越界：负数钳回 0，超大钳回上限
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"deepseek_warn_threshold":-3}"#,
+        )
+        .unwrap();
+        assert_eq!(load_settings().unwrap().deepseek_warn_threshold, 0.0);
+        std::fs::write(
+            dir.join("settings.json"),
+            r#"{"deepseek_warn_threshold":99999999}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            load_settings().unwrap().deepseek_warn_threshold,
+            MAX_DEEPSEEK_WARN_THRESHOLD
+        );
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn cache_deepseek_balance_roundtrip_and_backward_compat() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = use_temp_config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let acc = "acc-ds";
+
+        // 旧版缓存文件没有 deepseek_balance 字段：#[serde(default)] 读回 None
+        std::fs::write(
+            dir.join("cache-acc-ds.json"),
+            r#"{"quota":{},"fetched_at":1900000000}"#,
+        )
+        .unwrap();
+        let loaded = load_cache(acc).expect("旧格式缓存应能读回");
+        assert!(loaded.deepseek_balance.is_none());
+
+        // 带余额写入 → 读回一致（金额 f64，snake_case 落盘）
+        let balance = crate::deepseek::models::DeepSeekBalance {
+            is_available: true,
+            currency: "CNY".to_string(),
+            total_balance: 12.34,
+            granted_balance: 2.0,
+            topped_up_balance: 10.34,
+        };
+        save_cache(
+            acc,
+            &CachedQuota {
+                quota: crate::quota::KimiQuota::default(),
+                fetched_at: 1_900_000_000,
+                monthly: None,
+                deepseek_balance: Some(balance),
+            },
+        )
+        .unwrap();
+        let loaded = load_cache(acc).expect("应能读回缓存");
+        let b = loaded.deepseek_balance.expect("deepseek_balance 应存在");
+        assert!(b.is_available);
+        assert_eq!(b.currency, "CNY");
+        assert!((b.total_balance - 12.34).abs() < 1e-9);
+        assert!((b.granted_balance - 2.0).abs() < 1e-9);
+        assert!((b.topped_up_balance - 10.34).abs() < 1e-9);
+        let raw = std::fs::read_to_string(dir.join("cache-acc-ds.json")).unwrap();
+        assert!(raw.contains("\"deepseek_balance\""));
+        assert!(raw.contains("\"total_balance\""));
+
+        cleanup(&dir);
     }
 }

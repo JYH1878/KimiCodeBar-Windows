@@ -127,6 +127,28 @@ pub fn quota_summary(lang: Lang, quota: &KimiQuota) -> String {
     parts.join(" · ")
 }
 
+/// DeepSeek 余额摘要（托盘 tooltip 用），如 "DeepSeek 余额 ¥3.20"
+/// （英文 "DeepSeek balance ¥3.20"）；币种无符号时以币种代码前缀（"USD 3.20"）
+pub fn deepseek_summary(
+    lang: Lang,
+    balance: &kimicodebar::deepseek::models::DeepSeekBalance,
+) -> String {
+    let amount = money_text(&balance.currency, balance.total_balance);
+    match lang {
+        Lang::Zh => format!("DeepSeek 余额 {amount}"),
+        Lang::En => format!("DeepSeek balance {amount}"),
+    }
+}
+
+/// 金额格式化：CNY/USD 用符号前缀，其余币种用代码前缀；保留两位小数
+fn money_text(currency: &str, amount: f64) -> String {
+    match currency {
+        "CNY" => format!("¥{amount:.2}"),
+        "USD" => format!("${amount:.2}"),
+        other => format!("{other} {amount:.2}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,5 +250,35 @@ mod tests {
         // remaining/limit 按 {:.0} 整数格式化
         let body = reset_reminder_body(Lang::En, 29.6, 100.4, 1, "08-01 14:30");
         assert!(body.contains("30/100"));
+    }
+
+    // ---- DeepSeek 余额摘要 ----
+
+    fn deepseek_balance(
+        currency: &str,
+        total: f64,
+    ) -> kimicodebar::deepseek::models::DeepSeekBalance {
+        kimicodebar::deepseek::models::DeepSeekBalance {
+            is_available: true,
+            currency: currency.to_string(),
+            total_balance: total,
+            granted_balance: 0.0,
+            topped_up_balance: total,
+        }
+    }
+
+    #[test]
+    fn deepseek_summary_zh_and_en_formats() {
+        let b = deepseek_balance("CNY", 3.2);
+        assert_eq!(deepseek_summary(Lang::Zh, &b), "DeepSeek 余额 ¥3.20");
+        assert_eq!(deepseek_summary(Lang::En, &b), "DeepSeek balance ¥3.20");
+    }
+
+    #[test]
+    fn deepseek_summary_unknown_currency_uses_code() {
+        let b = deepseek_balance("EUR", 8.5);
+        assert!(deepseek_summary(Lang::Zh, &b).contains("EUR 8.50"));
+        let usd = deepseek_balance("USD", 8.5);
+        assert!(deepseek_summary(Lang::En, &usd).contains("$8.50"));
     }
 }

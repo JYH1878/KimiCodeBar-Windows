@@ -36,6 +36,9 @@ export interface KimiQuota {
   booster?: BoosterInfo;
 }
 
+/** 提供商：Kimi（用量监控）/ DeepSeek（开放平台余额） */
+export type AccountProvider = "kimi" | "deepseek";
+
 /** 单个账号（settings.json 的 accounts 数组元素；凭证本体不落盘在这里） */
 export interface Account {
   /** 稳定标识（uuid），keyring 槽位 / 文件名 / 命令参数都按它索引 */
@@ -44,6 +47,22 @@ export interface Account {
   name: string;
   /** 登录方式："api_key" / "oauth"；缺省表示未显式选择（优先 api_key，其次 oauth） */
   login_method?: LoginMethod | null;
+  /** 提供商；旧版设置文件无此字段，后端按 "kimi" 读回 */
+  provider: AccountProvider;
+}
+
+/** DeepSeek 余额（GET /user/balance；金额单位元） */
+export interface DeepSeekBalance {
+  /** 账户是否可用（false 面板显示不可用横幅并计为低额） */
+  is_available: boolean;
+  /** 币种（如 "CNY" / "USD"） */
+  currency: string;
+  /** 总余额（元） */
+  total_balance: number;
+  /** 其中赠金余额（元） */
+  granted_balance: number;
+  /** 其中充值余额（元） */
+  topped_up_balance: number;
 }
 
 /** 单个账号的面板快照（PanelState.accounts 的元素） */
@@ -64,6 +83,8 @@ export interface AccountPanel {
   monthly?: MonthlyInfo | null;
   /** 月度数据获取失败原因（如网页登录态过期）；成功为 null */
   monthly_error?: string | null;
+  /** DeepSeek 余额（仅 provider=deepseek 的账号有值；Kimi 账号为 null） */
+  deepseek_balance?: DeepSeekBalance | null;
 }
 
 /** 面板状态：get_panel_state / refresh_now 的返回，quota-updated 事件的 payload */
@@ -90,6 +111,8 @@ export interface AppSettings {
   low_warn_enabled: boolean;
   /** 告警阈值百分比（默认 20） */
   warn_threshold_pct: number;
+  /** DeepSeek 低余额告警阈值（元，默认 5） */
+  deepseek_warn_threshold: number;
   /** 开机自启（默认 false，保存时同步注册表） */
   autostart: boolean;
   /** 极简模式（默认 false）：开后面板只显示 7 天 / 5 小时额度条，窗口压矮 */

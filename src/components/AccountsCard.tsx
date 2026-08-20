@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { Account, CredentialStatus, LoginMethod } from "../types";
+import type { Account, AccountProvider, CredentialStatus, LoginMethod } from "../types";
 import {
   addAccount,
   deleteAccount,
@@ -42,6 +42,7 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
 
   // ---- 添加表单 ----
   const [newName, setNewName] = useState("");
+  const [newProvider, setNewProvider] = useState<AccountProvider>("kimi");
   const [newMethod, setNewMethod] = useState<LoginMethod>("api_key");
   const [newKey, setNewKey] = useState("");
   const [newWebToken, setNewWebToken] = useState("");
@@ -146,6 +147,7 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
   };
 
   /** 添加账号：建账号 → 存登录方式 → 按需存 API Key / 网页 token。
+   *  DeepSeek 账号只有 API Key 一种凭证（固定 login_method=api_key，无网页 token）。
    *  账号建好后凭证保存失败不回滚账号（列表照常刷新，错误原样展示，可在配置区补配） */
   const create = async () => {
     setCreating(true);
@@ -153,21 +155,21 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
     setAddOk(null);
     let account: Account;
     try {
-      account = await addAccount(newName.trim() === "" ? undefined : newName.trim());
-      await setAccountLoginMethod(account.id, newMethod);
+      account = await addAccount(newName.trim() === "" ? undefined : newName.trim(), newProvider);
+      await setAccountLoginMethod(account.id, newProvider === "deepseek" ? "api_key" : newMethod);
     } catch (e) {
       setAddError(String(e));
       setCreating(false);
       return;
     }
     // 方式A 且填了 Key：随创建一并保存（不填则创建后在该账号配置区再配）；
-    // 可选的月度总量 refresh_token：填了就校验保存（在线校验失败抛中文错误）
+    // 可选的月度总量 refresh_token：填了就校验保存（在线校验失败抛中文错误，仅 Kimi 账号）
     let credError: string | null = null;
     try {
-      if (newMethod === "api_key" && newKey.trim() !== "") {
+      if ((newProvider === "deepseek" || newMethod === "api_key") && newKey.trim() !== "") {
         await setApiKey(account.id, newKey.trim());
       }
-      if (newWebToken.trim() !== "") {
+      if (newProvider === "kimi" && newWebToken.trim() !== "") {
         await setWebToken(account.id, newWebToken.trim());
       }
     } catch (e) {
@@ -178,7 +180,7 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
     setNewWebToken("");
     setExpandedId(account.id);
     // OAuth 账号：连贯引导，自动发起设备码授权
-    setAutoStartOAuthFor(newMethod === "oauth" ? account.id : null);
+    setAutoStartOAuthFor(newProvider === "kimi" && newMethod === "oauth" ? account.id : null);
     await reload();
     if (credError !== null) {
       setAddError(t("accounts.createdButCredFailed", { name: account.name, error: credError }));
@@ -225,6 +227,7 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
                   ) : (
                     <span className="account-name">{a.name}</span>
                   )}
+                  {a.provider === "deepseek" && <span className="badge">DeepSeek</span>}
                   {status?.api_key_configured && <span className="badge">Key</span>}
                   {status?.oauth_configured && <span className="badge">OAuth</span>}
                   {status?.web_token_configured && <span className="badge">{t("accounts.monthlyBadge")}</span>}
@@ -280,47 +283,59 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
                   <span className={`chevron${expanded ? " open" : ""}`}>▸</span>
                 </div>
 
-                {/* 凭证配置区（该账号）：登录方式单选 + 对应配置区 + 月度总量 */}
+                {/* 凭证配置区（该账号）：Kimi = 登录方式单选 + 对应配置区 + 月度总量；
+                    DeepSeek 只有 API Key 一种凭证，直接给 Key 配置区 */}
                 {expanded && (
                   <div className="account-body">
-                    <label className={`radio-row${a.login_method !== "oauth" ? " active" : ""}`}>
-                      <input
-                        type="radio"
-                        name={`login-method-${a.id}`}
-                        checked={a.login_method !== "oauth"}
-                        onChange={() => void switchMethod(a.id, "api_key")}
-                      />
-                      <span>{t("settings.loginMethod.apiKey")}</span>
-                    </label>
-                    <label className={`radio-row${a.login_method === "oauth" ? " active" : ""}`}>
-                      <input
-                        type="radio"
-                        name={`login-method-${a.id}`}
-                        checked={a.login_method === "oauth"}
-                        onChange={() => void switchMethod(a.id, "oauth")}
-                      />
-                      <span>{t("settings.loginMethod.oauth")}</span>
-                    </label>
-                    {a.login_method === "oauth" ? (
-                      <DeviceLoginSection
-                        accountId={a.id}
-                        oauthConfigured={status?.oauth_configured ?? false}
-                        onChanged={() => void reloadStatus(a.id)}
-                        autoStart={autoStartOAuthFor === a.id}
-                      />
-                    ) : (
+                    {a.provider === "deepseek" ? (
                       <ApiKeySection
                         accountId={a.id}
+                        provider="deepseek"
                         status={status ?? null}
                         onChanged={() => void reloadStatus(a.id)}
                       />
+                    ) : (
+                      <>
+                        <label className={`radio-row${a.login_method !== "oauth" ? " active" : ""}`}>
+                          <input
+                            type="radio"
+                            name={`login-method-${a.id}`}
+                            checked={a.login_method !== "oauth"}
+                            onChange={() => void switchMethod(a.id, "api_key")}
+                          />
+                          <span>{t("settings.loginMethod.apiKey")}</span>
+                        </label>
+                        <label className={`radio-row${a.login_method === "oauth" ? " active" : ""}`}>
+                          <input
+                            type="radio"
+                            name={`login-method-${a.id}`}
+                            checked={a.login_method === "oauth"}
+                            onChange={() => void switchMethod(a.id, "oauth")}
+                          />
+                          <span>{t("settings.loginMethod.oauth")}</span>
+                        </label>
+                        {a.login_method === "oauth" ? (
+                          <DeviceLoginSection
+                            accountId={a.id}
+                            oauthConfigured={status?.oauth_configured ?? false}
+                            onChanged={() => void reloadStatus(a.id)}
+                            autoStart={autoStartOAuthFor === a.id}
+                          />
+                        ) : (
+                          <ApiKeySection
+                            accountId={a.id}
+                            status={status ?? null}
+                            onChanged={() => void reloadStatus(a.id)}
+                          />
+                        )}
+                        <WebTokenSection
+                          accountId={a.id}
+                          configured={status?.web_token_configured ?? false}
+                          onChanged={() => void reloadStatus(a.id)}
+                          bare
+                        />
+                      </>
                     )}
-                    <WebTokenSection
-                      accountId={a.id}
-                      configured={status?.web_token_configured ?? false}
-                      onChanged={() => void reloadStatus(a.id)}
-                      bare
-                    />
                   </div>
                 )}
               </div>
@@ -341,31 +356,54 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
                 />
+                {/* 提供商单选（默认 Kimi）：DeepSeek 只有 API Key，选后隐藏登录方式与网页 token */}
                 <div className="add-method-row">
-                  <label className={`radio-row${newMethod === "api_key" ? " active" : ""}`}>
+                  <label className={`radio-row${newProvider === "kimi" ? " active" : ""}`}>
                     <input
                       type="radio"
-                      name="add-login-method"
-                      checked={newMethod === "api_key"}
-                      onChange={() => setNewMethod("api_key")}
+                      name="add-provider"
+                      checked={newProvider === "kimi"}
+                      onChange={() => setNewProvider("kimi")}
                     />
-                    <span>{t("settings.loginMethod.apiKey")}</span>
+                    <span>Kimi</span>
                   </label>
-                  <label className={`radio-row${newMethod === "oauth" ? " active" : ""}`}>
+                  <label className={`radio-row${newProvider === "deepseek" ? " active" : ""}`}>
                     <input
                       type="radio"
-                      name="add-login-method"
-                      checked={newMethod === "oauth"}
-                      onChange={() => setNewMethod("oauth")}
+                      name="add-provider"
+                      checked={newProvider === "deepseek"}
+                      onChange={() => setNewProvider("deepseek")}
                     />
-                    <span>{t("settings.loginMethod.oauth")}</span>
+                    <span>DeepSeek</span>
                   </label>
                 </div>
-                {newMethod === "api_key" ? (
+                {newProvider === "kimi" && (
+                  <div className="add-method-row">
+                    <label className={`radio-row${newMethod === "api_key" ? " active" : ""}`}>
+                      <input
+                        type="radio"
+                        name="add-login-method"
+                        checked={newMethod === "api_key"}
+                        onChange={() => setNewMethod("api_key")}
+                      />
+                      <span>{t("settings.loginMethod.apiKey")}</span>
+                    </label>
+                    <label className={`radio-row${newMethod === "oauth" ? " active" : ""}`}>
+                      <input
+                        type="radio"
+                        name="add-login-method"
+                        checked={newMethod === "oauth"}
+                        onChange={() => setNewMethod("oauth")}
+                      />
+                      <span>{t("settings.loginMethod.oauth")}</span>
+                    </label>
+                  </div>
+                )}
+                {newProvider === "deepseek" || newMethod === "api_key" ? (
                   <input
                     className="input"
                     type="password"
-                    placeholder="sk-kimi-…"
+                    placeholder={newProvider === "deepseek" ? "sk-…" : "sk-kimi-…"}
                     value={newKey}
                     onChange={(e) => setNewKey(e.target.value)}
                     spellCheck={false}
@@ -374,15 +412,17 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
                 ) : (
                   <p className="hint-muted">{t("accounts.oauthHint")}</p>
                 )}
-                <textarea
-                  className="input textarea"
-                  rows={2}
-                  placeholder={t("accounts.webTokenPlaceholder")}
-                  value={newWebToken}
-                  onChange={(e) => setNewWebToken(e.target.value)}
-                  spellCheck={false}
-                  autoComplete="off"
-                />
+                {newProvider === "kimi" && (
+                  <textarea
+                    className="input textarea"
+                    rows={2}
+                    placeholder={t("accounts.webTokenPlaceholder")}
+                    value={newWebToken}
+                    onChange={(e) => setNewWebToken(e.target.value)}
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                )}
                 {addError !== null && <p className="hint-err">{addError}</p>}
                 {addOk !== null && <p className="hint-ok">{addOk}</p>}
                 <div className="row-end">

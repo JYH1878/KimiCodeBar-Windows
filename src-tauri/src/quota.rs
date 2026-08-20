@@ -195,6 +195,15 @@ pub fn needs_low_warning(quota: &KimiQuota, threshold_pct: f64) -> bool {
             .is_some_and(|t| t.percent_remaining < threshold_pct)
 }
 
+/// DeepSeek 低余额判定（仅在最近一次获取成功的前提下调用，失败账号永不低额）：
+/// 余额不可用（is_available=false）或总余额严格低于阈值（元）即低额。
+pub fn deepseek_needs_low_warning(
+    balance: &crate::deepseek::models::DeepSeekBalance,
+    threshold_yuan: f64,
+) -> bool {
+    !balance.is_available || balance.total_balance < threshold_yuan
+}
+
 /// 构造单条用量明细（移植 C# `MakeDetail`，百分比改为剩余语义）。
 fn make_detail(
     limit: Option<&str>,
@@ -278,4 +287,36 @@ fn parse_reset_time(s: Option<&str>) -> Option<DateTime<Utc>> {
 fn parse_num(s: Option<&str>) -> Option<f64> {
     s.and_then(|v| v.trim().parse::<i64>().ok())
         .map(|v| v as f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::deepseek::models::DeepSeekBalance;
+
+    use super::deepseek_needs_low_warning;
+
+    fn balance(is_available: bool, total: f64) -> DeepSeekBalance {
+        DeepSeekBalance {
+            is_available,
+            currency: "CNY".to_string(),
+            total_balance: total,
+            granted_balance: 0.0,
+            topped_up_balance: total,
+        }
+    }
+
+    #[test]
+    fn deepseek_low_when_below_threshold_or_unavailable() {
+        // 低于阈值（元）：低额
+        assert!(deepseek_needs_low_warning(&balance(true, 3.20), 5.0));
+        // 余额不可用：无论金额都低额
+        assert!(deepseek_needs_low_warning(&balance(false, 100.0), 5.0));
+    }
+
+    #[test]
+    fn deepseek_not_low_at_or_above_threshold() {
+        // 恰好等于阈值不算低额（严格小于触发，与 needs_low_warning 语义一致）
+        assert!(!deepseek_needs_low_warning(&balance(true, 5.0), 5.0));
+        assert!(!deepseek_needs_low_warning(&balance(true, 12.34), 5.0));
+    }
 }

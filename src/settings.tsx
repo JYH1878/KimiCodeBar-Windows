@@ -34,6 +34,8 @@ interface GeneralForm {
   adaptiveRefresh: boolean;
   lowWarn: boolean;
   threshold: string;
+  /** DeepSeek 低余额告警阈值（元，默认 5） */
+  deepseekThreshold: string;
   autostart: boolean;
   /** 极简模式：开后面板只显示 7 天 / 5 小时额度条（窗口压矮），默认关 */
   minimalMode: boolean;
@@ -59,6 +61,7 @@ function SettingsApp() {
     adaptiveRefresh: true,
     lowWarn: true,
     threshold: "20",
+    deepseekThreshold: "5",
     autostart: false,
     minimalMode: false,
     hotkey: "",
@@ -137,6 +140,7 @@ function SettingsApp() {
           adaptiveRefresh: s.adaptive_refresh,
           lowWarn: s.low_warn_enabled,
           threshold: String(s.warn_threshold_pct),
+          deepseekThreshold: String(s.deepseek_warn_threshold),
           autostart: s.autostart,
           minimalMode: s.minimal_mode,
           hotkey: s.hotkey ?? "",
@@ -223,16 +227,18 @@ function SettingsApp() {
     }
   };
 
-  /** 保存通用设置：数字项解析后钳制（间隔 1–60 分钟，阈值 1–99） */
+  /** 保存通用设置：数字项解析后钳制（间隔 1–60 分钟，阈值 1–99，DeepSeek 阈值 0–100000 元） */
   const saveGeneral = async () => {
     if (settings === null) return;
     const refreshMin = Math.min(60, Math.max(1, Math.floor(Number(form.refreshMin)) || 5));
     const threshold = Math.min(99, Math.max(1, Math.floor(Number(form.threshold)) || 20));
+    const deepseekThreshold = Math.min(100000, Math.max(0, Number(form.deepseekThreshold) || 5));
     const next: AppSettings = {
       refresh_interval_min: refreshMin,
       adaptive_refresh: form.adaptiveRefresh,
       low_warn_enabled: form.lowWarn,
       warn_threshold_pct: threshold,
+      deepseek_warn_threshold: deepseekThreshold,
       autostart: form.autostart,
       minimal_mode: form.minimalMode,
       // 热键 trim 后提交，空串→null 禁用；后端保存时重新注册，冲突会抛中文错误
@@ -251,7 +257,12 @@ function SettingsApp() {
       await saveSettings(next);
       setSettings(next);
       // 回显钳制后的实际值
-      setForm((f) => ({ ...f, refreshMin: String(refreshMin), threshold: String(threshold) }));
+      setForm((f) => ({
+        ...f,
+        refreshMin: String(refreshMin),
+        threshold: String(threshold),
+        deepseekThreshold: String(deepseekThreshold),
+      }));
       setGeneralSaved(true);
       if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
       savedTimerRef.current = setTimeout(() => setGeneralSaved(false), 2000);
@@ -420,6 +431,19 @@ function SettingsApp() {
                 step={1}
                 value={form.threshold}
                 onChange={(e) => setForm((f) => ({ ...f, threshold: e.target.value }))}
+              />
+            </div>
+            <div className="form-row">
+              <label htmlFor="deepseek-warn-threshold">{t("settings.general.deepseekWarnThreshold")}</label>
+              <input
+                id="deepseek-warn-threshold"
+                className="input num-input"
+                type="number"
+                min={0}
+                max={100000}
+                step={0.01}
+                value={form.deepseekThreshold}
+                onChange={(e) => setForm((f) => ({ ...f, deepseekThreshold: e.target.value }))}
               />
             </div>
             <div className="form-row">
