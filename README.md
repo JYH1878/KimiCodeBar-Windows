@@ -26,6 +26,7 @@ Kimi Code 用量监控的 Windows 系统托盘工具。常驻托盘不打扰，�
 - **用量趋势**：近 24 小时双线折线图（7 天/5 小时），本地记录 7 天历史，纯事实不预测
 - **会员与钱包**：显示会员档位（Andante / Moderato / Allegretto / Allegro）与加油包（Booster）钱包余额、月度用量
 - **多账号**：最多 5 个账号，面板左右翻页（像手机桌面）一页一个账号；滚轮 / 拖拽 / 点圆点翻页，末尾「+」快捷添加，设置页集中管理（改名 / 排序 / 删除）。旧版单账号数据自动迁移为「账号 1」，升级无感
+- **DeepSeek 余额**：DeepSeek 开放平台账号可作为新账号类型加入（与 Kimi 账号合计最多 5 个）——填开放平台 API Key 后，面板独立一页显示总余额 / 赠金 / 充值分项 / 币种 / 账户状态；余额低于阈值（默认 ¥5，可调）或账户不可用时同样触发红色告警
 - **双模式登录**
   - **方式A · API Key**：手动输入 `sk-kimi-` 前缀的 Key，存入 Windows 凭据管理器
   - **方式B · 账号授权**：OAuth 设备码流程（与 Kimi Code CLI 相同），浏览器一键授权，自动续期
@@ -109,7 +110,7 @@ Kimi Code 的按量付费钱包：订阅额度用完后，可用预存余额继�
 
 **我的数据会被上传到别处吗？**
 
-不会。所有凭证与配置仅存本机（API Key 在 Windows 凭据管理器，其余在 `%APPDATA%\KimiCodeBar\`）。网络请求只发往：`api.kimi.com`（用量）、`auth.kimi.com`（授权）、`api.github.com`（更新检查）。
+不会。所有凭证与配置仅存本机（API Key 在 Windows 凭据管理器，其余在 `%APPDATA%\KimiCodeBar\`）。网络请求只发往：`api.kimi.com`（用量）、`auth.kimi.com`（授权）、`api.deepseek.com`（DeepSeek 余额，仅当配置了 DeepSeek 账号）、`api.github.com`（更新检查）。
 
 ## 从源码构建
 
