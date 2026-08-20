@@ -46,7 +46,7 @@ function AccountPage({
   panel: AccountPanel;
   /** 该账号的历史采样点；null = 尚未加载 */
   history: HistoryPoint[] | null;
-  /** 本地 token 统计（机器级数据，各页同一份） */
+  /** 该账号的本地 token 统计（按 CLI 凭证归属）；null = 尚未加载 */
   localUsage: LocalUsageStats | null;
   /** 极简模式：隐藏月度/趋势/本地统计/会员/Booster 等卡片 */
   minimal: boolean;
@@ -87,6 +87,8 @@ function AccountPage({
             {balance !== null && (
               <DeepSeekBalanceCard balance={balance} fetchedAt={panel.fetched_at} low={panel.low_warning} />
             )}
+            {/* 本地 Token 消耗按账号归属，DeepSeek 页同样显示（极简模式隐藏） */}
+            {!minimal && <LocalUsageCard stats={localUsage} />}
           </>
         )
       ) : quota === null && panel.error === null ? (
@@ -108,7 +110,7 @@ function AccountPage({
               {panel.monthly_error && <p className="monthly-error">{panel.monthly_error}</p>}
               {/* 用量趋势（该账号的本地历史采样，纯事实不预测） */}
               <TrendCard points={history} />
-              {/* 本地 Token 消耗（扫描 wire.jsonl）：机器级数据，每页显示同一份；
+              {/* 本地 Token 消耗（扫描 wire.jsonl 按 CLI 凭证归属）：该账号自己的数据；
                   未扫描过（last_scan_at 为空）时整卡不渲染 */}
               <LocalUsageCard stats={localUsage} />
               {quota?.total && (
@@ -148,8 +150,8 @@ function PanelApp() {
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
   // 各账号的历史采样点（趋势卡用，按账号 id 索引）；未加载的账号缺 key
   const [historyMap, setHistoryMap] = useState<Record<string, HistoryPoint[]>>({});
-  // 本地 token 消耗统计（本地统计卡用）；null = 尚未加载
-  const [localUsage, setLocalUsage] = useState<LocalUsageStats | null>(null);
+  // 各账号的本地 token 消耗统计（本地统计卡用，按账号 id 索引）；未加载的账号缺 key
+  const [localUsageMap, setLocalUsageMap] = useState<Record<string, LocalUsageStats>>({});
   // 预设背景 id（纯 CSS 渐变 class）；null = 未选预设
   const [bgPreset, setBgPreset] = useState<string | null>(null);
   // 极简模式（settings-changed 即时切换）：只显示 7 天 / 5 小时额度条
@@ -274,6 +276,13 @@ function PanelApp() {
       .catch(() => {});
   }, []);
 
+  /** 拉取某账号的本地 token 统计（失败静默，保留旧数据） */
+  const fetchLocalUsage = useCallback((accountId: string) => {
+    getLocalUsage(accountId)
+      .then((u) => setLocalUsageMap((m) => ({ ...m, [accountId]: u })))
+      .catch(() => {});
+  }, []);
+
   // 手动刷新：成功用返回值整体替换；失败把错误写进当前页横幅，保留已有缓存
   const doRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -312,20 +321,14 @@ function PanelApp() {
     // 订阅后端主动推送（定时刷新完成后广播的 quota-updated）
     const unlisten = onQuotaUpdated((s) => {
       setState(s);
-      // 每次刷新成功后历史采样会增长，同步重拉当前页账号的趋势（失败静默，保留旧曲线）
+      // 每次刷新成功后历史采样会增长、本地统计可能有新扫描结果：
+      // 同步重拉当前页账号的趋势与本地统计（失败静默，保留旧数据）
       const cur = s.accounts[pageRef.current];
-      if (cur !== undefined) fetchHistory(cur.account.id);
-      // 本地 token 统计也随之可能有新扫描结果，同步重拉（失败静默）
-      getLocalUsage()
-        .then((u) => setLocalUsage(u))
-        .catch(() => {});
+      if (cur !== undefined) {
+        fetchHistory(cur.account.id);
+        fetchLocalUsage(cur.account.id);
+      }
     });
-    // 与首屏状态并行拉一次本地 token 统计（失败静默，卡片不渲染）
-    getLocalUsage()
-      .then((u) => {
-        if (alive) setLocalUsage(u);
-      })
-      .catch(() => {});
     // 与首屏状态并行检查一次更新；失败（含 error 字段）静默，不打扰用户
     checkUpdate()
       .then((info) => {
@@ -343,7 +346,7 @@ function PanelApp() {
       unlistenUpdate();
       clearInterval(timer);
     };
-  }, [doRefresh, fetchHistory]);
+  }, [doRefresh, fetchHistory, fetchLocalUsage]);
 
   // 翻页后按需补拉该账号的历史采样（还没拉过的话）
   useEffect(() => {
@@ -352,6 +355,14 @@ function PanelApp() {
       fetchHistory(cur.account.id);
     }
   }, [page, accounts, historyMap, fetchHistory]);
+
+  // 翻页后按需补拉该账号的本地 token 统计（还没拉过的话）
+  useEffect(() => {
+    const cur = accounts[page];
+    if (cur !== undefined && localUsageMap[cur.account.id] === undefined) {
+      fetchLocalUsage(cur.account.id);
+    }
+  }, [page, accounts, localUsageMap, fetchLocalUsage]);
 
   // 背景：预设为纯 CSS 渐变 class（底色干净，不压遮罩）；自定义图压固定浓度遮罩。预设优先于图片
   const bgStyle =
@@ -407,7 +418,7 @@ function PanelApp() {
               key={a.account.id}
               panel={a}
               history={historyMap[a.account.id] ?? null}
-              localUsage={localUsage}
+              localUsage={localUsageMap[a.account.id] ?? null}
               minimal={minimal}
               onRetry={() => void doRefresh()}
               onOpenSettings={() => void openSettings()}

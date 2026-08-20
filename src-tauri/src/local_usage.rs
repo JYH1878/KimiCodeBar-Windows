@@ -1,7 +1,8 @@
 //! 本地 Token 消耗统计：增量扫描 Kimi Code 会话的 wire.jsonl 用量事件，
 //! 聚合为今日/昨日/最近 7 天/分模型累计（语义移植自 macOS 版 KimiLocalUsage.swift）。
 //!
-//! 数据源：`{userprofile}/.kimi-code/sessions/**/wire.jsonl`（递归遍历），逐行 JSON，
+//! 数据源：枚举全部 CLI home（默认 `{userprofile}/.kimi-code` + glob `.kimi-code-*`，
+//! 见 cli_homes），递归遍历各 home 的 `sessions/**/wire.jsonl`，逐行 JSON，
 //! 只认 `{"type":"usage.record",...}` 事件，实测样例：
 //! `{"type":"usage.record","model":"kimi-code/k3","usage":{"inputOther":11592,"output":504,"inputCacheRead":11264,"inputCacheCreation":0},"usageScope":"turn","time":1784973672311}`
 //! （time 为 epoch 毫秒；tokens = inputOther + output + inputCacheRead + inputCacheCreation；
@@ -15,17 +16,34 @@
 //! `[secondary_model].model`；折叠只在展示层做、不落盘——scan-state.json 保留原始哨兵桶，
 //! 用户改配 secondary 后下次扫描自动按新映射显示；两处都解析不到时保留原样展示。
 //!
-//! 增量扫描：`{config_dir}/scan-state.json` 记录每个文件的已读字节偏移与累计聚合，
+//! 增量扫描：`{config_dir}/scan-state.json` 记录每个文件的已读字节偏移与分账号累计聚合，
 //! 每次只读各文件偏移之后的新字节；文件被截断/重写（长度 < 偏移）回退为从头读。
 //! 状态全量原子写（临时文件 + rename，与 storage.rs 同款）。
-//! 扫描节流：进程内缓存结果，距上次扫描 < 180 秒直接返回缓存。
+//! 扫描节流：进程内缓存结果（ScanView），距上次扫描 < 180 秒直接返回缓存。
+//!
+//! 分账号归属：每次增量扫描按 home 各快照一次 CLI 凭证（snapshot_attribution(home)），
+//! 该 home 的新事件按自己 home 的快照归入对应桶
+//! （键 = 账号 id；比对全不中的进 "unassigned" 未归属桶，不做任何 UI 展示）：
+//! - 模型路由：先查该 home config.toml 的 [models] 表拿 provider（含 "kimi" → Kimi 路由，
+//!   覆盖 "managed:kimi-code"；"deepseek" 开头 → DeepSeek；dashscope 等第三方 → 未归属）；
+//!   查不到按前缀兜底——deepseek 开头 → DeepSeek，其余 → Kimi；
+//! - Kimi 路由：该 home 的 kimi api_key 与各 Kimi 账号 load_api_key 精确相等 → 归该账号；
+//!   否则解该 home OAuth access_token（JWT）的 user_id（缺失退 sub）与各账号 OAuth token 的
+//!   user_id 比对，相等 → 归该账号；都不中 → 未归属；
+//! - DeepSeek 路由：CLI 的 deepseek api_key 与各 DeepSeek 账号 load_api_key 精确相等 →
+//!   归该账号，否则未归属；
+//! - 归属判定时机 = 扫描时快照：扫描 ≤3 分钟一轮，换号存在对应误差窗（拍板接受，
+//!   不保证逐条精确）；JWT 只解 payload 不验签、不联网；
+//! - CLI 与各账号的 key / user_id 只在内存比对，绝不落盘进 scan-state.json。
 //!
 //! 与 macOS 原版的已知差异（原版仓库不在本机，按钉死的契约语义实现）：
 //! - daily 固定输出最近 7 个自然日（无消耗的日子补 0），保证前端折线图逐日连续；
 //! - 按日×模型的累计聚合随偏移一起持久化在 scan-state.json：
 //!   增量读取下"今日分模型 by_model"必须靠落盘的按日×模型累计值，否则每次都得全量重读；
 //!   by_model 语义为今日（与卡片主体"今日/近 7 天"一致），不是全部时间累计；
-//! - 旧版状态（只有按日总和、没有按日×模型）在下次扫描时检测并全量重扫一次完成迁移；
+//! - 旧版状态（机器级 totals 合计、无 buckets 键）下次扫描时整体丢弃：清空聚合 +
+//!   全部文件偏移归零全量重扫（拍板：旧合计不做任何保留）；
+//! - 已删账号的桶不主动清，30 天保留窗口自然衰减；
 //! - 文件截断回退为整文件重读，该文件的旧贡献理论上可能重复计数一次
 //!   （会话文件按 uuid 命名、只增不改，实际不会触发）；
 //! - 已消失文件的偏移会被清理，同名新文件从头读，不会按旧偏移跳过开头。
@@ -67,7 +85,7 @@ pub struct ModelUsage {
     pub tokens: u64,
 }
 
-/// 本地 token 消耗统计（get_local_usage 的返回，与 types.ts LocalUsageStats 一一对应）
+/// 单账号的本地 token 消耗统计（get_local_usage 的返回，与 types.ts LocalUsageStats 一一对应）
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct LocalUsageStats {
     /// 今日总消耗
@@ -80,40 +98,85 @@ pub struct LocalUsageStats {
     pub by_model: Vec<ModelUsage>,
     /// 上次扫描时间（epoch 秒），未扫过为 null
     pub last_scan_at: Option<i64>,
-    /// 最近一次 usage.record 事件时间（epoch 毫秒），从未扫到为 null；
-    /// 自适应刷新的活跃判定依据（polling.rs）
+    /// 该账号最近一次 usage.record 事件时间（epoch 毫秒），从未扫到为 null；
+    /// 机器级活跃判定位在 ScanView.machine_last_event_at
     pub last_event_at: Option<i64>,
 }
 
+/// 扫描结果视图（scan 的返回）：机器级最近事件时间 + 各桶统计。
+/// by_account 的键 = 账号 id 或未归属桶 UNASSIGNED_BUCKET（UI 只按账号 id 取，
+/// 未归属数字不出现在任何页面）
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ScanView {
+    /// 全部桶（含未归属）最近 usage.record 事件时间的 max（epoch 毫秒）；
+    /// 机器级语义，自适应刷新的活跃判定依据（polling.rs），与旧版机器级 last_event_at 等价
+    pub machine_last_event_at: Option<i64>,
+    /// 桶键（账号 id / 未归属）→ 该桶的统计视图
+    pub by_account: HashMap<String, LocalUsageStats>,
+    /// 上次扫描时间（epoch 秒），未扫过为 null
+    pub last_scan_at: Option<i64>,
+    /// 无桶账号的空统计模板：daily 补全最近 7 天零值、last_scan_at 照填（诚实零）
+    pub empty: LocalUsageStats,
+}
+
+impl ScanView {
+    /// 取某账号的统计：无桶（该账号从未归属到消耗）给空统计模板（7 天零值，last_scan_at 照填）
+    pub fn for_account(&self, account_id: &str) -> LocalUsageStats {
+        self.by_account
+            .get(account_id)
+            .cloned()
+            .unwrap_or_else(|| self.empty.clone())
+    }
+}
+
 /// 进程内结果缓存（节流用）：上次扫描完成时刻（epoch 秒）+ 结果
-static SCAN_CACHE: Mutex<Option<(i64, LocalUsageStats)>> = Mutex::new(None);
+static SCAN_CACHE: Mutex<Option<(i64, ScanView)>> = Mutex::new(None);
 
 /// 扫描一次本地用量：距上次 < 180 秒返回进程内缓存，否则增量扫描并落盘状态。
-/// 永不失败：sessions 目录不存在、单文件读失败、状态写失败均容忍为（部分）空结果
-/// —— 与 history 一致，统计是派生数据，丢了重扫即可。
-pub fn scan() -> LocalUsageStats {
+/// 永不失败：sessions 目录不存在、单文件读失败、状态写失败、凭证快照读取失败
+/// 均容忍为（部分）空结果 —— 与 history 一致，统计是派生数据，丢了重扫即可。
+pub fn scan() -> ScanView {
     let now = chrono::Local::now();
     let now_secs = now.timestamp();
     {
         let cache = SCAN_CACHE.lock().unwrap();
-        if let Some((scanned_at, stats)) = &*cache {
+        if let Some((scanned_at, view)) = &*cache {
             if now_secs - *scanned_at < THROTTLE_SECS {
-                return stats.clone();
+                return view.clone();
             }
         }
     }
-    let mut stats = scan_with(
-        &sessions_dir().unwrap_or_default(),
-        &state_file_path(),
-        now.timestamp_millis(),
-        &chrono::Local,
-    );
-    // __secondary__ 桶并入真实副模型（展示层折叠，不落盘；解析不到保留原样）
+    let view = scan_fresh(now.timestamp_millis(), &chrono::Local);
+    *SCAN_CACHE.lock().unwrap() = Some((now_secs, view.clone()));
+    view
+}
+
+/// 不节流的完整扫描（scan 去掉进程内缓存的部分，测试可直接驱动）：
+/// 枚举全部 CLI home → 每个 home 用自己的凭证快照 → 逐 home 增量扫描。
+/// home 枚举失败（取不到用户目录）容忍为空目标，按空结果扫描
+fn scan_fresh<Tz: TimeZone>(now_ms: i64, tz: &Tz) -> ScanView
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let targets: Vec<(PathBuf, Attribution)> = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(|root| cli_homes(Path::new(&root)))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|home| {
+            // 该 home 的事件用该 home 的快照归属（凭证三处全在该 home 内）
+            let attribution = snapshot_attribution(&home);
+            (home.join("sessions"), attribution)
+        })
+        .collect();
+    let mut view = scan_with(&targets, &state_file_path(), now_ms, tz);
+    // __secondary__ 桶并入真实副模型（展示层折叠，不落盘；解析不到保留原样）：逐桶折叠
     if let Some(target) = resolve_secondary_model() {
-        fold_secondary_model(&mut stats.by_model, &target);
+        for stats in view.by_account.values_mut() {
+            fold_secondary_model(&mut stats.by_model, &target);
+        }
     }
-    *SCAN_CACHE.lock().unwrap() = Some((now_secs, stats.clone()));
-    stats
+    view
 }
 
 /// 导出用量报告：每个账号的历史采样各写一个 CSV 到 `{config_dir}/exports/`
@@ -329,7 +392,7 @@ fn fold_secondary_model(by_model: &mut Vec<ModelUsage>, target: &str) {
     by_model.truncate(TOP_MODELS);
 }
 
-/// 扫描状态（scan-state.json）：文件偏移 + 累计聚合。损坏/不存在容忍为空状态重新全扫
+/// 扫描状态（scan-state.json）：文件偏移 + 分桶累计聚合。损坏/不存在容忍为空状态重新全扫
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ScanState {
     /// 上次完成扫描时间（epoch 秒）
@@ -338,9 +401,193 @@ struct ScanState {
     /// 文件路径 → 已读字节偏移
     #[serde(default)]
     files: HashMap<String, u64>,
-    /// 累计聚合（增量读取下全时间统计的来源）
+    /// 分桶累计聚合：键 = 账号 id，未归属桶键为 UNASSIGNED_BUCKET
+    /// （增量读取下全时间统计的来源；旧版机器级 totals 合计见 load_state 的迁移）
     #[serde(default)]
-    totals: UsageAggregator,
+    buckets: HashMap<String, UsageAggregator>,
+}
+
+// ---------------------------------------------------------------------------
+// 分账号归属（纯函数 + 凭证快照入参化，可直接单测；快照实现见 snapshot_attribution）
+// ---------------------------------------------------------------------------
+
+/// 未归属桶的键：凭证比对全不中 / 第三方路由的事件进此桶，不做任何 UI 展示
+const UNASSIGNED_BUCKET: &str = "unassigned";
+
+/// 归属路由（模型 → 哪条凭证比对通道）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Route {
+    Kimi,
+    DeepSeek,
+    /// 第三方 provider（dashscope 等）：直接未归属，不比凭证
+    Unassigned,
+}
+
+/// CLI 侧凭证快照（每次增量扫描开头读一次，本批新事件统一按它归属）。
+/// 只在内存参与比对，绝不落盘进 scan-state.json
+#[derive(Debug, Default, Clone, PartialEq)]
+struct CliCredentials {
+    /// config.toml [providers."managed:kimi-code"] 的 api_key（空白按未配置）
+    kimi_api_key: Option<String>,
+    /// credentials/kimi-code.json 的 access_token（JWT）解出的 user_id（缺失退 sub；过期也能解）
+    kimi_user_id: Option<String>,
+    /// config.toml [providers.deepseek] 的 api_key（空白按未配置）
+    deepseek_api_key: Option<String>,
+}
+
+/// 账号侧凭证快照（比对用，只在内存）
+#[derive(Debug, Default, Clone, PartialEq)]
+struct AccountCreds {
+    /// creds::load_api_key（空白按未配置）
+    api_key: Option<String>,
+    /// OAuth access_token（JWT）解出的 user_id（仅 Kimi 账号有意义）
+    user_id: Option<String>,
+}
+
+/// 一次扫描的归属上下文：CLI 凭证快照 + 各账号凭证快照 + 模型路由表
+#[derive(Debug, Default, Clone)]
+struct Attribution {
+    cli: CliCredentials,
+    /// (账号 id, 凭证)，Kimi 账号
+    kimi_accounts: Vec<(String, AccountCreds)>,
+    /// (账号 id, 凭证)，DeepSeek 账号
+    deepseek_accounts: Vec<(String, AccountCreds)>,
+    /// config.toml [models] 表：模型名 → provider（如 "managed:kimi-code" / "deepseek" / "dashscope"）
+    model_providers: HashMap<String, String>,
+}
+
+/// JWT payload 的 user_id（缺失退 sub）：取第二段 base64url（无填充）解 JSON。
+/// 不验签、不联网；任何一步失败（段数不够 / 解码失败 / 非 JSON / 字段缺失或非字符串）按 None 容忍
+fn jwt_user_id(token: &str) -> Option<String> {
+    use base64::Engine;
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let value: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    ["user_id", "sub"]
+        .iter()
+        .find_map(|key| value.get(key)?.as_str().map(str::to_string))
+}
+
+/// 模型路由：先查 [models] 表拿 provider——含 "kimi" → Kimi 路由（覆盖 "managed:kimi-code"），
+/// "deepseek" 开头 → DeepSeek，其余第三方（dashscope 等）→ 未归属；
+/// 查不到按前缀兜底——deepseek 开头 → DeepSeek，其余 → Kimi
+fn route_model(model: &str, attribution: &Attribution) -> Route {
+    match attribution.model_providers.get(model) {
+        Some(provider) if provider.contains("kimi") => Route::Kimi,
+        Some(provider) if provider.starts_with("deepseek") => Route::DeepSeek,
+        Some(_) => Route::Unassigned,
+        None if model.starts_with("deepseek") => Route::DeepSeek,
+        None => Route::Kimi,
+    }
+}
+
+/// 单条事件的归属桶键：按路由把 CLI 快照与各账号凭证做精确比对，全不中 → 未归属。
+/// kimi 侧 api_key 先比、OAuth user_id 后比（都是精确匹配，顺序无副作用）
+fn attribute(model: &str, attribution: &Attribution) -> String {
+    match route_model(model, attribution) {
+        Route::Kimi => {
+            if let Some(key) = &attribution.cli.kimi_api_key {
+                if let Some((id, _)) = attribution
+                    .kimi_accounts
+                    .iter()
+                    .find(|(_, creds)| creds.api_key.as_deref() == Some(key))
+                {
+                    return id.clone();
+                }
+            }
+            if let Some(user_id) = &attribution.cli.kimi_user_id {
+                if let Some((id, _)) = attribution
+                    .kimi_accounts
+                    .iter()
+                    .find(|(_, creds)| creds.user_id.as_deref() == Some(user_id))
+                {
+                    return id.clone();
+                }
+            }
+            UNASSIGNED_BUCKET.to_string()
+        }
+        Route::DeepSeek => {
+            if let Some(key) = &attribution.cli.deepseek_api_key {
+                if let Some((id, _)) = attribution
+                    .deepseek_accounts
+                    .iter()
+                    .find(|(_, creds)| creds.api_key.as_deref() == Some(key))
+                {
+                    return id.clone();
+                }
+            }
+            UNASSIGNED_BUCKET.to_string()
+        }
+        Route::Unassigned => UNASSIGNED_BUCKET.to_string(),
+    }
+}
+
+/// 归属上下文快照：指定 CLI home 的凭证三处（该 home 的 config.toml 的 kimi/deepseek
+/// api_key 与 [models] 路由表、credentials/kimi-code.json 的 OAuth user_id）+ 各账号凭证
+/// （keyring api_key / OAuth user_id，与 home 无关，逐 home 快照时每次重读）。
+/// 所有读取失败（文件缺失/损坏、keyring 错误、凭证未配置）一律容忍为空——扫描永不失败；
+/// 某 home 快照为空时该 home 的事件全部进未归属桶，机器级活跃判定不受影响
+fn snapshot_attribution(home: &Path) -> Attribution {
+    let mut attribution = Attribution::default();
+    if let Ok(text) = std::fs::read_to_string(home.join("config.toml")) {
+        if let Ok(doc) = text.parse::<toml::Table>() {
+            let provider_key = |name: &str| {
+                doc.get("providers")?
+                    .get(name)?
+                    .get("api_key")?
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            };
+            attribution.cli.kimi_api_key = provider_key("managed:kimi-code");
+            attribution.cli.deepseek_api_key = provider_key("deepseek");
+            if let Some(models) = doc.get("models").and_then(|m| m.as_table()) {
+                for (name, def) in models {
+                    if let Some(provider) = def.get("provider").and_then(|p| p.as_str()) {
+                        attribution
+                            .model_providers
+                            .insert(name.clone(), provider.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(text) = std::fs::read_to_string(home.join("credentials").join("kimi-code.json")) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+            attribution.cli.kimi_user_id = json
+                .get("access_token")
+                .and_then(|t| t.as_str())
+                .and_then(jwt_user_id);
+        }
+    }
+    for account in &crate::storage::load_settings().unwrap_or_default().accounts {
+        let api_key = crate::creds::load_api_key(&account.id)
+            .ok()
+            .flatten()
+            .map(|k| k.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if account.is_deepseek() {
+            attribution.deepseek_accounts.push((
+                account.id.clone(),
+                AccountCreds {
+                    api_key,
+                    user_id: None,
+                },
+            ));
+        } else {
+            let user_id = crate::kimi::oauth::load_credentials(&account.id)
+                .ok()
+                .flatten()
+                .and_then(|creds| jwt_user_id(&creds.access_token));
+            attribution
+                .kimi_accounts
+                .push((account.id.clone(), AccountCreds { api_key, user_id }));
+        }
+    }
+    attribution
 }
 
 /// 从 offset 续读文件新增字节中的完整行，返回 (完整行, 新偏移)。
@@ -386,55 +633,57 @@ fn collect_wire_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// 增量扫描实现（目录/时间/时区全部入参化，测试可复现跨天边界）：
-/// 读状态 → 续读各文件新行 → 喂聚合 → 落盘状态 → 出统计视图
+/// 增量扫描实现（扫描目标/时间/时区全部入参化，测试可复现跨天边界与归属分支）：
+/// 扫描目标 = 各 CLI home 的 sessions 目录配对各自的归属快照。
+/// 读状态 → 逐目标续读新行 → 逐条按该 home 的快照归属到桶喂聚合 → 落盘状态 → 出扫描视图。
+/// 多 home 共用一份 scan-state 不需要迁移：现有桶保留（本来就是默认 home 的真实消耗），
+/// 新 home 的文件无偏移记录自动从 0 全扫；files 键是全路径，home 之间不冲突
 fn scan_with<Tz: TimeZone>(
-    sessions_dir: &Path,
+    scan_targets: &[(PathBuf, Attribution)],
     state_path: &Path,
     now_ms: i64,
     tz: &Tz,
-) -> LocalUsageStats
+) -> ScanView
 where
     Tz::Offset: std::fmt::Display,
 {
     // 时间戳溢出（实际不可能）按空结果容忍，与全模块的派生数据哲学一致
     let Some(now_dt) = tz.timestamp_millis_opt(now_ms).single() else {
-        return LocalUsageStats::default();
+        return ScanView::default();
     };
     let today = now_dt.date_naive();
 
     let mut state = load_state(state_path);
-    state.totals.prune(today);
-
-    // 迁移旧版状态：占比改按日×模型之前，scan-state 只有按日总和（by_date）没有
-    // 按日×模型。检测到旧格式时清空累计并强制全量重读，重建 by_date_model——
-    // 否则升级当天"今日分模型"会一直空着直到产生新消耗，与今日总量对不上。
-    // 已消失会话文件的旧贡献在重扫中不可恢复（派生数据，丢了重扫即可，与模块哲学一致）。
-    if state.totals.by_date_model.is_empty() && !state.totals.by_date.is_empty() {
-        state.totals.by_date.clear();
-        state.files.values_mut().for_each(|offset| *offset = 0);
+    for aggregator in state.buckets.values_mut() {
+        aggregator.prune(today);
     }
 
-    let mut files = Vec::new();
-    collect_wire_files(sessions_dir, &mut files);
-    // 排序保证处理顺序确定（状态落盘内容可复现）
-    files.sort();
+    // 逐 home 收集 wire 文件，文件带着所属 home 的归属快照走（该 home 的事件按它归属）
+    let mut files: Vec<(PathBuf, &Attribution)> = Vec::new();
+    for (sessions_dir, attribution) in scan_targets {
+        let mut home_files = Vec::new();
+        collect_wire_files(sessions_dir, &mut home_files);
+        // 排序保证处理顺序确定（状态落盘内容可复现）
+        home_files.sort();
+        files.extend(home_files.into_iter().map(|file| (file, attribution)));
+    }
 
     // 已消失的文件清掉偏移：同名新文件会从头读，不会按旧偏移跳过开头
     let disk_paths: HashSet<String> = files
         .iter()
-        .map(|f| f.to_string_lossy().into_owned())
+        .map(|(file, _)| file.to_string_lossy().into_owned())
         .collect();
     state.files.retain(|p, _| disk_paths.contains(p));
 
-    for path in &files {
+    for (path, attribution) in &files {
         let key = path.to_string_lossy().into_owned();
         let offset = state.files.get(&key).copied().unwrap_or(0);
         match read_new_lines(path, offset) {
             Ok((lines, new_offset)) => {
                 for line in &lines {
                     if let Some(event) = parse_usage_line(line) {
-                        state.totals.add(&event, tz);
+                        let bucket = attribute(&event.model, attribution);
+                        state.buckets.entry(bucket).or_default().add(&event, tz);
                     }
                 }
                 state.files.insert(key, new_offset);
@@ -447,16 +696,42 @@ where
     state.last_scan_at = Some(now_dt.timestamp());
     // 状态只是增量加速用，写失败退化为下次全扫，不影响本次结果
     let _ = save_state(state_path, &state);
-    state.totals.finish(today, state.last_scan_at)
+
+    // 机器级最近事件时间 = 全部桶（含未归属）的 max（polling 活跃判定语义不变）
+    let machine_last_event_at = state
+        .buckets
+        .values()
+        .filter_map(|agg| agg.last_event_at)
+        .max();
+    let by_account = state
+        .buckets
+        .iter()
+        .map(|(key, agg)| (key.clone(), agg.finish(today, state.last_scan_at)))
+        .collect();
+    ScanView {
+        machine_last_event_at,
+        by_account,
+        last_scan_at: state.last_scan_at,
+        // 空聚合器出 7 天零值模板：无桶账号页显示诚实零（daily 逐日连续契约不破）
+        empty: UsageAggregator::default().finish(today, state.last_scan_at),
+    }
 }
 
+/// 读扫描状态：文件不存在/损坏 → 空状态（等价首次全扫）。
+/// 旧版状态（机器级 totals 合计、无 buckets 键）整体丢弃：返回空状态即
+/// 「清空聚合 + 全部文件偏移归零」，本次扫描全量重读重建分桶（拍板：旧合计不做任何保留）
 fn load_state(path: &Path) -> ScanState {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        // 不存在/读失败：空状态，等价于首次全扫
         Err(_) => return ScanState::default(),
     };
-    serde_json::from_str(&text).unwrap_or_default()
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return ScanState::default();
+    };
+    if value.get("buckets").is_none() {
+        return ScanState::default();
+    }
+    serde_json::from_value(value).unwrap_or_default()
 }
 
 /// 原子写 scan-state.json（临时文件 + rename；先删目标再 rename，与 storage::save_json 同款）
@@ -473,9 +748,10 @@ fn save_state(path: &Path, state: &ScanState) -> Result<(), String> {
 }
 
 /// 解析 __secondary__ 对应的真实模型别名：环境变量 KIMI_SECONDARY_MODEL（非空）优先，
-/// 其次 `{home}/.kimi-code/config.toml` 的 `[secondary_model].model`（优先级与 CLI 一致）。
+/// 其次**默认 home** `{home}/.kimi-code/config.toml` 的 `[secondary_model].model`
+/// （优先级与 CLI 一致；拍板：多 home 各配不同副模型的场景不处理，只看默认 home）。
 /// 两处都取不到（未开实验 / 配置缺失 / 文件损坏）为 None，哨兵桶原样展示。
-/// home 规则与 sessions_dir 一致（USERPROFILE → HOME）；配置里其余字段（api_key 等）
+/// home 规则与 cli_homes 一致（USERPROFILE → HOME）；配置里其余字段（api_key 等）
 /// 只在内存中解析，不读用不落盘
 fn resolve_secondary_model() -> Option<String> {
     if let Ok(value) = std::env::var("KIMI_SECONDARY_MODEL") {
@@ -494,12 +770,42 @@ fn resolve_secondary_model() -> Option<String> {
         .map(str::to_string)
 }
 
-/// 会话根目录：{userprofile}/.kimi-code/sessions（Kimi Code CLI 的会话落盘位置）；
-/// 取不到用户目录为 None（scan 按空目录处理）
-fn sessions_dir() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(|home| PathBuf::from(home).join(".kimi-code").join("sessions"))
+/// 枚举本机全部 CLI home（home 根入参化，可单测）：默认 `{root}/.kimi-code` 加
+/// glob `{root}/.kimi-code-*`（KIMI_CODE_HOME 可把 CLI home 指到任意路径，托盘读不到
+/// CLI 进程的环境变量，只能靠目录发现；拍板：glob 够用，不做设置页手动配目录）。
+/// glob 只认横线后缀：`.kimi-code.bak` / `.kimi-code.old` 这类点号命名不匹配，
+/// 防备份目录重复计数；默认 home 自身不带横线，不会被 glob 重复匹配。
+/// 合法 home 判定：是目录、含 sessions/ 子目录、且含 config.toml 或 credentials/ 之一。
+/// 返回顺序确定：默认 home（若合法）在前，其余按路径字典序
+fn cli_homes(home_root: &Path) -> Vec<PathBuf> {
+    let mut homes = Vec::new();
+    let default_home = home_root.join(".kimi-code");
+    if is_valid_cli_home(&default_home) {
+        homes.push(default_home);
+    }
+    if let Ok(entries) = std::fs::read_dir(home_root) {
+        let mut extra: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(".kimi-code-"))
+                    && is_valid_cli_home(path)
+            })
+            .collect();
+        extra.sort();
+        homes.extend(extra);
+    }
+    homes
+}
+
+/// 合法 CLI home 判定：是目录、含 sessions/ 子目录、且含 config.toml 或 credentials/ 之一
+/// （缺一视为残骸/半成品目录，跳过防误扫）
+fn is_valid_cli_home(dir: &Path) -> bool {
+    dir.is_dir()
+        && dir.join("sessions").is_dir()
+        && (dir.join("config.toml").is_file() || dir.join("credentials").is_dir())
 }
 
 /// 扫描状态路径：{config_dir}/scan-state.json（config_dir 规则与 storage.rs 一致）
@@ -853,6 +1159,22 @@ mod tests {
         file
     }
 
+    /// 无归属上下文（空 Attribution：全部事件进未归属桶）扫描并取未归属桶的统计视图
+    fn scan_unassigned(
+        sessions: &Path,
+        state_path: &Path,
+        now_ms: i64,
+        tz: &chrono::FixedOffset,
+    ) -> LocalUsageStats {
+        scan_with(
+            &[(sessions.to_path_buf(), Attribution::default())],
+            state_path,
+            now_ms,
+            tz,
+        )
+        .for_account(UNASSIGNED_BUCKET)
+    }
+
     #[test]
     fn scan_aggregates_incrementally_without_double_count() {
         let dir = temp_dir("local-usage-scan");
@@ -885,7 +1207,7 @@ mod tests {
         let per_agent_today = 7 + 3 + 11264;
 
         // 首次全扫
-        let stats = scan_with(&sessions, &state_path, now, &tz);
+        let stats = scan_unassigned(&sessions, &state_path, now, &tz);
         assert_eq!(stats.today_tokens, per_main_today + per_agent_today);
         assert_eq!(stats.yesterday_tokens, 200 + 20 + 11264);
         // by_model 是今日分模型：昨天的 k3、daily 窗口外的 k2 都不计
@@ -902,7 +1224,7 @@ mod tests {
         assert!(state_path.exists());
 
         // 二次扫描（同状态）：偏移续读，不重复计数
-        let stats2 = scan_with(&sessions, &state_path, now, &tz);
+        let stats2 = scan_unassigned(&sessions, &state_path, now, &tz);
         assert_eq!(stats2.today_tokens, stats.today_tokens);
         assert_eq!(stats2.by_model, stats.by_model);
 
@@ -912,7 +1234,7 @@ mod tests {
         content.push_str(&extra);
         content.push('\n');
         std::fs::write(&main_file, content).unwrap();
-        let stats3 = scan_with(&sessions, &state_path, now, &tz);
+        let stats3 = scan_unassigned(&sessions, &state_path, now, &tz);
         assert_eq!(stats3.today_tokens, stats.today_tokens + 1 + 2 + 11264);
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -935,7 +1257,7 @@ mod tests {
                 usage_line("kimi-code/k3", "2026-07-27T11:00:00+08:00", 7, 3),
             ],
         );
-        let stats = scan_with(&sessions, &state_path, now, &tz);
+        let stats = scan_unassigned(&sessions, &state_path, now, &tz);
         assert_eq!(stats.last_event_at, Some(ms("2026-07-27T11:00:00+08:00")));
 
         // append 一条更早时间戳的事件：max 不回退（历史补录不算"更新近"）
@@ -944,7 +1266,7 @@ mod tests {
         content.push_str(&older);
         content.push('\n');
         std::fs::write(&file, content).unwrap();
-        let stats2 = scan_with(&sessions, &state_path, now, &tz);
+        let stats2 = scan_unassigned(&sessions, &state_path, now, &tz);
         assert_eq!(stats2.last_event_at, Some(ms("2026-07-27T11:00:00+08:00")));
 
         // append 一条更晚的事件：last_event_at 前进到 11:30
@@ -953,11 +1275,11 @@ mod tests {
         content.push_str(&newer);
         content.push('\n');
         std::fs::write(&file, content).unwrap();
-        let stats3 = scan_with(&sessions, &state_path, now, &tz);
+        let stats3 = scan_unassigned(&sessions, &state_path, now, &tz);
         assert_eq!(stats3.last_event_at, Some(ms("2026-07-27T11:30:00+08:00")));
 
         // 空目录（从未扫到消耗）：None，活跃判定按静默
-        let empty_stats = scan_with(
+        let empty_stats = scan_unassigned(
             &dir.join("nonexistent"),
             &dir.join("other-state.json"),
             now,
@@ -969,15 +1291,15 @@ mod tests {
     }
 
     #[test]
-    fn scan_migrates_legacy_state_without_by_date_model() {
-        let dir = temp_dir("local-usage-migrate");
+    fn legacy_totals_state_wiped_and_full_rescan() {
+        let dir = temp_dir("local-usage-legacy");
         let sessions = dir.join("sessions");
         let state_path = dir.join("config").join("scan-state.json");
         let tz = tz8();
         let now = ms("2026-07-27T12:00:00+08:00");
 
-        // 今日一条事件；旧状态偏移已越过它（模拟旧版已消费），
-        // 无迁移时该事件不会重读，by_date_model 将一直为空
+        // 今日一条事件；旧状态偏移已越过它（模拟旧版已消费）。
+        // 偏移不归零则该事件不会重读；旧合计不清空则结果混进 999999 幽灵数字
         let file = write_wire(
             &sessions,
             "main",
@@ -989,24 +1311,38 @@ mod tests {
             )],
         );
         let today_tokens = 100 + 10 + 11264;
-        // 旧版 scan-state：只有 by_date 与文件偏移，没有 by_date_model
+        // 旧版 scan-state：机器级 totals 合计（无 buckets 键）
         let legacy = serde_json::json!({
             "last_scan_at": ms("2026-07-27T09:00:00+08:00") / 1000,
             "files": { file.to_string_lossy().into_owned(): std::fs::metadata(&file).unwrap().len() },
-            "totals": { "by_date": { "2026-07-27": today_tokens } },
+            "totals": {
+                "by_date": { "2026-07-27": 999999 },
+                "by_date_model": { "2026-07-27": { "kimi-code/k3": 999999 } },
+                "last_event_at": ms("2026-07-27T10:00:00+08:00"),
+            },
         });
         std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
         std::fs::write(&state_path, serde_json::to_string(&legacy).unwrap()).unwrap();
 
-        // 迁移触发：累计清空 + 偏移归零全量重读，今日分模型重建
-        let stats = scan_with(&sessions, &state_path, now, &tz);
+        // 旧合计直接丢弃 + 偏移归零全量重扫：只剩真实事件，999999 不出现
+        let view = scan_with(
+            &[(sessions.clone(), Attribution::default())],
+            &state_path,
+            now,
+            &tz,
+        );
+        let stats = view.for_account(UNASSIGNED_BUCKET);
         assert_eq!(stats.today_tokens, today_tokens);
         assert_eq!(stats.by_model.len(), 1);
-        assert_eq!(stats.by_model[0].model, "kimi-code/k3");
         assert_eq!(stats.by_model[0].tokens, today_tokens);
 
-        // 迁移只发生一次：二次扫描不再重读，不重复计数
-        let stats2 = scan_with(&sessions, &state_path, now, &tz);
+        // 落盘的新状态已切到分桶格式：有 buckets 键、无 totals 残留
+        let saved = std::fs::read_to_string(&state_path).unwrap();
+        assert!(saved.contains("\"buckets\""));
+        assert!(!saved.contains("\"totals\""));
+
+        // 重扫只发生一次：二次扫描不重复计数
+        let stats2 = scan_unassigned(&sessions, &state_path, now, &tz);
         assert_eq!(stats2.today_tokens, today_tokens);
         assert_eq!(stats2.by_model, stats.by_model);
 
@@ -1016,7 +1352,7 @@ mod tests {
     #[test]
     fn scan_missing_sessions_dir_returns_empty() {
         let dir = temp_dir("local-usage-empty");
-        let stats = scan_with(
+        let stats = scan_unassigned(
             &dir.join("nonexistent"),
             &dir.join("scan-state.json"),
             ms("2026-07-27T12:00:00+08:00"),
@@ -1044,9 +1380,11 @@ mod tests {
             r#"{{"type":"usage.record","model":"kimi-code/k3","usage":{{"inputOther":1,"output":2,"inputCacheRead":0,"inputCacheCreation":0}},"usageScope":"turn","time":{now_ms}}}"#
         );
         write_wire(&home.join(".kimi-code").join("sessions"), "main", &[line]);
+        // 合法 home 判定要求 config.toml 或 credentials/ 之一存在（空 config 即满足）
+        std::fs::write(home.join(".kimi-code").join("config.toml"), "").unwrap();
 
         let stats1 = scan();
-        assert_eq!(stats1.today_tokens, 3);
+        assert_eq!(stats1.for_account(UNASSIGNED_BUCKET).today_tokens, 3);
         assert!(config.join("scan-state.json").exists());
 
         // 距上次 < 180 秒：直接返回缓存（last_scan_at 相同即未重扫）
@@ -1318,7 +1656,13 @@ mod tests {
             ],
         );
 
-        let mut stats = scan_with(&sessions, &state_path, now, &tz);
+        let mut view = scan_with(
+            &[(sessions.clone(), Attribution::default())],
+            &state_path,
+            now,
+            &tz,
+        );
+        let stats = view.by_account.get_mut(UNASSIGNED_BUCKET).unwrap();
         if let Some(target) = resolve_secondary_model() {
             fold_secondary_model(&mut stats.by_model, &target);
         }
@@ -1335,5 +1679,783 @@ mod tests {
 
         std::env::remove_var("USERPROFILE");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- 分账号归属 ----
+
+    fn opt(s: &str) -> Option<String> {
+        Some(s.to_string())
+    }
+
+    fn account_creds(api_key: Option<String>, user_id: Option<String>) -> AccountCreds {
+        AccountCreds { api_key, user_id }
+    }
+
+    /// 造一个 payload 为给定 JSON 的 JWT（归属解码只看 payload 段，不验签）
+    fn jwt_with_payload(payload: &str) -> String {
+        use base64::Engine;
+        let enc = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s);
+        format!("{}.{}.sig", enc(r#"{"alg":"none"}"#), enc(payload))
+    }
+
+    #[test]
+    fn jwt_decodes_user_id() {
+        // user_id 优先（CLI 真实 token 两字段同在，user_id 为准）
+        let token = jwt_with_payload(r#"{"user_id":"u-123","sub":"s-456"}"#);
+        assert_eq!(jwt_user_id(&token).as_deref(), Some("u-123"));
+    }
+
+    #[test]
+    fn jwt_falls_back_to_sub() {
+        let token = jwt_with_payload(r#"{"sub":"s-456","exp":1}"#);
+        assert_eq!(jwt_user_id(&token).as_deref(), Some("s-456"));
+    }
+
+    #[test]
+    fn jwt_tolerates_garbage() {
+        use base64::Engine;
+        let enc = |s: &str| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(s);
+        assert_eq!(jwt_user_id(""), None);
+        assert_eq!(jwt_user_id("no-dots-at-all"), None);
+        assert_eq!(jwt_user_id("a.b"), None); // 段数不够
+        assert_eq!(jwt_user_id("a.!!!.c"), None); // base64url 解码失败
+        let not_json = format!("x.{}.y", enc("not json"));
+        assert_eq!(jwt_user_id(&not_json), None); // 合法 base64 但非 JSON
+        let non_string = jwt_with_payload(r#"{"user_id":42}"#);
+        assert_eq!(jwt_user_id(&non_string), None); // 字段不是字符串
+        let missing = jwt_with_payload(r#"{"exp":1}"#);
+        assert_eq!(jwt_user_id(&missing), None); // user_id / sub 都缺
+    }
+
+    #[test]
+    fn route_model_config_table_then_prefix_fallback() {
+        let attribution = Attribution {
+            model_providers: HashMap::from([
+                ("kimi-code/k3".to_string(), "managed:kimi-code".to_string()),
+                ("deepseek-v4-pro".to_string(), "deepseek".to_string()),
+                ("qwen3.8-max".to_string(), "dashscope".to_string()),
+            ]),
+            ..Default::default()
+        };
+        // config 表命中：provider 含 kimi → Kimi；deepseek 开头 → DeepSeek；第三方 → 未归属
+        assert_eq!(route_model("kimi-code/k3", &attribution), Route::Kimi);
+        assert_eq!(
+            route_model("deepseek-v4-pro", &attribution),
+            Route::DeepSeek
+        );
+        assert_eq!(route_model("qwen3.8-max", &attribution), Route::Unassigned);
+        // 查不到按前缀兜底：deepseek 开头 → DeepSeek，其余 → Kimi
+        assert_eq!(route_model("deepseek-v9-x", &attribution), Route::DeepSeek);
+        assert_eq!(route_model("kimi-code/k9", &attribution), Route::Kimi);
+        assert_eq!(route_model("whatever", &attribution), Route::Kimi);
+    }
+
+    #[test]
+    fn attribute_matches_kimi_api_key_exact() {
+        let attribution = Attribution {
+            cli: CliCredentials {
+                kimi_api_key: opt("sk-kimi-bbb"),
+                ..Default::default()
+            },
+            kimi_accounts: vec![
+                ("acc-a".to_string(), account_creds(opt("sk-kimi-aaa"), None)),
+                ("acc-b".to_string(), account_creds(opt("sk-kimi-bbb"), None)),
+            ],
+            ..Default::default()
+        };
+        // 精确相等才归：acc-a 的 key 不同不中，acc-b 全等中
+        assert_eq!(attribute("kimi-code/k3", &attribution), "acc-b");
+    }
+
+    #[test]
+    fn attribute_matches_oauth_user_id() {
+        let attribution = Attribution {
+            cli: CliCredentials {
+                kimi_user_id: opt("user-2"),
+                ..Default::default()
+            },
+            kimi_accounts: vec![
+                ("acc-a".to_string(), account_creds(None, opt("user-1"))),
+                ("acc-b".to_string(), account_creds(None, opt("user-2"))),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(attribute("kimi-code/k3", &attribution), "acc-b");
+    }
+
+    #[test]
+    fn attribute_matches_deepseek_api_key_exact() {
+        let attribution = Attribution {
+            cli: CliCredentials {
+                deepseek_api_key: opt("sk-ds-1"),
+                ..Default::default()
+            },
+            deepseek_accounts: vec![("acc-d".to_string(), account_creds(opt("sk-ds-1"), None))],
+            ..Default::default()
+        };
+        assert_eq!(attribute("deepseek-v4-flash", &attribution), "acc-d");
+        // 路由隔离：CLI 的 kimi key 与某 DeepSeek 账号 key 相同也不归它（各走各的通道）
+        let crossed = Attribution {
+            cli: CliCredentials {
+                kimi_api_key: opt("sk-ds-1"),
+                ..Default::default()
+            },
+            kimi_accounts: vec![("acc-k".to_string(), account_creds(opt("sk-kimi-x"), None))],
+            deepseek_accounts: vec![("acc-d".to_string(), account_creds(opt("sk-ds-1"), None))],
+            ..Default::default()
+        };
+        assert_eq!(attribute("kimi-code/k3", &crossed), UNASSIGNED_BUCKET);
+    }
+
+    #[test]
+    fn attribute_falls_back_to_unassigned() {
+        let attribution = Attribution {
+            cli: CliCredentials {
+                kimi_api_key: opt("sk-kimi-cli"),
+                kimi_user_id: opt("user-cli"),
+                deepseek_api_key: opt("sk-ds-cli"),
+            },
+            kimi_accounts: vec![(
+                "acc-a".to_string(),
+                account_creds(opt("sk-kimi-other"), opt("user-other")),
+            )],
+            deepseek_accounts: vec![("acc-d".to_string(), account_creds(opt("sk-ds-other"), None))],
+            model_providers: HashMap::from([("qwen3.8-max".to_string(), "dashscope".to_string())]),
+        };
+        // kimi / deepseek 比对全不中 → 未归属
+        assert_eq!(attribute("kimi-code/k3", &attribution), UNASSIGNED_BUCKET);
+        assert_eq!(
+            attribute("deepseek-v4-flash", &attribution),
+            UNASSIGNED_BUCKET
+        );
+        // 第三方路由直接未归属（不比凭证）
+        assert_eq!(attribute("qwen3.8-max", &attribution), UNASSIGNED_BUCKET);
+        // CLI 无凭证快照（如全未配置）：同样未归属
+        assert_eq!(
+            attribute("kimi-code/k3", &Attribution::default()),
+            UNASSIGNED_BUCKET
+        );
+    }
+
+    #[test]
+    fn scan_isolates_two_accounts_across_snapshots() {
+        let dir = temp_dir("local-usage-isolate");
+        let sessions = dir.join("sessions");
+        let state_path = dir.join("config").join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+        let accounts = || {
+            vec![
+                ("acc-a".to_string(), account_creds(opt("sk-kimi-a"), None)),
+                ("acc-b".to_string(), account_creds(opt("sk-kimi-b"), None)),
+            ]
+        };
+
+        let file = write_wire(
+            &sessions,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T10:00:00+08:00",
+                100,
+                10,
+            )],
+        );
+        let per_event = 100 + 10 + 11264;
+
+        // 快照 1：CLI 用着 acc-a 的 key → 本批事件归 acc-a
+        let attr_a = Attribution {
+            cli: CliCredentials {
+                kimi_api_key: opt("sk-kimi-a"),
+                ..Default::default()
+            },
+            kimi_accounts: accounts(),
+            ..Default::default()
+        };
+        let view = scan_with(&[(sessions.clone(), attr_a)], &state_path, now, &tz);
+        assert_eq!(view.for_account("acc-a").today_tokens, per_event);
+        // acc-b 无桶：默认空统计，last_scan_at 照填（诚实零）
+        let b = view.for_account("acc-b");
+        assert_eq!(b.today_tokens, 0);
+        assert!(b.last_scan_at.is_some());
+
+        // 换号：CLI 改用 acc-b 的 key，追加一条事件 → 只归 acc-b，acc-a 不串
+        let extra = usage_line("kimi-code/k3", "2026-07-27T11:00:00+08:00", 1, 2);
+        let mut content = std::fs::read_to_string(&file).unwrap();
+        content.push_str(&extra);
+        content.push('\n');
+        std::fs::write(&file, content).unwrap();
+        let attr_b = Attribution {
+            cli: CliCredentials {
+                kimi_api_key: opt("sk-kimi-b"),
+                ..Default::default()
+            },
+            kimi_accounts: accounts(),
+            ..Default::default()
+        };
+        let view2 = scan_with(&[(sessions.clone(), attr_b)], &state_path, now, &tz);
+        assert_eq!(view2.for_account("acc-a").today_tokens, per_event);
+        assert_eq!(view2.for_account("acc-b").today_tokens, 1 + 2 + 11264);
+        // 全程没有比未中的事件：未归属桶不生成
+        assert!(!view2.by_account.contains_key(UNASSIGNED_BUCKET));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn machine_last_event_at_is_max_across_buckets() {
+        let dir = temp_dir("local-usage-machine-max");
+        let sessions = dir.join("sessions");
+        let state_path = dir.join("config").join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+        let kimi_accounts = || vec![("acc-a".to_string(), account_creds(opt("sk-kimi-a"), None))];
+
+        let file = write_wire(
+            &sessions,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T10:00:00+08:00",
+                100,
+                10,
+            )],
+        );
+        let attr = Attribution {
+            cli: CliCredentials {
+                kimi_api_key: opt("sk-kimi-a"),
+                ..Default::default()
+            },
+            kimi_accounts: kimi_accounts(),
+            ..Default::default()
+        };
+        let view = scan_with(&[(sessions.clone(), attr)], &state_path, now, &tz);
+        assert_eq!(
+            view.machine_last_event_at,
+            Some(ms("2026-07-27T10:00:00+08:00"))
+        );
+
+        // CLI 换成本应用未知的 key：比对不中进未归属桶；机器级 max 含未归属桶
+        let extra = usage_line("kimi-code/k3", "2026-07-27T11:30:00+08:00", 1, 2);
+        let mut content = std::fs::read_to_string(&file).unwrap();
+        content.push_str(&extra);
+        content.push('\n');
+        std::fs::write(&file, content).unwrap();
+        let attr_unknown = Attribution {
+            cli: CliCredentials {
+                kimi_api_key: opt("sk-kimi-unknown"),
+                ..Default::default()
+            },
+            kimi_accounts: kimi_accounts(),
+            ..Default::default()
+        };
+        let view2 = scan_with(&[(sessions.clone(), attr_unknown)], &state_path, now, &tz);
+        assert_eq!(
+            view2.machine_last_event_at,
+            Some(ms("2026-07-27T11:30:00+08:00"))
+        );
+        // 未归属桶的数字不进任何账号页
+        assert_eq!(view2.for_account("acc-a").today_tokens, 100 + 10 + 11264);
+        assert_eq!(
+            view2.for_account(UNASSIGNED_BUCKET).today_tokens,
+            1 + 2 + 11264
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- 多 CLI home ----
+
+    /// 在 root 下造一个 CLI home：sessions/ + config.toml（content 给定）+
+    /// 可选 credentials/kimi-code.json（user_id 给定时写入对应 JWT）
+    fn write_cli_home(root: &Path, name: &str, config: &str, user_id: Option<&str>) -> PathBuf {
+        let home = root.join(name);
+        std::fs::create_dir_all(home.join("sessions")).unwrap();
+        std::fs::write(home.join("config.toml"), config).unwrap();
+        if let Some(user_id) = user_id {
+            let cred_dir = home.join("credentials");
+            std::fs::create_dir_all(&cred_dir).unwrap();
+            let token = jwt_with_payload(&format!(r#"{{"user_id":"{user_id}"}}"#));
+            std::fs::write(
+                cred_dir.join("kimi-code.json"),
+                format!(r#"{{"access_token":"{token}"}}"#),
+            )
+            .unwrap();
+        }
+        home
+    }
+
+    #[test]
+    fn cli_homes_discovers_default_and_dash_suffixed_sorted() {
+        let root = temp_dir("cli-homes-enum");
+        // 合法 home 三个：默认 home（config.toml 为合法依据）+ 两个横线后缀 home
+        write_cli_home(&root, ".kimi-code", "", None);
+        // 先建 zzz 后建 hung：结果必须按路径字典序（hung 在前），与创建顺序无关
+        let zzz = root.join(".kimi-code-zzz");
+        std::fs::create_dir_all(zzz.join("sessions")).unwrap();
+        // 无 config.toml 时 credentials/ 也算合法依据
+        std::fs::create_dir_all(zzz.join("credentials")).unwrap();
+        write_cli_home(&root, ".kimi-code-hung", "", None);
+        // 点号后缀（备份命名）不匹配 glob：.kimi-code.bak / .kimi-code.old 跳过
+        write_cli_home(&root, ".kimi-code.bak", "", None);
+        write_cli_home(&root, ".kimi-code.old", "", None);
+        // 横线后缀但缺 config.toml 与 credentials/：不合法
+        std::fs::create_dir_all(root.join(".kimi-code-nocred").join("sessions")).unwrap();
+        // 有 config.toml 但无 sessions/：不合法
+        let no_sessions = root.join(".kimi-code-nosessions");
+        std::fs::create_dir_all(&no_sessions).unwrap();
+        std::fs::write(no_sessions.join("config.toml"), "").unwrap();
+        // 横线前缀的普通文件（不是目录）：不合法
+        std::fs::write(root.join(".kimi-code-file"), "").unwrap();
+        // 无关目录不受影响
+        write_cli_home(&root, ".other-tool", "", None);
+
+        let homes = cli_homes(&root);
+        // 默认 home 在前且只出现一次（不带横线不会被 glob 重复匹配），其余按字典序
+        assert_eq!(
+            homes,
+            vec![
+                root.join(".kimi-code"),
+                root.join(".kimi-code-hung"),
+                root.join(".kimi-code-zzz"),
+            ]
+        );
+        // 再跑一遍结果一致（确定性）
+        assert_eq!(cli_homes(&root), homes);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn cli_homes_skips_invalid_default_and_empty_when_none_valid() {
+        let root = temp_dir("cli-homes-invalid");
+        // 默认 home 存在但不合法（只有 sessions/）：不计；合法的横线 home 照样收
+        std::fs::create_dir_all(root.join(".kimi-code").join("sessions")).unwrap();
+        write_cli_home(&root, ".kimi-code-hung", "", None);
+        assert_eq!(cli_homes(&root), vec![root.join(".kimi-code-hung")]);
+        let _ = std::fs::remove_dir_all(&root);
+
+        // 整个 root 没有任何合法 home：空（scan 按空目标容忍）
+        let empty = temp_dir("cli-homes-empty");
+        assert_eq!(cli_homes(&empty), Vec::<PathBuf>::new());
+        // root 本身不存在也容忍为空
+        assert_eq!(cli_homes(&empty.join("nonexistent")), Vec::<PathBuf>::new());
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    /// 两个 home 各配各的 OAuth 用户：归属隔离的最小构造（scan_with 层）
+    #[test]
+    fn scan_isolates_two_homes_by_user_id() {
+        let dir = temp_dir("local-usage-two-homes");
+        let state_path = dir.join("config").join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+        let accounts = || {
+            vec![
+                ("acc-a".to_string(), account_creds(None, opt("user-1"))),
+                ("acc-b".to_string(), account_creds(None, opt("user-2"))),
+            ]
+        };
+        let attr = |user_id: &str| Attribution {
+            cli: CliCredentials {
+                kimi_user_id: opt(user_id),
+                ..Default::default()
+            },
+            kimi_accounts: accounts(),
+            ..Default::default()
+        };
+
+        let sessions_a = dir.join("home-a").join("sessions");
+        let sessions_b = dir.join("home-b").join("sessions");
+        write_wire(
+            &sessions_a,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T10:00:00+08:00",
+                100,
+                10,
+            )],
+        );
+        write_wire(
+            &sessions_b,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T11:00:00+08:00",
+                200,
+                20,
+            )],
+        );
+
+        let view = scan_with(
+            &[
+                (sessions_a.clone(), attr("user-1")),
+                (sessions_b, attr("user-2")),
+            ],
+            &state_path,
+            now,
+            &tz,
+        );
+        // 各 home 的事件只进自己 user_id 对应的桶（每条 usage_line 另含 inputCacheRead 11264）
+        assert_eq!(view.for_account("acc-a").today_tokens, 100 + 10 + 11264);
+        assert_eq!(view.for_account("acc-b").today_tokens, 200 + 20 + 11264);
+        assert!(!view.by_account.contains_key(UNASSIGNED_BUCKET));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_merges_same_account_across_two_homes() {
+        let dir = temp_dir("local-usage-same-acc");
+        let state_path = dir.join("config").join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+        // 两个 home 登的是同一 OAuth 用户（user-1 → acc-a）：消耗合并进同一桶
+        let attr = || Attribution {
+            cli: CliCredentials {
+                kimi_user_id: opt("user-1"),
+                ..Default::default()
+            },
+            kimi_accounts: vec![("acc-a".to_string(), account_creds(None, opt("user-1")))],
+            ..Default::default()
+        };
+
+        let sessions_a = dir.join("home-a").join("sessions");
+        let sessions_b = dir.join("home-b").join("sessions");
+        write_wire(
+            &sessions_a,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T10:00:00+08:00",
+                100,
+                10,
+            )],
+        );
+        write_wire(
+            &sessions_b,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T11:00:00+08:00",
+                200,
+                20,
+            )],
+        );
+
+        let view = scan_with(
+            &[(sessions_a.clone(), attr()), (sessions_b, attr())],
+            &state_path,
+            now,
+            &tz,
+        );
+        assert_eq!(
+            view.for_account("acc-a").today_tokens,
+            (100 + 10 + 11264) + (200 + 20 + 11264)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_unmatched_home_events_go_unassigned() {
+        let dir = temp_dir("local-usage-home-unmatched");
+        let state_path = dir.join("config").join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+        let accounts = || vec![("acc-a".to_string(), account_creds(None, opt("user-1")))];
+        // home-a 凭证匹配 acc-a；home-b 的 user_id 谁都不认识
+        let attr_a = Attribution {
+            cli: CliCredentials {
+                kimi_user_id: opt("user-1"),
+                ..Default::default()
+            },
+            kimi_accounts: accounts(),
+            ..Default::default()
+        };
+        let attr_b = Attribution {
+            cli: CliCredentials {
+                kimi_user_id: opt("user-stranger"),
+                ..Default::default()
+            },
+            kimi_accounts: accounts(),
+            ..Default::default()
+        };
+
+        let sessions_a = dir.join("home-a").join("sessions");
+        let sessions_b = dir.join("home-b").join("sessions");
+        write_wire(
+            &sessions_a,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T10:00:00+08:00",
+                100,
+                10,
+            )],
+        );
+        write_wire(
+            &sessions_b,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T11:00:00+08:00",
+                200,
+                20,
+            )],
+        );
+
+        let view = scan_with(
+            &[(sessions_a.clone(), attr_a), (sessions_b, attr_b)],
+            &state_path,
+            now,
+            &tz,
+        );
+        // 匹配不到的 home 进未归属桶，且不影响匹配到的 home 正常归属
+        assert_eq!(view.for_account("acc-a").today_tokens, 100 + 10 + 11264);
+        assert_eq!(
+            view.for_account(UNASSIGNED_BUCKET).today_tokens,
+            200 + 20 + 11264
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_routes_models_by_each_homes_table() {
+        let dir = temp_dir("local-usage-home-routes");
+        let state_path = dir.join("config").join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+        let accounts = || vec![("acc-a".to_string(), account_creds(None, opt("user-1")))];
+        // home-a 的 [models] 没有 qwen：前缀兜底走 Kimi 路由 → 归 acc-a
+        let attr_a = Attribution {
+            cli: CliCredentials {
+                kimi_user_id: opt("user-1"),
+                ..Default::default()
+            },
+            kimi_accounts: accounts(),
+            ..Default::default()
+        };
+        // home-b（hung home 场景）把 qwen3.8-max 配到 dashscope：该 home 的 qwen 事件进未归属
+        let attr_b = Attribution {
+            cli: CliCredentials {
+                kimi_user_id: opt("user-1"),
+                ..Default::default()
+            },
+            kimi_accounts: accounts(),
+            model_providers: HashMap::from([("qwen3.8-max".to_string(), "dashscope".to_string())]),
+            ..Default::default()
+        };
+
+        let sessions_a = dir.join("home-a").join("sessions");
+        let sessions_b = dir.join("home-b").join("sessions");
+        write_wire(
+            &sessions_a,
+            "main",
+            &[usage_line(
+                "qwen3.8-max",
+                "2026-07-27T10:00:00+08:00",
+                100,
+                10,
+            )],
+        );
+        write_wire(
+            &sessions_b,
+            "main",
+            &[usage_line(
+                "qwen3.8-max",
+                "2026-07-27T11:00:00+08:00",
+                200,
+                20,
+            )],
+        );
+
+        let view = scan_with(
+            &[(sessions_a.clone(), attr_a), (sessions_b, attr_b)],
+            &state_path,
+            now,
+            &tz,
+        );
+        // 同型号事件按各 home 自己的路由表分流：home-a 归 acc-a，home-b 进未归属
+        assert_eq!(view.for_account("acc-a").today_tokens, 100 + 10 + 11264);
+        assert_eq!(
+            view.for_account(UNASSIGNED_BUCKET).today_tokens,
+            200 + 20 + 11264
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn scan_multi_home_keeps_independent_offsets() {
+        let dir = temp_dir("local-usage-multi-incr");
+        let sessions_a = dir.join("home-a").join("sessions");
+        let sessions_b = dir.join("home-b").join("sessions");
+        let state_path = dir.join("config").join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+        let accounts = || {
+            vec![
+                ("acc-a".to_string(), account_creds(None, opt("user-1"))),
+                ("acc-b".to_string(), account_creds(None, opt("user-2"))),
+            ]
+        };
+        let attr = |user_id: &str| Attribution {
+            cli: CliCredentials {
+                kimi_user_id: opt(user_id),
+                ..Default::default()
+            },
+            kimi_accounts: accounts(),
+            ..Default::default()
+        };
+
+        let file_a = write_wire(
+            &sessions_a,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T10:00:00+08:00",
+                100,
+                10,
+            )],
+        );
+        let per_a = 100 + 10 + 11264;
+        let file_b = write_wire(
+            &sessions_b,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T11:00:00+08:00",
+                200,
+                20,
+            )],
+        );
+        let per_b = 200 + 20 + 11264;
+
+        // 旧版单 home 时期：只扫默认 home，scan-state 里只有 home-a 的偏移
+        let view1 = scan_with(
+            &[(sessions_a.clone(), attr("user-1"))],
+            &state_path,
+            now,
+            &tz,
+        );
+        assert_eq!(view1.for_account("acc-a").today_tokens, per_a);
+
+        // 加入第二个 home：旧 home 按偏移续读不重复计数，新 home 无偏移记录从 0 全扫
+        let view2 = scan_with(
+            &[
+                (sessions_a.clone(), attr("user-1")),
+                (sessions_b.clone(), attr("user-2")),
+            ],
+            &state_path,
+            now,
+            &tz,
+        );
+        assert_eq!(view2.for_account("acc-a").today_tokens, per_a);
+        assert_eq!(view2.for_account("acc-b").today_tokens, per_b);
+
+        // 给 home-a 追加一条：三扫只增量这一条进 acc-a，acc-b 不串
+        let extra = usage_line("kimi-code/k3", "2026-07-27T11:30:00+08:00", 1, 2);
+        let mut content = std::fs::read_to_string(&file_a).unwrap();
+        content.push_str(&extra);
+        content.push('\n');
+        std::fs::write(&file_a, content).unwrap();
+        let view3 = scan_with(
+            &[
+                (sessions_a.clone(), attr("user-1")),
+                (sessions_b.clone(), attr("user-2")),
+            ],
+            &state_path,
+            now,
+            &tz,
+        );
+        assert_eq!(
+            view3.for_account("acc-a").today_tokens,
+            per_a + 1 + 2 + 11264
+        );
+        assert_eq!(view3.for_account("acc-b").today_tokens, per_b);
+
+        // 状态里两个 home 的文件键（全路径）独立共存
+        let saved = std::fs::read_to_string(&state_path).unwrap();
+        let state: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        let files = state["files"].as_object().unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(files.contains_key(&file_a.to_string_lossy().into_owned()));
+        assert!(files.contains_key(&file_b.to_string_lossy().into_owned()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 端到端：cli_homes 发现 + 逐 home 快照 + 扫描串起来（scan() 的节流缓存走 scan_fresh 绕过）
+    #[test]
+    fn scan_end_to_end_two_homes_isolated_by_user_id() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = temp_dir("multi-home-root");
+        let config = temp_dir("multi-home-conf");
+        // 两个合法 home：默认 home 登 user-1（账号 acc-a），-hung home 登 user-2（账号 acc-b）
+        let home_a = write_cli_home(&root, ".kimi-code", "", Some("user-1"));
+        let home_b = write_cli_home(&root, ".kimi-code-hung", "", Some("user-2"));
+        // 各 home 今日各一条事件（真实本地时钟，scan_fresh 按给定 now 出视图）
+        let now_ms = chrono::Local::now().timestamp_millis();
+        let line = |input_other: u64, output: u64| {
+            format!(
+                r#"{{"type":"usage.record","model":"kimi-code/k3","usage":{{"inputOther":{input_other},"output":{output},"inputCacheRead":0,"inputCacheCreation":0}},"usageScope":"turn","time":{now_ms}}}"#
+            )
+        };
+        write_wire(&home_a.join("sessions"), "main", &[line(100, 10)]);
+        write_wire(&home_b.join("sessions"), "main", &[line(200, 20)]);
+        // 应用侧两个账号的 OAuth 凭证（明文写入临时配置目录；读取时原地转 DPAPI，无碍）
+        let settings = crate::storage::Settings {
+            accounts: vec![
+                crate::storage::Account {
+                    id: "acc-a".to_string(),
+                    name: "A".to_string(),
+                    login_method: Some("oauth".to_string()),
+                    provider: "kimi".to_string(),
+                },
+                crate::storage::Account {
+                    id: "acc-b".to_string(),
+                    name: "B".to_string(),
+                    login_method: Some("oauth".to_string()),
+                    provider: "kimi".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        std::fs::write(
+            config.join("settings.json"),
+            serde_json::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+        for (id, user_id) in [("acc-a", "user-1"), ("acc-b", "user-2")] {
+            let token = jwt_with_payload(&format!(r#"{{"user_id":"{user_id}"}}"#));
+            std::fs::write(
+                config.join(format!("credentials-{id}.json")),
+                format!(r#"{{"access_token":"{token}"}}"#),
+            )
+            .unwrap();
+        }
+        std::env::set_var("USERPROFILE", &root);
+        std::env::set_var("KIMICODEBAR_CONFIG_DIR", &config);
+        // keyring 只读探空：隔离 service 名，绝不碰真实凭据
+        std::env::set_var(
+            "KIMICODEBAR_KEYRING_SERVICE",
+            format!("KimiCodeBar-test-{}", uuid::Uuid::new_v4()),
+        );
+        std::env::remove_var("KIMI_SECONDARY_MODEL");
+
+        let view = scan_fresh(now_ms, &chrono::Local);
+        // 两个 home 都被扫到、各归各账号（cli_homes 只认默认 home 时本测试必红：acc-b 为 0）
+        assert_eq!(view.for_account("acc-a").today_tokens, 110);
+        assert_eq!(view.for_account("acc-b").today_tokens, 220);
+        assert!(!view.by_account.contains_key(UNASSIGNED_BUCKET));
+
+        std::env::remove_var("USERPROFILE");
+        std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
+        std::env::remove_var("KIMICODEBAR_KEYRING_SERVICE");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&config);
     }
 }

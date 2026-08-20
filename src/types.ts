@@ -170,7 +170,7 @@ export interface ModelUsage {
   tokens: number;
 }
 
-/** get_local_usage 的返回：本地 token 消耗统计 */
+/** get_local_usage 的返回：本地 token 消耗统计（按账号归属，仅该账号的消耗） */
 export interface LocalUsageStats {
   /** 今日总消耗 */
   today_tokens: number;
@@ -182,7 +182,7 @@ export interface LocalUsageStats {
   by_model: ModelUsage[];
   /** 上次扫描时间（epoch 秒），未扫过为 null */
   last_scan_at: number | null;
-  /** 最近一次 usage.record 事件时间（epoch 毫秒），从未扫到为 null；自适应刷新的活跃判定依据 */
+  /** 该账号最近一次 usage.record 事件时间（epoch 毫秒），从未扫到为 null */
   last_event_at: number | null;
 }
 

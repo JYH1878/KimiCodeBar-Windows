@@ -2,7 +2,7 @@
 //! （文案带账号名）；某账号 5 小时窗口重置前 15 分钟内（且剩余量 > 0）提醒一次"建议用完"。
 //!
 //! 刷新模式（settings.adaptive_refresh，默认开）：
-//! 自适应 = 近 10 分钟内有新 token 消耗（本地 wire.jsonl 扫描的 last_event_at）按 1 分钟轮询，
+//! 自适应 = 近 10 分钟内有新 token 消耗（本地 wire.jsonl 扫描的 machine_last_event_at）按 1 分钟轮询，
 //! 静默按用户配置间隔；固定 = 恒按用户配置间隔。
 
 use std::collections::HashMap;
@@ -139,10 +139,10 @@ async fn current_interval_secs() -> u64 {
     let settings = storage::load_settings().unwrap_or_default();
     let user_secs = settings.refresh_interval_secs();
     let active = if settings.adaptive_refresh {
-        let stats = tokio::task::spawn_blocking(local_usage::scan)
+        let view = tokio::task::spawn_blocking(local_usage::scan)
             .await
             .unwrap_or_default();
-        usage_active(Utc::now().timestamp_millis(), stats.last_event_at)
+        usage_active(Utc::now().timestamp_millis(), view.machine_last_event_at)
     } else {
         false
     };

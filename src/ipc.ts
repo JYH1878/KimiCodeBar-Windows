@@ -222,14 +222,40 @@ export async function getUsageHistory(accountId: string): Promise<HistoryPoint[]
 // ============ 本地 Token 消耗统计（扫描 wire.jsonl，不依赖 API）============
 
 /**
- * 浏览器 mock 的本地 token 统计：今日 128.4K / 昨日 96.2K / 近 7 天逐日 / 今日分模型两个
- * （kimi-code/k3 与 kimi-code/kimi-for-coding，后者演示 K2.7 展示名映射）。
+ * 浏览器 mock 的本地 token 统计：按账号返回明显不同的三份数字（归属联调用，
+ * 翻两页数字必须不同；DeepSeek 账号页也显示此卡故同样有一份）。
  * daily 日期按本地时区生成（与后端 YYYY-MM-DD 契约一致），末位即今日。
  */
-function mockLocalUsage(): LocalUsageStats {
+const MOCK_LOCAL_USAGE: Record<string, { today: number; yesterday: number; amounts: number[]; byModel: { model: string; tokens: number }[] }> = {
+  "mock-acc-1": {
+    today: 128400,
+    yesterday: 96200,
+    amounts: [42300, 58700, 31200, 88900, 76400, 96200, 128400],
+    // kimi-code/kimi-for-coding 演示 K2.7 展示名映射
+    byModel: [
+      { model: "kimi-code/k3", tokens: 406000 },
+      { model: "kimi-code/kimi-for-coding", tokens: 128000 },
+    ],
+  },
+  "mock-acc-2": {
+    today: 21500,
+    yesterday: 47800,
+    amounts: [66000, 51200, 73400, 28900, 41500, 47800, 21500],
+    byModel: [{ model: "kimi-code/k3-256k", tokens: 21500 }],
+  },
+  "mock-acc-3": {
+    today: 8300,
+    yesterday: 12600,
+    amounts: [9800, 15200, 7400, 21000, 16900, 12600, 8300],
+    byModel: [{ model: "deepseek-v4-flash", tokens: 8300 }],
+  },
+};
+
+/** 由 mock 配置生成一份 LocalUsageStats（amounts 末位即今日；last_event_at 演示"当前活跃"） */
+function mockLocalUsage(accountId: string): LocalUsageStats {
   const pad = (n: number) => String(n).padStart(2, "0");
-  const amounts = [42300, 58700, 31200, 88900, 76400, 96200, 128400];
-  const daily: DailyUsage[] = amounts.map((tokens, i) => {
+  const mock = MOCK_LOCAL_USAGE[accountId] ?? { today: 0, yesterday: 0, amounts: [0, 0, 0, 0, 0, 0, 0], byModel: [] };
+  const daily: DailyUsage[] = mock.amounts.map((tokens, i) => {
     const d = new Date(Date.now() - (6 - i) * 24 * 3600 * 1000);
     return {
       date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
@@ -237,23 +263,19 @@ function mockLocalUsage(): LocalUsageStats {
     };
   });
   return {
-    today_tokens: 128400,
-    yesterday_tokens: 96200,
+    today_tokens: mock.today,
+    yesterday_tokens: mock.yesterday,
     daily,
-    by_model: [
-      { model: "kimi-code/k3", tokens: 406000 },
-      { model: "kimi-code/kimi-for-coding", tokens: 128000 },
-    ],
+    by_model: mock.byModel,
     last_scan_at: Math.floor(Date.now() / 1000),
-    // mock 演示"当前活跃"：最近事件时间即现在
     last_event_at: Date.now(),
   };
 }
 
-/** 获取本地 token 消耗统计（后端增量扫描 sessions 目录的 wire.jsonl 汇总） */
-export async function getLocalUsage(): Promise<LocalUsageStats> {
-  if (!isTauri) return mockLocalUsage();
-  return invoke<LocalUsageStats>("get_local_usage");
+/** 获取本地 token 消耗统计（按账号归属：后端扫描 wire.jsonl 按 CLI 凭证归到各账号） */
+export async function getLocalUsage(accountId: string): Promise<LocalUsageStats> {
+  if (!isTauri) return mockLocalUsage(accountId);
+  return invoke<LocalUsageStats>("get_local_usage", { accountId });
 }
 
 /**

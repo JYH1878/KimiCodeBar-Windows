@@ -577,12 +577,13 @@ pub fn get_usage_history(account_id: String) -> Vec<history::HistoryPoint> {
     history::HistoryStore::load(&account_id).into_points()
 }
 
-/// 本地 token 消耗统计（扫描 wire.jsonl，不依赖 API；机器级数据，各账号页显示同一份）：
+/// 本地 token 消耗统计（按账号归属：扫描 wire.jsonl 按 CLI 凭证快照归到各账号，不依赖 API）：
+/// 取该账号的桶；无桶（从未归属到消耗）给默认空统计，last_scan_at 照填。
 /// 增量扫描 + 180s 节流在 local_usage::scan 内部生效
 #[tauri::command]
-pub async fn get_local_usage() -> kimicodebar::local_usage::LocalUsageStats {
+pub async fn get_local_usage(account_id: String) -> kimicodebar::local_usage::LocalUsageStats {
     // 首次全扫可能读几十 MB jsonl，放阻塞线程池，不占 async runtime worker
-    tokio::task::spawn_blocking(kimicodebar::local_usage::scan)
+    tokio::task::spawn_blocking(move || kimicodebar::local_usage::scan().for_account(&account_id))
         .await
         .unwrap_or_default()
 }
