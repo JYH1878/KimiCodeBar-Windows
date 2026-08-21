@@ -28,8 +28,9 @@ Built with **Tauri 2 + Rust + React**: installer under 4 MB, ~10–20 MB RAM in 
 - **Light / dark theme**: follows the system or switch manually
 - **Panel background**: preset gradients (Night / Aurora / Violet / Ember, each adapted to light & dark themes) or a custom image (PNG / JPG / WebP, ≤10MB), with translucent frosted cards
 - **Panel mascot**: an animated blue dumpling (vector SVG) in the bottom-left corner of the panel — blinks and glances around, adapts to light/dark themes; purely decorative
-- **Multi-account**: up to 5 accounts, one per panel page with a phone-style horizontal pager (wheel / drag / dot navigation, plus a trailing "+" for quick add); manage accounts in Settings (rename / reorder / delete). Legacy single-account data migrates to "Account 1" automatically on upgrade
-- **DeepSeek balance**: DeepSeek platform accounts join as a new account type (up to 5 accounts combined with Kimi) — paste a platform API key to get a dedicated panel page showing total balance, granted / topped-up breakdown, currency and account status; low balance (threshold default ¥5, configurable) or an unavailable account triggers the same red alert
+- **Multi-account**: up to 10 accounts, one per panel page with a phone-style horizontal pager (wheel / drag / dot navigation, plus a trailing "+" for quick add); manage accounts in Settings (rename / reorder / delete). Legacy single-account data migrates to "Account 1" automatically on upgrade
+- **DeepSeek balance**: DeepSeek platform accounts join as a new account type (up to 10 accounts across all providers) — paste a platform API key to get a dedicated panel page showing total balance, granted / topped-up breakdown, currency and account status; low balance (threshold default ¥5, configurable) or an unavailable account triggers the same red alert
+- **GLM Coding Plan quota**: Zhipu GLM Coding Plan accounts join as a new account type — paste a platform API key to get a dedicated panel page with 5-hour / weekly quota windows (credit-based plans show real credit balances), plan tier and reset countdown; low remaining triggers the same red alert
 - **Two sign-in methods**
   - **API Key**: paste a `sk-kimi-` key, stored in Windows Credential Manager
   - **Account authorization**: OAuth device flow (same as the Kimi Code CLI), one-click browser authorization with automatic token refresh
@@ -119,7 +120,7 @@ The panel shows the last cached result with a non-blocking banner — no errors,
 
 **Is my data uploaded anywhere?**
 
-No. All credentials and settings stay on your machine (API key in Windows Credential Manager; everything else in `%APPDATA%\KimiCodeBar\`). Network requests go only to: `api.kimi.com` (usage), `auth.kimi.com` (authorization), `api.deepseek.com` (DeepSeek balance, only if a DeepSeek account is configured), `api.github.com` (update checks).
+No. All credentials and settings stay on your machine (API key in Windows Credential Manager; everything else in `%APPDATA%\KimiCodeBar\`). Network requests go only to: `api.kimi.com` (usage), `auth.kimi.com` (authorization), `api.deepseek.com` (DeepSeek balance, only if a DeepSeek account is configured), `open.bigmodel.cn` (GLM quota, only if a GLM account is configured), `api.github.com` (update checks).
 
 ## Build from source
 
