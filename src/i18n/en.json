@@ -87,7 +87,8 @@
     "creating": "Creating…",
     "created": "\"{{name}}\" created — finish setup in the list above",
     "createdButCredFailed": "\"{{name}}\" created, but saving the credential failed: {{error}}",
-    "maxReached": "Up to 5 accounts"
+    "maxReached": "Up to 10 accounts",
+    "glmKeyPlaceholder": "GLM API Key (id.secret form)"
   },
   "settings": {
     "title": "KimiCodeBar Settings",
@@ -163,6 +164,9 @@
     "getKey": "Get one at kimi.com/code/console",
     "deepseekHint": "A DeepSeek open-platform API Key starts with sk- and is used to check your account balance.",
     "deepseekGetKey": "Get one at platform.deepseek.com/api_keys",
+    "glmHint": "A GLM Coding Plan API Key (id.secret form, no fixed prefix) is used to check your plan quota.",
+    "glmGetKey": "Get one at the bigmodel.cn user center",
+    "glmPlaceholder": "Key in id.secret form",
     "errEmpty": "Please enter an API Key",
     "saved": "API Key saved",
     "cleared": "API Key cleared",

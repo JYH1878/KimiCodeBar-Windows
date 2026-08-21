@@ -7,6 +7,8 @@ import { clearApiKey, openExternalUrl, setApiKey } from "../ipc";
 const CONSOLE_URL = "https://www.kimi.com/code/console";
 /** DeepSeek 开放平台 API Key 地址 */
 const DEEPSEEK_KEYS_URL = "https://platform.deepseek.com/api_keys";
+/** GLM Coding Plan（智谱开放平台）API Key 地址 */
+const GLM_KEYS_URL = "https://bigmodel.cn/usercenter/proj-mgmt/apikeys";
 
 /** 眼睛图标：当前为明文，点击隐藏 */
 function EyeIcon() {
@@ -71,6 +73,7 @@ export function ApiKeySection({ accountId, provider = "kimi", status, onChanged 
   const configured = status?.api_key_configured ?? false;
   const masked = status?.api_key_masked ?? null;
   const isDeepSeek = provider === "deepseek";
+  const isGlm = provider === "glm";
 
   const save = async () => {
     const key = keyInput.trim();
@@ -122,7 +125,7 @@ export function ApiKeySection({ accountId, provider = "kimi", status, onChanged 
         <input
           className="input grow"
           type={showKey ? "text" : "password"}
-          placeholder={isDeepSeek ? "sk-…" : "sk-kimi-…"}
+          placeholder={isDeepSeek ? "sk-…" : isGlm ? t("apiKey.glmPlaceholder") : "sk-kimi-…"}
           value={keyInput}
           onChange={(e) => setKeyInput(e.target.value)}
           spellCheck={false}
@@ -138,14 +141,16 @@ export function ApiKeySection({ accountId, provider = "kimi", status, onChanged 
         </button>
       </div>
       <p className="hint-muted">
-        {isDeepSeek ? t("apiKey.deepseekHint") : t("apiKey.hint")}
+        {isDeepSeek ? t("apiKey.deepseekHint") : isGlm ? t("apiKey.glmHint") : t("apiKey.hint")}
         <br />
         <button
           type="button"
           className="link"
-          onClick={() => void openExternalUrl(isDeepSeek ? DEEPSEEK_KEYS_URL : CONSOLE_URL)}
+          onClick={() =>
+            void openExternalUrl(isDeepSeek ? DEEPSEEK_KEYS_URL : isGlm ? GLM_KEYS_URL : CONSOLE_URL)
+          }
         >
-          {isDeepSeek ? t("apiKey.deepseekGetKey") : t("apiKey.getKey")}
+          {isDeepSeek ? t("apiKey.deepseekGetKey") : isGlm ? t("apiKey.glmGetKey") : t("apiKey.getKey")}
         </button>
       </p>
       {errMsg !== null && <p className="hint-err">{errMsg}</p>}

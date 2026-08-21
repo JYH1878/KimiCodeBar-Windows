@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use kimicodebar::creds;
 use kimicodebar::deepseek::client::DeepSeekClient;
 use kimicodebar::deepseek::models::DeepSeekBalance;
+use kimicodebar::glm::client::GlmClient;
 use kimicodebar::history;
 use kimicodebar::kimi::client::KimiClient;
 use kimicodebar::kimi::oauth;
@@ -365,8 +366,8 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
             Err(_) => FetchOutcome::Failed("请求超时，请检查网络".to_string()),
         };
         // 月度总量（网页 token）：拿到配额后无论成败都继续尝试；
-        // DeepSeek 账号无月度概念，直接跳过（GOAL 拍板）
-        let monthly_outcome = if account.is_deepseek() {
+        // 非 Kimi 账号（DeepSeek / GLM）无月度概念，直接跳过（GOAL 拍板）
+        let monthly_outcome = if account.provider != "kimi" {
             MonthlyOutcome::NoToken
         } else {
             fetch_monthly(&account.id).await
@@ -458,7 +459,8 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
             }
 
             // 配额刷新成功：给该账号追加一条历史采样（用量趋势图数据，纯事实不预测）。
-            // DeepSeek 账号不写历史（GOAL 拍板，本次无趋势图）。
+            // DeepSeek 账号不写历史（GOAL 拍板，本次无趋势图）；GLM 账号复用 Success 结局，
+            // 与 Kimi 一样写历史。
             // 月度取本轮最终值（失败沿用旧值，未配置为 None）；t 用本轮成功时刻。
             // 历史是派生数据，读写失败只记日志，不影响刷新主流程
             if quota_success {
@@ -786,8 +788,8 @@ pub fn list_accounts() -> Vec<Account> {
     storage::load_settings().unwrap_or_default().accounts
 }
 
-/// 新增账号（Kimi + DeepSeek 合计超上限 5 个报错；名称为空默认「账号 N」），返回新建账号。
-/// provider 仅识别 "deepseek"，其余（含缺省）按 "kimi"
+/// 新增账号（全部提供商合计超上限 10 个报错；名称为空默认「账号 N」），返回新建账号。
+/// provider 仅识别 "deepseek" / "glm"，其余（含缺省）按 "kimi"
 #[tauri::command]
 pub fn add_account(
     app: AppHandle,
@@ -893,9 +895,11 @@ pub fn set_api_key(account_id: String, key: String) -> Result<(), String> {
     let Some(account) = settings.account(&account_id) else {
         return Err("账号不存在".to_string());
     };
-    // 按提供商校验前缀：DeepSeek 只查 sk-，Kimi 保持 sk-kimi-（GOAL 拍板）
+    // 按提供商校验：DeepSeek 只查 sk- 前缀，GLM 无固定前缀只查非空，Kimi 保持 sk-kimi-（GOAL 拍板）
     let key = if account.is_deepseek() {
         validate_deepseek_api_key(&key)?
+    } else if account.is_glm() {
+        validate_glm_api_key(&key)?
     } else {
         validate_api_key(&key)?
     };
@@ -1150,6 +1154,9 @@ const DEEPSEEK_API_KEY_PREFIX: &str = "sk-";
 /// DeepSeek Key 校验失败时返回给前端的文案
 const INVALID_DEEPSEEK_API_KEY_MESSAGE: &str =
     "无效 Key：DeepSeek API Key 以 sk- 开头，请到 platform.deepseek.com/api_keys 获取";
+/// GLM Key 校验失败时返回给前端的文案（GLM Key 无固定前缀，只拦空白输入）
+const INVALID_GLM_API_KEY_MESSAGE: &str =
+    "无效 Key：GLM API Key 不能为空，请到 bigmodel.cn 用户中心获取";
 
 /// trim 后校验前缀，返回可用的 Key 切片
 fn validate_api_key(key: &str) -> Result<&str, String> {
@@ -1168,6 +1175,17 @@ fn validate_deepseek_api_key(key: &str) -> Result<&str, String> {
         Ok(key)
     } else {
         Err(INVALID_DEEPSEEK_API_KEY_MESSAGE.to_string())
+    }
+}
+
+/// GLM Key：无固定前缀（线上为 id.secret 点分两段），trim 后非空即可（GOAL 拍板），
+/// 返回可用的 Key 切片
+fn validate_glm_api_key(key: &str) -> Result<&str, String> {
+    let key = key.trim();
+    if key.is_empty() {
+        Err(INVALID_GLM_API_KEY_MESSAGE.to_string())
+    } else {
+        Ok(key)
     }
 }
 
@@ -1472,6 +1490,30 @@ async fn fetch_with_credential(account: &Account) -> FetchOutcome {
             }
         };
     }
+    // GLM 账号走套餐额度接口，产出映射进 KimiQuota 契约（five_hour/weekly/membership_level），
+    // 成功结局复用 FetchOutcome::Success：下游与 Kimi 配额全链同构
+    // （写缓存、写历史采样、低额判定、5h 重置提醒），只跳过月度拉取（无此接口）
+    if account.is_glm() {
+        return match GlmClient::new().fetch_quota_with_raw(&token).await {
+            Ok((quota, raw)) => FetchOutcome::Success(Box::new((quota, now_unix(), raw))),
+            Err(QuotaError::Unauthorized) => {
+                tracing::warn!(
+                    "GLM 额度刷新失败（账号 {}）: 凭证无效或已过期 (Unauthorized)",
+                    account.id
+                );
+                FetchOutcome::Failed("凭证无效或已过期，请在设置中重新配置".to_string())
+            }
+            Err(QuotaError::Http(e)) => {
+                tracing::warn!("GLM 额度刷新失败（账号 {}）: 网络错误: {e}", account.id);
+                FetchOutcome::Failed("网络错误，展示缓存数据".to_string())
+            }
+            // Parse / Api（含 429 限流）：展示原始错误文本
+            Err(other) => {
+                tracing::warn!("GLM 额度刷新失败（账号 {}）: {other}", account.id);
+                FetchOutcome::Failed(other.to_string())
+            }
+        };
+    }
     match KimiClient::new().fetch_quota_with_raw(&token).await {
         Ok((quota, raw)) => FetchOutcome::Success(Box::new((quota, now_unix(), raw))),
         Err(QuotaError::Unauthorized) => {
@@ -1515,7 +1557,8 @@ fn assemble_panel_state(inner: &Inner) -> PanelState {
 /// 组装实现（设置与凭证查询入参化，纯函数便于单测）：
 /// 按 settings.accounts 顺序逐账号取运行时快照；低额判定要求该账号最近一次
 /// 刷新成功（error 为空）——拉取失败/凭证无效的账号不算低额（GOAL 拍板）。
-/// DeepSeek 账号改按余额判定（不可用或总余额低于阈值元），Kimi 判定逻辑不变。
+/// DeepSeek 账号改按余额判定（不可用或总余额低于阈值元）；GLM 账号走 Kimi 同款
+/// 配额判定（映射后的 KimiQuota 剩余百分比 < warn_threshold_pct），Kimi 判定逻辑不变。
 fn assemble_panel_state_with(
     inner: &Inner,
     settings: &storage::Settings,
@@ -2200,5 +2243,132 @@ mod tests {
         let panel_ds = assemble_panel_state_with(&inner, &settings_ds, &|_| true);
         let tip_ds = worst_account_tooltip(&panel_ds, i18n::Lang::Zh).unwrap();
         assert_eq!(tip_ds, "\nDeepSeek 余额 ¥3.20", "实际: {tip_ds}");
+    }
+
+    // ---- GLM 账号：Key 校验 / 面板组装与低额判定 ----
+
+    fn glm_account(id: &str, name: &str) -> Account {
+        Account {
+            provider: "glm".to_string(),
+            ..account(id, name)
+        }
+    }
+
+    /// GLM 映射后的配额形态：5 小时窗 + 周窗 + 档位（以 100 为总量合成的百分比口径）
+    fn glm_quota(five_hour_remaining: f64, weekly_remaining: f64) -> KimiQuota {
+        let detail = |percent_remaining: f64| QuotaDetail {
+            used: 100.0 - percent_remaining,
+            limit: 100.0,
+            remaining: percent_remaining,
+            reset_time: None,
+            percent_remaining,
+        };
+        KimiQuota {
+            five_hour: Some(detail(five_hour_remaining)),
+            weekly: Some(detail(weekly_remaining)),
+            membership_level: Some("pro".to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_glm_api_key_accepts_any_nonempty() {
+        // GLM Key 无固定前缀（id.secret 点分两段）：任意非空白值都接受，不做 sk- 断言
+        assert_eq!(
+            validate_glm_api_key("abc123.def456").unwrap(),
+            "abc123.def456"
+        );
+        assert_eq!(validate_glm_api_key("sk-whatever").unwrap(), "sk-whatever");
+        // trim 后返回可用切片
+        assert_eq!(validate_glm_api_key("  abc.def \n").unwrap(), "abc.def");
+    }
+
+    #[test]
+    fn validate_glm_api_key_rejects_blank() {
+        let err = validate_glm_api_key("").unwrap_err();
+        assert_eq!(err, INVALID_GLM_API_KEY_MESSAGE);
+        assert!(validate_glm_api_key("   \n ").is_err());
+    }
+
+    #[test]
+    fn glm_panel_low_when_below_threshold() {
+        // GLM 走 Kimi 同款配额判定：任一窗口剩余 < warn_threshold_pct 即低额
+        let acc = glm_account("glm-1", "GLM 号");
+        let settings = settings_with_accounts(vec![acc], 20.0);
+
+        let mut inner = Inner::default();
+        inner.accounts.insert(
+            "glm-1".to_string(),
+            AccountRuntime {
+                error: None,
+                last_quota: Some((glm_quota(15.0, 60.0), 1_900_000_000)),
+                ..AccountRuntime::default()
+            },
+        );
+        let panel = assemble_panel_state_with(&inner, &settings, &|_| true);
+        let p = &panel.accounts[0];
+        assert!(p.low_warning, "5h 剩余 15% < 阈值 20% 应低额");
+        assert_eq!(p.account.provider, "glm");
+        assert!(p.quota.is_some(), "GLM 配额映射进 KimiQuota 契约");
+        assert!(p.deepseek_balance.is_none(), "GLM 账号无 DeepSeek 字段");
+        assert_eq!(p.fetched_at, Some(1_900_000_000));
+        assert!(any_low_warning(&panel), "托盘应变红");
+    }
+
+    #[test]
+    fn glm_panel_not_low_when_healthy_or_on_error() {
+        let acc = glm_account("glm-1", "GLM 号");
+        let settings = settings_with_accounts(vec![acc], 20.0);
+
+        let mut inner = Inner::default();
+        // 双窗口剩余都高于阈值：不红
+        inner.accounts.insert(
+            "glm-1".to_string(),
+            AccountRuntime {
+                error: None,
+                last_quota: Some((glm_quota(57.5, 39.0), 1_900_000_000)),
+                ..AccountRuntime::default()
+            },
+        );
+        let panel = assemble_panel_state_with(&inner, &settings, &|_| true);
+        assert!(!panel.accounts[0].low_warning);
+
+        // 拉取失败 + 缓存配额剩余 0：失败账号永不低额（拉取失败不红铁律）
+        inner.accounts.insert(
+            "glm-1".to_string(),
+            AccountRuntime {
+                error: Some("网络错误，展示缓存数据".to_string()),
+                last_quota: Some((glm_quota(0.0, 0.0), 1_899_000_000)),
+                ..AccountRuntime::default()
+            },
+        );
+        let panel = assemble_panel_state_with(&inner, &settings, &|_| true);
+        assert!(!panel.accounts[0].low_warning, "失败账号不算低额");
+        assert!(!any_low_warning(&panel), "托盘不应变红");
+        // 缓存配额照常展示（错误横幅与数据并存）
+        assert!(panel.accounts[0].quota.is_some());
+        assert_eq!(
+            panel.accounts[0].error.as_deref(),
+            Some("网络错误，展示缓存数据")
+        );
+    }
+
+    #[test]
+    fn tooltip_covers_glm_quota() {
+        // GLM 账号走 Kimi 同款窗口摘要（7天/5h 剩余百分比）
+        let glm = glm_account("glm-1", "GLM 号");
+        let settings = settings_with_accounts(vec![glm], 20.0);
+        let mut inner = Inner::default();
+        inner.accounts.insert(
+            "glm-1".to_string(),
+            AccountRuntime {
+                error: None,
+                last_quota: Some((glm_quota(36.0, 87.0), 1)),
+                ..AccountRuntime::default()
+            },
+        );
+        let panel = assemble_panel_state_with(&inner, &settings, &|_| true);
+        let tip = worst_account_tooltip(&panel, i18n::Lang::Zh).unwrap();
+        assert_eq!(tip, "\n7天剩余 87% · 5h剩余 36%", "实际: {tip}");
     }
 }

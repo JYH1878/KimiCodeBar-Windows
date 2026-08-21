@@ -73,7 +73,9 @@ fn run_status() -> i32 {
 }
 
 /// 拉取配额并序列化为成功 JSON；失败返回 (退出码, 错误 JSON)。
-/// 多账号：输出第一个账号（保持旧版单账号输出契约不变，见 GOAL 拍板）
+/// 多账号：输出第一个账号（保持旧版单账号输出契约不变，见 GOAL 拍板）；
+/// 第一个账号是 GLM（且未用 KIMI_API_KEY 环境变量覆盖）时走 GLM 额度接口，
+/// 输出契约不变（配额本就映射进 KimiQuota）
 async fn fetch_status() -> Result<String, (i32, String)> {
     let first_account = kimicodebar::storage::load_settings()
         .unwrap_or_default()
@@ -81,7 +83,10 @@ async fn fetch_status() -> Result<String, (i32, String)> {
         .into_iter()
         .next();
     // 凭证解析顺序：环境变量 KIMI_API_KEY（非空）→ 第一个账号的 keyring / OAuth 存储凭证
-    let token = match env_token("KIMI_API_KEY") {
+    let env = env_token("KIMI_API_KEY");
+    // 环境变量是 Kimi 专用旁路：用了它就不按账号 provider 分派
+    let use_glm = env.is_none() && first_account.as_ref().is_some_and(|a| a.provider == "glm");
+    let token = match env {
         Some(token) => token,
         None => {
             let Some(account) = &first_account else {
@@ -110,20 +115,32 @@ async fn fetch_status() -> Result<String, (i32, String)> {
         }
     };
 
-    let quota = KimiClient::new()
-        .fetch_quota(&token)
-        .await
-        .map_err(|e| (EXIT_FETCH_FAILED, error_json(&format!("获取配额失败: {e}"))))?;
+    let quota = if use_glm {
+        kimicodebar::glm::client::GlmClient::new()
+            .fetch_quota(&token)
+            .await
+            .map_err(|e| (EXIT_FETCH_FAILED, error_json(&format!("获取配额失败: {e}"))))?
+    } else {
+        KimiClient::new()
+            .fetch_quota(&token)
+            .await
+            .map_err(|e| (EXIT_FETCH_FAILED, error_json(&format!("获取配额失败: {e}"))))?
+    };
 
     // 月度总量是可选增强：无网页凭证或拉取失败都退化为 null，不影响主结果。
     // 新体系（refresh_token）优先自动续期；旧体系 kimi-auth / 环境变量直接当 Bearer 用。
+    // GLM 无月度概念，直接输出 null。
     let account_id = first_account.as_ref().map(|a| a.id.as_str());
-    let monthly = match web_monthly(account_id).await {
-        Some(info) => Some(info),
-        None => match web_token(account_id) {
-            Some(token) => web::fetch_subscription_stats(&token).await.ok(),
-            None => None,
-        },
+    let monthly = if use_glm {
+        None
+    } else {
+        match web_monthly(account_id).await {
+            Some(info) => Some(info),
+            None => match web_token(account_id) {
+                Some(token) => web::fetch_subscription_stats(&token).await.ok(),
+                None => None,
+            },
+        }
     };
 
     Ok(success_json(quota, monthly, Utc::now().timestamp()))

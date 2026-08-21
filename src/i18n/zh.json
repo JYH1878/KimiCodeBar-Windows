@@ -87,7 +87,8 @@
     "creating": "创建中…",
     "created": "已创建「{{name}}」，可在上方列表中继续完善配置",
     "createdButCredFailed": "已创建「{{name}}」，但凭证保存失败：{{error}}",
-    "maxReached": "最多支持 5 个账号"
+    "maxReached": "最多支持 10 个账号",
+    "glmKeyPlaceholder": "GLM API Key（id.secret 形式）"
   },
   "settings": {
     "title": "KimiCodeBar 设置",
@@ -163,6 +164,9 @@
     "getKey": "前往 kimi.com/code/console 获取",
     "deepseekHint": "DeepSeek 开放平台 API Key 以 sk- 开头，用于查询账户余额。",
     "deepseekGetKey": "前往 platform.deepseek.com/api_keys 获取",
+    "glmHint": "GLM Coding Plan API Key（id.secret 形式，无固定前缀），用于查询套餐额度。",
+    "glmGetKey": "前往 bigmodel.cn 用户中心获取",
+    "glmPlaceholder": "id.secret 形式的 Key",
     "errEmpty": "请输入 API Key",
     "saved": "API Key 已保存",
     "cleared": "API Key 已清除",

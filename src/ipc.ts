@@ -38,11 +38,12 @@ const MOCK_MONTHLY: MonthlyInfo = {
   reset_time: MOCK_MONTHLY_RESET,
 };
 
-/** 浏览器 mock 的账号列表（两个 Kimi 账号 + 一个 DeepSeek 账号，便于调试翻页与余额页） */
+/** 浏览器 mock 的账号列表（两个 Kimi 账号 + 一个 DeepSeek 账号 + 一个 GLM 账号，便于调试翻页与各提供商页） */
 const MOCK_ACCOUNTS: Account[] = [
   { id: "mock-acc-1", name: "账号 1", login_method: "api_key", provider: "kimi" },
   { id: "mock-acc-2", name: "演示号", login_method: "oauth", provider: "kimi" },
   { id: "mock-acc-3", name: "DeepSeek 演示", login_method: "api_key", provider: "deepseek" },
+  { id: "mock-acc-4", name: "GLM 演示", login_method: "api_key", provider: "glm" },
 ];
 
 /** 浏览器 mock 的 DeepSeek 余额假数据（标注：仅浏览器 dev 用，真实数据来自接口/缓存） */
@@ -118,6 +119,31 @@ const MOCK_STATE: PanelState = {
       error: null,
       low_warning: false,
       deepseek_balance: MOCK_DEEPSEEK_BALANCE,
+    },
+    {
+      account: MOCK_ACCOUNTS[3],
+      credential: true,
+      // GLM 账号：额度映射进 KimiQuota 契约（以 100 为总量合成的百分比口径），无月度/Booster
+      quota: {
+        weekly: {
+          used: 61,
+          limit: 100,
+          remaining: 39,
+          reset_time: MOCK_WEEKLY_RESET,
+          percent_remaining: 39,
+        },
+        five_hour: {
+          used: 42.5,
+          limit: 100,
+          remaining: 57.5,
+          reset_time: MOCK_FIVE_HOUR_RESET,
+          percent_remaining: 57.5,
+        },
+        membership_level: "pro",
+      },
+      fetched_at: Math.floor(Date.now() / 1000),
+      error: null,
+      low_warning: false,
     },
   ],
 };
@@ -463,10 +489,10 @@ export async function listAccounts(): Promise<Account[]> {
   return invoke<Account[]>("list_accounts");
 }
 
-/** 新增账号（Kimi + DeepSeek 合计超上限 5 个报错；名称为空默认「账号 N」），返回新建账号 */
+/** 新增账号（全部提供商合计超上限 10 个报错；名称为空默认「账号 N」），返回新建账号 */
 export async function addAccount(name?: string, provider: AccountProvider = "kimi"): Promise<Account> {
   if (!isTauri) {
-    if (mockDb.accounts.length >= 5) throw new Error("最多支持 5 个账号");
+    if (mockDb.accounts.length >= 10) throw new Error("最多支持 10 个账号");
     const trimmed = name?.trim();
     const account: Account = {
       id: `mock-acc-${Date.now()}`,
@@ -534,15 +560,22 @@ export async function setAccountLoginMethod(
 export async function setApiKey(accountId: string, key: string): Promise<void> {
   if (!isTauri) {
     const k = key.trim();
-    // mock 复刻后端格式校验（按提供商分派前缀），便于浏览器下调试错误提示
-    const isDeepSeek = mockDb.accounts.find((a) => a.id === accountId)?.provider === "deepseek";
-    if (isDeepSeek ? !k.startsWith("sk-") : !k.startsWith("sk-kimi-")) {
-      throw new Error(
-        isDeepSeek ? "API Key 格式不正确：应以 sk- 开头" : "API Key 格式不正确：应以 sk-kimi- 开头",
-      );
-    }
-    if (k.length < 12) {
-      throw new Error("API Key 格式不正确：长度过短");
+    // mock 复刻后端格式校验（按提供商分派：DeepSeek 查 sk- 前缀，GLM 只查非空，Kimi 查 sk-kimi-），便于浏览器下调试错误提示
+    const provider = mockDb.accounts.find((a) => a.id === accountId)?.provider;
+    if (provider === "glm") {
+      if (k === "") {
+        throw new Error("API Key 格式不正确：不能为空");
+      }
+    } else {
+      const isDeepSeek = provider === "deepseek";
+      if (isDeepSeek ? !k.startsWith("sk-") : !k.startsWith("sk-kimi-")) {
+        throw new Error(
+          isDeepSeek ? "API Key 格式不正确：应以 sk- 开头" : "API Key 格式不正确：应以 sk-kimi- 开头",
+        );
+      }
+      if (k.length < 12) {
+        throw new Error("API Key 格式不正确：长度过短");
+      }
     }
     mockDb.apiKeys[accountId] = k;
     return;

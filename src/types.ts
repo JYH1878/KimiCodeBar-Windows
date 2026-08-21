@@ -36,8 +36,8 @@ export interface KimiQuota {
   booster?: BoosterInfo;
 }
 
-/** 提供商：Kimi（用量监控）/ DeepSeek（开放平台余额） */
-export type AccountProvider = "kimi" | "deepseek";
+/** 提供商：Kimi（用量监控）/ DeepSeek（开放平台余额）/ GLM Coding Plan（套餐额度） */
+export type AccountProvider = "kimi" | "deepseek" | "glm";
 
 /** 单个账号（settings.json 的 accounts 数组元素；凭证本体不落盘在这里） */
 export interface Account {

@@ -55,7 +55,7 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
   const addFormRef = useRef<HTMLDivElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
 
-  /** 重拉账号列表与全部凭证徽标（≤5 个账号，一次全拉开销可忽略） */
+  /** 重拉账号列表与全部凭证徽标（≤10 个账号，一次全拉开销可忽略） */
   const reload = useCallback(async () => {
     try {
       const list = await listAccounts();
@@ -147,7 +147,7 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
   };
 
   /** 添加账号：建账号 → 存登录方式 → 按需存 API Key / 网页 token。
-   *  DeepSeek 账号只有 API Key 一种凭证（固定 login_method=api_key，无网页 token）。
+   *  DeepSeek / GLM 账号只有 API Key 一种凭证（固定 login_method=api_key，无网页 token）。
    *  账号建好后凭证保存失败不回滚账号（列表照常刷新，错误原样展示，可在配置区补配） */
   const create = async () => {
     setCreating(true);
@@ -156,7 +156,7 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
     let account: Account;
     try {
       account = await addAccount(newName.trim() === "" ? undefined : newName.trim(), newProvider);
-      await setAccountLoginMethod(account.id, newProvider === "deepseek" ? "api_key" : newMethod);
+      await setAccountLoginMethod(account.id, newProvider === "kimi" ? newMethod : "api_key");
     } catch (e) {
       setAddError(String(e));
       setCreating(false);
@@ -166,7 +166,7 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
     // 可选的月度总量 refresh_token：填了就校验保存（在线校验失败抛中文错误，仅 Kimi 账号）
     let credError: string | null = null;
     try {
-      if ((newProvider === "deepseek" || newMethod === "api_key") && newKey.trim() !== "") {
+      if ((newProvider !== "kimi" || newMethod === "api_key") && newKey.trim() !== "") {
         await setApiKey(account.id, newKey.trim());
       }
       if (newProvider === "kimi" && newWebToken.trim() !== "") {
@@ -190,7 +190,7 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
     setCreating(false);
   };
 
-  const atCap = accounts.length >= 5;
+  const atCap = accounts.length >= 10;
 
   return (
     <section className="scard">
@@ -228,6 +228,7 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
                     <span className="account-name">{a.name}</span>
                   )}
                   {a.provider === "deepseek" && <span className="badge">DeepSeek</span>}
+                  {a.provider === "glm" && <span className="badge">GLM</span>}
                   {status?.api_key_configured && <span className="badge">Key</span>}
                   {status?.oauth_configured && <span className="badge">OAuth</span>}
                   {status?.web_token_configured && <span className="badge">{t("accounts.monthlyBadge")}</span>}
@@ -284,13 +285,13 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
                 </div>
 
                 {/* 凭证配置区（该账号）：Kimi = 登录方式单选 + 对应配置区 + 月度总量；
-                    DeepSeek 只有 API Key 一种凭证，直接给 Key 配置区 */}
+                    DeepSeek / GLM 只有 API Key 一种凭证，直接给 Key 配置区 */}
                 {expanded && (
                   <div className="account-body">
-                    {a.provider === "deepseek" ? (
+                    {a.provider !== "kimi" ? (
                       <ApiKeySection
                         accountId={a.id}
-                        provider="deepseek"
+                        provider={a.provider}
                         status={status ?? null}
                         onChanged={() => void reloadStatus(a.id)}
                       />
@@ -356,7 +357,7 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
                 />
-                {/* 提供商单选（默认 Kimi）：DeepSeek 只有 API Key，选后隐藏登录方式与网页 token */}
+                {/* 提供商单选（默认 Kimi）：DeepSeek / GLM 只有 API Key，选后隐藏登录方式与网页 token */}
                 <div className="add-method-row">
                   <label className={`radio-row${newProvider === "kimi" ? " active" : ""}`}>
                     <input
@@ -375,6 +376,15 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
                       onChange={() => setNewProvider("deepseek")}
                     />
                     <span>DeepSeek</span>
+                  </label>
+                  <label className={`radio-row${newProvider === "glm" ? " active" : ""}`}>
+                    <input
+                      type="radio"
+                      name="add-provider"
+                      checked={newProvider === "glm"}
+                      onChange={() => setNewProvider("glm")}
+                    />
+                    <span>GLM</span>
                   </label>
                 </div>
                 {newProvider === "kimi" && (
@@ -399,11 +409,13 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
                     </label>
                   </div>
                 )}
-                {newProvider === "deepseek" || newMethod === "api_key" ? (
+                {newProvider !== "kimi" || newMethod === "api_key" ? (
                   <input
                     className="input"
                     type="password"
-                    placeholder={newProvider === "deepseek" ? "sk-…" : "sk-kimi-…"}
+                    placeholder={
+                      newProvider === "deepseek" ? "sk-…" : newProvider === "glm" ? t("accounts.glmKeyPlaceholder") : "sk-kimi-…"
+                    }
                     value={newKey}
                     onChange={(e) => setNewKey(e.target.value)}
                     spellCheck={false}

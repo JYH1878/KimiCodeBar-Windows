@@ -23,7 +23,7 @@ pub const DEFAULT_DEEPSEEK_WARN_THRESHOLD: f64 = 5.0;
 /// DeepSeek 低余额告警阈值上限（元，防手改 json 越界）
 pub const MAX_DEEPSEEK_WARN_THRESHOLD: f64 = 100_000.0;
 /// 账号数量上限（面板一页一个账号 + 末尾「+」）
-pub const MAX_ACCOUNTS: usize = 5;
+pub const MAX_ACCOUNTS: usize = 10;
 
 /// 单个账号（settings.json 的 accounts 数组元素，snake_case）。
 /// 凭证本体不落盘到这里：API Key / 网页 token 在 Windows 凭据管理器（槽位名带账号 id，
@@ -37,7 +37,7 @@ pub struct Account {
     /// 登录方式："api_key" / "oauth"；None 表示未显式选择（优先 api_key，其次 oauth）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub login_method: Option<String>,
-    /// 提供商："kimi"（默认）/ "deepseek"；旧版设置文件无此字段，serde 默认 "kimi"
+    /// 提供商："kimi"（默认）/ "deepseek" / "glm"；旧版设置文件无此字段，serde 默认 "kimi"
     #[serde(default = "default_provider")]
     pub provider: String,
 }
@@ -51,6 +51,11 @@ impl Account {
     /// 是否 DeepSeek 账号（只查余额，无配额/月度/历史）
     pub fn is_deepseek(&self) -> bool {
         self.provider == "deepseek"
+    }
+
+    /// 是否 GLM Coding Plan 账号（查套餐额度，无月度/总额/Booster 概念）
+    pub fn is_glm(&self) -> bool {
+        self.provider == "glm"
     }
 }
 
@@ -157,9 +162,9 @@ impl Settings {
         self.accounts.iter().find(|a| a.id == account_id)
     }
 
-    /// 新增账号：超上限（Kimi + DeepSeek 合计 5 个）报错；名称为空时默认「账号 N」
-    /// （N = 当前数量 + 1）。provider 仅识别 "deepseek"，其余一律按 "kimi"（防御性归一）。
-    /// 返回新建账号的克隆（id 为 uuid v4）
+    /// 新增账号：超上限（全部提供商合计 10 个）报错；名称为空时默认「账号 N」
+    /// （N = 当前数量 + 1）。provider 仅识别 "deepseek" / "glm"，其余一律按 "kimi"
+    /// （防御性归一）。返回新建账号的克隆（id 为 uuid v4）
     pub fn add_account(&mut self, name: Option<&str>, provider: &str) -> Result<Account, String> {
         if self.accounts.len() >= MAX_ACCOUNTS {
             return Err(format!("最多支持 {MAX_ACCOUNTS} 个账号"));
@@ -173,10 +178,10 @@ impl Settings {
             id: uuid::Uuid::new_v4().to_string(),
             name,
             login_method: None,
-            provider: if provider == "deepseek" {
-                "deepseek".to_string()
-            } else {
-                default_provider()
+            provider: match provider {
+                "deepseek" => "deepseek".to_string(),
+                "glm" => "glm".to_string(),
+                _ => default_provider(),
             },
         };
         self.accounts.push(account.clone());
@@ -636,30 +641,40 @@ mod tests {
         // 默认名 N = 当前数量 + 1
         let a3 = settings.add_account(Some(""), "kimi").unwrap();
         assert_eq!(a3.name, "账号 3");
-        settings.add_account(None, "kimi").unwrap();
-        settings.add_account(None, "kimi").unwrap();
-        // 第 6 个超上限
-        assert!(settings.add_account(None, "kimi").is_err());
+        // 补到上限 10
+        for _ in 3..MAX_ACCOUNTS {
+            settings.add_account(None, "kimi").unwrap();
+        }
+        // 第 11 个超上限
+        let err = settings.add_account(None, "kimi").unwrap_err();
+        assert_eq!(err, "最多支持 10 个账号");
         assert_eq!(settings.accounts.len(), MAX_ACCOUNTS);
     }
 
     #[test]
-    fn add_account_provider_normalized_and_cap_counts_deepseek() {
+    fn add_account_provider_normalized_and_cap_counts_all_providers() {
         let mut settings = Settings::default();
-        // provider 归一：仅 "deepseek" 识别为 DeepSeek，其余（含未知值）按 kimi
+        // provider 归一："deepseek" / "glm" 识别为对应提供商，其余（含未知值）按 kimi
         let ds = settings.add_account(Some("DS"), "deepseek").unwrap();
         assert_eq!(ds.provider, "deepseek");
         assert!(ds.is_deepseek());
+        assert!(!ds.is_glm());
+        let glm = settings.add_account(Some("GLM"), "glm").unwrap();
+        assert_eq!(glm.provider, "glm");
+        assert!(glm.is_glm());
+        assert!(!glm.is_deepseek());
         let unknown = settings.add_account(Some("X"), "something-else").unwrap();
         assert_eq!(unknown.provider, "kimi");
         assert!(!unknown.is_deepseek());
+        assert!(!unknown.is_glm());
 
-        // 上限按 Kimi + DeepSeek 合计校验：已有 2 个，再补 3 个到 5，第 6 个（deepseek）报错
-        settings.add_account(None, "kimi").unwrap();
-        settings.add_account(None, "deepseek").unwrap();
-        settings.add_account(None, "kimi").unwrap();
+        // 上限按全部提供商合计校验：已有 3 个，再补 7 个到 10，第 11 个报错
+        for _ in 3..MAX_ACCOUNTS {
+            settings.add_account(None, "kimi").unwrap();
+        }
         assert_eq!(settings.accounts.len(), MAX_ACCOUNTS);
         assert!(settings.add_account(None, "deepseek").is_err());
+        assert!(settings.add_account(None, "glm").is_err());
     }
 
     #[test]
