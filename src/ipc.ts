@@ -337,6 +337,8 @@ const mockDb = {
   accounts: MOCK_ACCOUNTS.map((a) => ({ ...a })),
   // 各账号的凭证（按账号 id 索引）：预置账号 1 一个假 Key，方便看到"已配置"徽标
   apiKeys: { "mock-acc-1": "sk-kimi-mock9f8e7d6c5b4a" } as Record<string, string>,
+  // 各账号已登记的额外 API Key（本地消耗归属用）：预置账号 1 一把，便于调试列表展示
+  apiKeysExtra: { "mock-acc-1": ["sk-kimi-extra5f6e7d8c9b0a"] } as Record<string, string[]>,
   oauthAccounts: new Set<string>(),
   // 网页凭证（refresh_token / 旧 kimi-auth，月度总量用）：初始未配置
   webTokens: {} as Record<string, string>,
@@ -382,6 +384,8 @@ function mockCredentialStatus(accountId: string): CredentialStatus {
     login_method: account?.login_method ?? null,
     api_key_configured: apiKey !== null,
     api_key_masked: apiKey ? `sk-kimi-****…${apiKey.slice(-4)}` : null,
+    // 与后端 mask_api_key 同规则（>12 字符：前 8 + … + 后 4，否则全显），按登记顺序
+    api_key_extra_masked: (mockDb.apiKeysExtra[accountId] ?? []).map(mockMaskApiKey),
     oauth_configured: mockDb.oauthAccounts.has(accountId),
     web_token_configured: mockDb.webTokens[accountId] != null,
   };
@@ -536,6 +540,7 @@ export async function deleteAccount(accountId: string): Promise<void> {
   if (!isTauri) {
     mockDb.accounts = mockDb.accounts.filter((a) => a.id !== accountId);
     delete mockDb.apiKeys[accountId];
+    delete mockDb.apiKeysExtra[accountId];
     delete mockDb.webTokens[accountId];
     mockDb.oauthAccounts.delete(accountId);
     return;
@@ -590,6 +595,64 @@ export async function clearApiKey(accountId: string): Promise<void> {
     return;
   }
   return invoke<void>("clear_api_key", { accountId });
+}
+
+/** 与后端 mask_api_key 同规则的脱敏：长度 > 12 显示 前 8 + "…" + 后 4，否则全显 */
+function mockMaskApiKey(key: string): string {
+  const chars = [...key];
+  return chars.length > 12 ? `${chars.slice(0, 8).join("")}…${chars.slice(-4).join("")}` : key;
+}
+
+/** 每账号额外 API Key（本地消耗归属用）的登记上限（与后端一致） */
+const MAX_EXTRA_API_KEYS = 5;
+
+/**
+ * 给该账号登记一把额外 API Key（同一账号在不同工具挂的多把 key 汇总归属到同一桶；
+ * 只参与本地消耗归属，不参与任何网络请求）。
+ * 后端按该账号 provider 复用主 Key 同款校验，重复/超上限抛中文错误原样透传
+ */
+export async function addAccountExtraKey(accountId: string, key: string): Promise<void> {
+  if (!isTauri) {
+    // mock 复刻后端语义：按 provider 校验 + 拒与主 Key/已有额外 Key 重复 + 上限 5
+    const k = key.trim();
+    const provider = mockDb.accounts.find((a) => a.id === accountId)?.provider;
+    if (provider === "glm") {
+      if (k === "") throw new Error("API Key 格式不正确：不能为空");
+    } else {
+      const isDeepSeek = provider === "deepseek";
+      if (isDeepSeek ? !k.startsWith("sk-") : !k.startsWith("sk-kimi-")) {
+        throw new Error(
+          isDeepSeek ? "API Key 格式不正确：应以 sk- 开头" : "API Key 格式不正确：应以 sk-kimi- 开头",
+        );
+      }
+    }
+    if (mockDb.apiKeys[accountId] === k) {
+      throw new Error("该 Key 已配置为主 API Key，无需重复登记");
+    }
+    const extras = mockDb.apiKeysExtra[accountId] ?? [];
+    if (extras.includes(k)) throw new Error("该 Key 已在额外 Key 列表中");
+    if (extras.length >= MAX_EXTRA_API_KEYS) {
+      throw new Error(`每个账号最多登记 ${MAX_EXTRA_API_KEYS} 把额外 Key`);
+    }
+    mockDb.apiKeysExtra[accountId] = [...extras, k];
+    return;
+  }
+  return invoke<void>("add_account_extra_key", { accountId, key });
+}
+
+/**
+ * 移除该账号的一把额外 API Key：参数为脱敏串（UI 只持有脱敏串），
+ * 后端对每把额外 key 重算脱敏后移除第一个精确匹配；无匹配抛中文错误原样透传
+ */
+export async function removeAccountExtraKey(accountId: string, masked: string): Promise<void> {
+  if (!isTauri) {
+    const extras = mockDb.apiKeysExtra[accountId] ?? [];
+    const idx = extras.findIndex((k) => mockMaskApiKey(k) === masked.trim());
+    if (idx < 0) throw new Error("未找到该额外 Key（可能已被移除）");
+    mockDb.apiKeysExtra[accountId] = extras.filter((_, i) => i !== idx);
+    return;
+  }
+  return invoke<void>("remove_account_extra_key", { accountId, masked });
 }
 
 /** 获取该账号的凭证配置状态（脱敏 Key + 各方式是否已配置） */

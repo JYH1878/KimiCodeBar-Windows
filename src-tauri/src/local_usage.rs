@@ -27,11 +27,12 @@
 //! - 模型路由：先查该 home config.toml 的 [models] 表拿 provider（含 "kimi" → Kimi 路由，
 //!   覆盖 "managed:kimi-code"；"deepseek" 开头 → DeepSeek；dashscope 等第三方 → 未归属）；
 //!   查不到按前缀兜底——deepseek 开头 → DeepSeek，其余 → Kimi；
-//! - Kimi 路由：该 home 的 kimi api_key 与各 Kimi 账号 load_api_key 精确相等 → 归该账号；
+//! - Kimi 路由：该 home 的 kimi api_key 与各 Kimi 账号登记的任一 key（主 key 或
+//!   任一额外 key，见 creds.rs 的 api_key_extra 槽位）精确相等 → 归该账号；
 //!   否则解该 home OAuth access_token（JWT）的 user_id（缺失退 sub）与各账号 OAuth token 的
 //!   user_id 比对，相等 → 归该账号；都不中 → 未归属；
-//! - DeepSeek 路由：CLI 的 deepseek api_key 与各 DeepSeek 账号 load_api_key 精确相等 →
-//!   归该账号，否则未归属；
+//! - DeepSeek 路由：CLI 的 deepseek api_key 与各 DeepSeek 账号登记的任一 key
+//!   （主 key 或任一额外 key）精确相等 → 归该账号，否则未归属；
 //! - 归属判定时机 = 扫描时快照：扫描 ≤3 分钟一轮，换号存在对应误差窗（拍板接受，
 //!   不保证逐条精确）；JWT 只解 payload 不验签、不联网；
 //! - CLI 与各账号的 key / user_id 只在内存比对，绝不落盘进 scan-state.json。
@@ -47,6 +48,16 @@
 //! - 文件截断回退为整文件重读，该文件的旧贡献理论上可能重复计数一次
 //!   （会话文件按 uuid 命名、只增不改，实际不会触发）；
 //! - 已消失文件的偏移会被清理，同名新文件从头读，不会按旧偏移跳过开头。
+//!
+//! 跨 Harness 扩展（Claude Code / Codex / OpenCode 三家本地日志，解析实现见
+//! local_usage/ 子模块）：三家日志与 Kimi home 并列喂同一套分桶聚合器，事件语义
+//! 不变（ts 毫秒 / model / tokens），UI 零改动。归属：按各家配置文件里的 API key
+//! 与**全部账号（不分 provider）**登记的任一 key（keyring 主 key 或任一额外 key）
+//! 精确相等 → 归该账号；
+//! 取不到 key 或全不中进未归属桶（OAuth 形态登录设计内落此桶）。扫描状态新增
+//! 键（Claude 的 message.id 去重集、Codex 的文件级模型/累计、OpenCode 的
+//! time_created 水位 + id 去重集）全走 serde(default)，旧 scan-state 兼容不清零；
+//! 去重集按 48 小时裁剪防膨胀。新 harness 事件同样计入机器级活跃判定。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -56,6 +67,10 @@ use chrono::{DateTime, NaiveDate, TimeZone};
 use serde::{Deserialize, Serialize};
 
 use crate::history::HistoryPoint;
+
+mod claude;
+mod codex;
+mod opencode;
 
 /// 扫描节流：距上次扫描小于该秒数直接返回进程内缓存结果
 const THROTTLE_SECS: i64 = 180;
@@ -67,6 +82,8 @@ const BY_DATE_RETENTION_DAYS: i64 = 30;
 const TOP_MODELS: usize = 5;
 /// 副模型哨兵：secondary_model 实验下子 agent 的 usage.record model 落该字面值
 const SECONDARY_SENTINEL: &str = "__secondary__";
+/// 跨 Harness 去重集（Claude message.id / OpenCode 消息 id）的保留窗口（毫秒）
+const HARNESS_DEDUP_MS: i64 = 48 * 3600 * 1000;
 /// CSV 表头（与导出约定一致）：时间为本地 ISO（YYYY-MM-DDTHH:mm:ss）
 const CSV_HEADER: &str = "time,weekly,five_hour,monthly";
 
@@ -152,24 +169,28 @@ pub fn scan() -> ScanView {
 }
 
 /// 不节流的完整扫描（scan 去掉进程内缓存的部分，测试可直接驱动）：
-/// 枚举全部 CLI home → 每个 home 用自己的凭证快照 → 逐 home 增量扫描。
+/// 枚举全部 CLI home → 每个 home 用自己的凭证快照 → 逐 home 增量扫描；
+/// 另采集三家 harness（Claude Code / Codex / OpenCode）的扫描输入一并扫。
 /// home 枚举失败（取不到用户目录）容忍为空目标，按空结果扫描
 fn scan_fresh<Tz: TimeZone>(now_ms: i64, tz: &Tz) -> ScanView
 where
     Tz::Offset: std::fmt::Display,
 {
-    let targets: Vec<(PathBuf, Attribution)> = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(|root| cli_homes(Path::new(&root)))
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+    let targets: Vec<(PathBuf, Attribution)> = home
+        .as_deref()
+        .map(Path::new)
+        .map(cli_homes)
         .unwrap_or_default()
         .into_iter()
-        .map(|home| {
+        .map(|h| {
             // 该 home 的事件用该 home 的快照归属（凭证三处全在该 home 内）
-            let attribution = snapshot_attribution(&home);
-            (home.join("sessions"), attribution)
+            let attribution = snapshot_attribution(&h);
+            (h.join("sessions"), attribution)
         })
         .collect();
-    let mut view = scan_with(&targets, &state_file_path(), now_ms, tz);
+    let harness = harness_input(home.as_deref());
+    let mut view = scan_full(&targets, &harness, &state_file_path(), now_ms, tz);
     // __secondary__ 桶并入真实副模型（展示层折叠，不落盘；解析不到保留原样）：逐桶折叠
     if let Some(target) = resolve_secondary_model() {
         for stats in view.by_account.values_mut() {
@@ -177,6 +198,95 @@ where
         }
     }
     view
+}
+
+/// 三家 harness 的扫描输入（根目录与账号 key 快照，测试可整体伪造绕开环境解析）：
+/// - Claude / Codex 只认默认路径（CLAUDE_CONFIG_DIR / CODEX_HOME 指走的 home
+///   探测不到，拍板接受）；
+/// - OpenCode 候选目录存在几个扫几个（按优先级去重）；
+/// - key_accounts = 全部账号（不分 provider）的 api_key 快照：harness 事件按
+///   key 精确匹配归属，只在内存比对、不落盘
+#[derive(Default)]
+struct HarnessInput {
+    claude_dir: Option<PathBuf>,
+    codex_dir: Option<PathBuf>,
+    opencode_data_dirs: Vec<PathBuf>,
+    opencode_config_dirs: Vec<PathBuf>,
+    /// (api_key, 账号 id)
+    key_accounts: Vec<(String, String)>,
+}
+
+/// 从环境解析三家 harness 的扫描输入（归属 key 的采集在扫描函数内做）
+fn harness_input(home: Option<&std::ffi::OsStr>) -> HarnessInput {
+    let home = home.map(Path::new);
+    let mut input = HarnessInput {
+        claude_dir: home.map(|h| h.join(".claude")),
+        codex_dir: home.map(|h| h.join(".codex")),
+        ..HarnessInput::default()
+    };
+    let mut data_dirs: Vec<PathBuf> = Vec::new();
+    push_existing(
+        &mut data_dirs,
+        std::env::var_os("XDG_DATA_HOME").map(|p| PathBuf::from(p).join("opencode")),
+    );
+    if let Some(h) = home {
+        push_existing(
+            &mut data_dirs,
+            Some(h.join(".local").join("share").join("opencode")),
+        );
+    }
+    push_existing(
+        &mut data_dirs,
+        std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("opencode")),
+    );
+    push_existing(
+        &mut data_dirs,
+        std::env::var_os("LOCALAPPDATA").map(|p| PathBuf::from(p).join("opencode")),
+    );
+    input.opencode_data_dirs = data_dirs;
+
+    let mut config_dirs: Vec<PathBuf> = Vec::new();
+    push_existing(
+        &mut config_dirs,
+        std::env::var_os("XDG_CONFIG_HOME").map(|p| PathBuf::from(p).join("opencode")),
+    );
+    if let Some(h) = home {
+        push_existing(&mut config_dirs, Some(h.join(".config").join("opencode")));
+    }
+    push_existing(
+        &mut config_dirs,
+        std::env::var_os("APPDATA").map(|p| PathBuf::from(p).join("opencode")),
+    );
+    input.opencode_config_dirs = config_dirs;
+
+    // 全部账号（不分 provider）的 api_key：harness 归属比对的账号侧快照。
+    // 主 key 与每把额外 key 各自成一条目，命中任一即归该账号
+    for account in &crate::storage::load_settings().unwrap_or_default().accounts {
+        if let Some(key) = crate::creds::load_api_key(&account.id)
+            .ok()
+            .flatten()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+        {
+            input.key_accounts.push((key, account.id.clone()));
+        }
+        for key in crate::creds::load_api_key_extra(&account.id).unwrap_or_default() {
+            let key = key.trim().to_string();
+            if !key.is_empty() {
+                input.key_accounts.push((key, account.id.clone()));
+            }
+        }
+    }
+    input
+}
+
+/// 候选目录去重入表：仅收存在目录（opencode.db / auth.json 的存在性后续读取时判）
+fn push_existing(dirs: &mut Vec<PathBuf>, candidate: Option<PathBuf>) {
+    if let Some(path) = candidate {
+        if path.is_dir() && !dirs.contains(&path) {
+            dirs.push(path);
+        }
+    }
 }
 
 /// 导出用量报告：每个账号的历史采样各写一个 CSV 到 `{config_dir}/exports/`
@@ -398,13 +508,70 @@ struct ScanState {
     /// 上次完成扫描时间（epoch 秒）
     #[serde(default)]
     last_scan_at: Option<i64>,
-    /// 文件路径 → 已读字节偏移
+    /// 文件路径 → 已读字节偏移（Kimi wire.jsonl + Claude/Codex 的 jsonl 共用）
     #[serde(default)]
     files: HashMap<String, u64>,
     /// 分桶累计聚合：键 = 账号 id，未归属桶键为 UNASSIGNED_BUCKET
     /// （增量读取下全时间统计的来源；旧版机器级 totals 合计见 load_state 的迁移）
     #[serde(default)]
     buckets: HashMap<String, UsageAggregator>,
+    /// Claude message.id → 已计入（跨文件全局去重：resume 会话文件会复制旧消息）
+    #[serde(default)]
+    claude_ids: HashMap<String, ClaudeIdEntry>,
+    /// Codex 文件路径 → 最近 turn_context 模型（增量续扫下跨批次记忆）
+    #[serde(default)]
+    codex_models: HashMap<String, String>,
+    /// Codex 文件路径 → 上次 total_token_usage 累计（差分基线）
+    #[serde(default)]
+    codex_totals: HashMap<String, CodexTotals>,
+    /// OpenCode 数据目录 → 扫描水位与已计消息 id
+    #[serde(default)]
+    opencode: HashMap<String, OpenCodeDbState>,
+}
+
+/// Claude message.id 去重条目：已计入 tokens + 最近见到的时间（48h 裁剪依据）
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct ClaudeIdEntry {
+    #[serde(default)]
+    tokens: u64,
+    #[serde(default)]
+    seen_ms: i64,
+}
+
+/// Codex 文件级累计快照（total_token_usage 差分基线；分量取 max 推进防快照回退）
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct CodexTotals {
+    #[serde(default)]
+    input: u64,
+    #[serde(default)]
+    cached: u64,
+    #[serde(default)]
+    output: u64,
+}
+
+impl CodexTotals {
+    /// 当前值相对上次基线的正向差（负差按 0 丢弃）
+    fn diff(&self, prev: &CodexTotals) -> u64 {
+        self.input.saturating_sub(prev.input)
+            + self.cached.saturating_sub(prev.cached)
+            + self.output.saturating_sub(prev.output)
+    }
+
+    /// 基线按分量 max 推进（限流刷新重发旧快照不让基线回退）
+    fn merge_max(&mut self, other: &CodexTotals) {
+        self.input = self.input.max(other.input);
+        self.cached = self.cached.max(other.cached);
+        self.output = self.output.max(other.output);
+    }
+}
+
+/// OpenCode 单库扫描状态：time_created 水位 + 已计消息 id → 其时间戳（48h 裁剪）
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+struct OpenCodeDbState {
+    #[serde(default)]
+    watermark_ms: i64,
+    #[serde(default)]
+    ids: HashMap<String, i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -442,6 +609,8 @@ struct AccountCreds {
     api_key: Option<String>,
     /// OAuth access_token（JWT）解出的 user_id（仅 Kimi 账号有意义）
     user_id: Option<String>,
+    /// creds::load_api_key_extra（额外 key，与主 key 同权参与归属；只在内存比对）
+    extra_api_keys: Vec<String>,
 }
 
 /// 一次扫描的归属上下文：CLI 凭证快照 + 各账号凭证快照 + 模型路由表
@@ -483,8 +652,13 @@ fn route_model(model: &str, attribution: &Attribution) -> Route {
     }
 }
 
+/// 该账号登记的 key 集合（主 key + 全部额外 key）是否含给定 key（精确相等）
+fn account_has_key(creds: &AccountCreds, key: &str) -> bool {
+    creds.api_key.as_deref() == Some(key) || creds.extra_api_keys.iter().any(|k| k == key)
+}
+
 /// 单条事件的归属桶键：按路由把 CLI 快照与各账号凭证做精确比对，全不中 → 未归属。
-/// kimi 侧 api_key 先比、OAuth user_id 后比（都是精确匹配，顺序无副作用）
+/// kimi 侧 api_key（主或任一额外）先比、OAuth user_id 后比（都是精确匹配，顺序无副作用）
 fn attribute(model: &str, attribution: &Attribution) -> String {
     match route_model(model, attribution) {
         Route::Kimi => {
@@ -492,7 +666,7 @@ fn attribute(model: &str, attribution: &Attribution) -> String {
                 if let Some((id, _)) = attribution
                     .kimi_accounts
                     .iter()
-                    .find(|(_, creds)| creds.api_key.as_deref() == Some(key))
+                    .find(|(_, creds)| account_has_key(creds, key))
                 {
                     return id.clone();
                 }
@@ -513,7 +687,7 @@ fn attribute(model: &str, attribution: &Attribution) -> String {
                 if let Some((id, _)) = attribution
                     .deepseek_accounts
                     .iter()
-                    .find(|(_, creds)| creds.api_key.as_deref() == Some(key))
+                    .find(|(_, creds)| account_has_key(creds, key))
                 {
                     return id.clone();
                 }
@@ -526,7 +700,7 @@ fn attribute(model: &str, attribution: &Attribution) -> String {
 
 /// 归属上下文快照：指定 CLI home 的凭证三处（该 home 的 config.toml 的 kimi/deepseek
 /// api_key 与 [models] 路由表、credentials/kimi-code.json 的 OAuth user_id）+ 各账号凭证
-/// （keyring api_key / OAuth user_id，与 home 无关，逐 home 快照时每次重读）。
+/// （keyring 主 key + 额外 key / OAuth user_id，与 home 无关，逐 home 快照时每次重读）。
 /// 所有读取失败（文件缺失/损坏、keyring 错误、凭证未配置）一律容忍为空——扫描永不失败；
 /// 某 home 快照为空时该 home 的事件全部进未归属桶，机器级活跃判定不受影响
 fn snapshot_attribution(home: &Path) -> Attribution {
@@ -569,12 +743,20 @@ fn snapshot_attribution(home: &Path) -> Attribution {
             .flatten()
             .map(|k| k.trim().to_string())
             .filter(|s| !s.is_empty());
+        // 额外 key（trim + 滤空）：读取失败容忍为空数组，与主 key 同权参与归属
+        let extra_api_keys = crate::creds::load_api_key_extra(&account.id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .collect();
         if account.is_deepseek() {
             attribution.deepseek_accounts.push((
                 account.id.clone(),
                 AccountCreds {
                     api_key,
                     user_id: None,
+                    extra_api_keys,
                 },
             ));
         } else {
@@ -582,9 +764,14 @@ fn snapshot_attribution(home: &Path) -> Attribution {
                 .ok()
                 .flatten()
                 .and_then(|creds| jwt_user_id(&creds.access_token));
-            attribution
-                .kimi_accounts
-                .push((account.id.clone(), AccountCreds { api_key, user_id }));
+            attribution.kimi_accounts.push((
+                account.id.clone(),
+                AccountCreds {
+                    api_key,
+                    user_id,
+                    extra_api_keys,
+                },
+            ));
         }
     }
     attribution
@@ -633,13 +820,33 @@ fn collect_wire_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// 增量扫描实现（扫描目标/时间/时区全部入参化，测试可复现跨天边界与归属分支）：
-/// 扫描目标 = 各 CLI home 的 sessions 目录配对各自的归属快照。
-/// 读状态 → 逐目标续读新行 → 逐条按该 home 的快照归属到桶喂聚合 → 落盘状态 → 出扫描视图。
-/// 多 home 共用一份 scan-state 不需要迁移：现有桶保留（本来就是默认 home 的真实消耗），
-/// 新 home 的文件无偏移记录自动从 0 全扫；files 键是全路径，home 之间不冲突
+/// 既有 Kimi-only 扫描入口（测试兼容壳）：等价 harness 输入为空的 scan_full
+#[cfg(test)]
 fn scan_with<Tz: TimeZone>(
     scan_targets: &[(PathBuf, Attribution)],
+    state_path: &Path,
+    now_ms: i64,
+    tz: &Tz,
+) -> ScanView
+where
+    Tz::Offset: std::fmt::Display,
+{
+    scan_full(
+        scan_targets,
+        &HarnessInput::default(),
+        state_path,
+        now_ms,
+        tz,
+    )
+}
+
+/// scan_with 的完整形态：Kimi home 之外并列扫描三家 harness（输入入参化）。
+/// harness 事件按扫描开头的 key 快照归属：事件携带的 key 与全部账号（不分
+/// provider）的 api_key 精确相等 → 归该账号，取不到/全不中 → 未归属桶。
+/// Kimi 路径与 scan_with 空输入时逐字节等价（行为不变）
+fn scan_full<Tz: TimeZone>(
+    scan_targets: &[(PathBuf, Attribution)],
+    harness: &HarnessInput,
     state_path: &Path,
     now_ms: i64,
     tz: &Tz,
@@ -668,12 +875,50 @@ where
         files.extend(home_files.into_iter().map(|file| (file, attribution)));
     }
 
+    // ---- 三家 harness：文件发现与归属 key 快照（扫描开头一次）----
+    let claude_key = harness.claude_dir.as_deref().and_then(claude::auth_token);
+    let claude_files = harness
+        .claude_dir
+        .as_deref()
+        .map(claude::collect_files)
+        .unwrap_or_default();
+    let codex_keys = harness
+        .codex_dir
+        .as_deref()
+        .map(codex::auth_keys)
+        .unwrap_or_default();
+    let codex_files = harness
+        .codex_dir
+        .as_deref()
+        .map(codex::collect_files)
+        .unwrap_or_default();
+    // auth.json 实际在数据目录（~/.local/share/opencode/，实机踩坑：只查配置目录会
+    // 漏 key 全落未归属），opencode.json 在配置目录——两处候选合并喂入，数据目录优先
+    let opencode_key_dirs: Vec<PathBuf> = harness
+        .opencode_data_dirs
+        .iter()
+        .chain(harness.opencode_config_dirs.iter())
+        .cloned()
+        .collect();
+    let opencode_keys = opencode::provider_keys(&opencode_key_dirs);
+    // (事件, 归属 key)；Claude/Codex 全库一把 key，OpenCode 按消息 providerID 查
+    let mut harness_events: Vec<(UsageEvent, Option<String>)> = Vec::new();
+
     // 已消失的文件清掉偏移：同名新文件会从头读，不会按旧偏移跳过开头
-    let disk_paths: HashSet<String> = files
+    // （Kimi wire.jsonl 与 Claude/Codex jsonl 的偏移同住一张表，清理统一做）
+    let mut disk_paths: HashSet<String> = files
         .iter()
         .map(|(file, _)| file.to_string_lossy().into_owned())
         .collect();
+    disk_paths.extend(
+        claude_files
+            .iter()
+            .map(|f| f.to_string_lossy().into_owned()),
+    );
+    disk_paths.extend(codex_files.iter().map(|f| f.to_string_lossy().into_owned()));
     state.files.retain(|p, _| disk_paths.contains(p));
+    state.codex_models.retain(|p, _| disk_paths.contains(p));
+    state.codex_totals.retain(|p, _| disk_paths.contains(p));
 
     for (path, attribution) in &files {
         let key = path.to_string_lossy().into_owned();
@@ -691,6 +936,86 @@ where
             // 单文件读失败（占用/权限）跳过：保留旧偏移，下次重试
             Err(_) => continue,
         }
+    }
+
+    // Claude：续读 → message.id 去重差分出账，整批共用 harness key
+    for path in &claude_files {
+        let key = path.to_string_lossy().into_owned();
+        let offset = state.files.get(&key).copied().unwrap_or(0);
+        if let Ok((lines, new_offset)) = read_new_lines(path, offset) {
+            for event in claude::settle_new_lines(&lines, &mut state.claude_ids) {
+                harness_events.push((event, claude_key.clone()));
+            }
+            state.files.insert(key, new_offset);
+        }
+    }
+
+    // Codex：续读 → 文件级模型/累计差分出账。多把候选 key（OPENAI_API_KEY /
+    // bearer_token）任一命中账号即归：命中 key 扫描开头判一次，整批共用
+    let codex_key = codex_keys
+        .iter()
+        .find(|key| {
+            harness
+                .key_accounts
+                .iter()
+                .any(|(account_key, _)| account_key == *key)
+        })
+        .cloned();
+    for path in &codex_files {
+        let key = path.to_string_lossy().into_owned();
+        let offset = state.files.get(&key).copied().unwrap_or(0);
+        if let Ok((lines, new_offset)) = read_new_lines(path, offset) {
+            let mut model = state.codex_models.get(&key).cloned();
+            let totals = state.codex_totals.entry(key.clone()).or_default();
+            for event in codex::settle_new_lines(&lines, &mut model, totals) {
+                harness_events.push((event, codex_key.clone()));
+            }
+            if let Some(model) = model {
+                state.codex_models.insert(key.clone(), model);
+            }
+            state.files.insert(key, new_offset);
+        }
+    }
+
+    // OpenCode：逐候选库只读扫描（水位 + id 去重），按消息 providerID 查 key
+    for dir in &harness.opencode_data_dirs {
+        let db_path = dir.join("opencode.db");
+        let dir_key = dir.to_string_lossy().into_owned();
+        if !db_path.is_file() {
+            state.opencode.remove(&dir_key);
+            continue;
+        }
+        let db_state = state.opencode.entry(dir_key).or_default();
+        for (event, provider) in opencode::scan_db(&db_path, db_state) {
+            let key = provider
+                .as_ref()
+                .and_then(|p| opencode_keys.get(p).cloned());
+            harness_events.push((event, key));
+        }
+    }
+
+    // harness 事件入桶：key 与账号 api_key 精确相等 → 该账号；否则未归属
+    for (event, key) in &harness_events {
+        let bucket = key
+            .as_deref()
+            .and_then(|k| {
+                harness
+                    .key_accounts
+                    .iter()
+                    .find(|(account_key, _)| account_key == k)
+                    .map(|(_, id)| id.clone())
+            })
+            .unwrap_or_else(|| UNASSIGNED_BUCKET.to_string());
+        state.buckets.entry(bucket).or_default().add(event, tz);
+    }
+
+    // 跨 harness 去重集按 48 小时裁剪（防状态膨胀；会话生命周期内足够兜住重复写）
+    let dedup_cutoff = now_ms.saturating_sub(HARNESS_DEDUP_MS);
+    state
+        .claude_ids
+        .retain(|_, entry| entry.seen_ms >= dedup_cutoff);
+    for db_state in state.opencode.values_mut() {
+        db_state.ids.retain(|_, ts| *ts >= dedup_cutoff);
     }
 
     state.last_scan_at = Some(now_dt.timestamp());
@@ -1688,7 +2013,24 @@ mod tests {
     }
 
     fn account_creds(api_key: Option<String>, user_id: Option<String>) -> AccountCreds {
-        AccountCreds { api_key, user_id }
+        AccountCreds {
+            api_key,
+            user_id,
+            extra_api_keys: Vec::new(),
+        }
+    }
+
+    /// 带额外 key 的账号凭证快照（api_key_extra 槽位内容的内存形态）
+    fn account_creds_with_extras(
+        api_key: Option<String>,
+        user_id: Option<String>,
+        extra_api_keys: Vec<String>,
+    ) -> AccountCreds {
+        AccountCreds {
+            api_key,
+            user_id,
+            extra_api_keys,
+        }
     }
 
     /// 造一个 payload 为给定 JSON 的 JWT（归属解码只看 payload 段，不验签）
@@ -1835,6 +2177,181 @@ mod tests {
             attribute("kimi-code/k3", &Attribution::default()),
             UNASSIGNED_BUCKET
         );
+    }
+
+    // ---- 额外 API Key 归属（主 key 或任一额外 key 精确相等即归该账号）----
+
+    #[test]
+    fn attribute_matches_kimi_extra_api_key() {
+        let attribution = Attribution {
+            cli: CliCredentials {
+                kimi_api_key: opt("sk-kimi-extra-2"),
+                ..Default::default()
+            },
+            kimi_accounts: vec![
+                (
+                    "acc-a".to_string(),
+                    account_creds_with_extras(
+                        opt("sk-kimi-main-a"),
+                        None,
+                        vec!["sk-kimi-extra-1".to_string(), "sk-kimi-extra-2".to_string()],
+                    ),
+                ),
+                ("acc-b".to_string(), account_creds(opt("sk-kimi-b"), None)),
+            ],
+            ..Default::default()
+        };
+        // CLI 用的是 acc-a 登记的第二把额外 key：归 acc-a
+        assert_eq!(attribute("kimi-code/k3", &attribution), "acc-a");
+    }
+
+    #[test]
+    fn attribute_main_key_still_matches_with_extras_registered() {
+        // 登记了额外 key 后主 key 照常命中（回归：额外 key 不挤掉主 key 通道）
+        let attribution = Attribution {
+            cli: CliCredentials {
+                kimi_api_key: opt("sk-kimi-main-a"),
+                ..Default::default()
+            },
+            kimi_accounts: vec![(
+                "acc-a".to_string(),
+                account_creds_with_extras(
+                    opt("sk-kimi-main-a"),
+                    None,
+                    vec!["sk-kimi-extra-1".to_string()],
+                ),
+            )],
+            ..Default::default()
+        };
+        assert_eq!(attribute("kimi-code/k3", &attribution), "acc-a");
+    }
+
+    #[test]
+    fn attribute_matches_deepseek_extra_api_key() {
+        let attribution = Attribution {
+            cli: CliCredentials {
+                deepseek_api_key: opt("sk-ds-extra"),
+                ..Default::default()
+            },
+            deepseek_accounts: vec![(
+                "acc-d".to_string(),
+                account_creds_with_extras(opt("sk-ds-main"), None, vec!["sk-ds-extra".to_string()]),
+            )],
+            ..Default::default()
+        };
+        assert_eq!(attribute("deepseek-v4-flash", &attribution), "acc-d");
+    }
+
+    #[test]
+    fn attribute_extra_key_miss_goes_unassigned() {
+        // CLI 的 key 既不是主 key 也不是任一额外 key（含"差一个字符"的近似值）：未归属
+        let attribution = Attribution {
+            cli: CliCredentials {
+                kimi_api_key: opt("sk-kimi-extra-1x"),
+                ..Default::default()
+            },
+            kimi_accounts: vec![(
+                "acc-a".to_string(),
+                account_creds_with_extras(
+                    opt("sk-kimi-main-a"),
+                    None,
+                    vec!["sk-kimi-extra-1".to_string()],
+                ),
+            )],
+            ..Default::default()
+        };
+        assert_eq!(attribute("kimi-code/k3", &attribution), UNASSIGNED_BUCKET);
+    }
+
+    /// harness 归属通道：key_accounts 里每把额外 key 也独立成条目（harness_input 的职责）
+    #[test]
+    fn harness_input_collects_extra_keys_alongside_main() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = temp_dir("harness-input-extra");
+        let config = temp_dir("harness-input-extra-conf");
+        std::env::set_var("USERPROFILE", &dir);
+        std::env::set_var("KIMICODEBAR_CONFIG_DIR", &config);
+        std::env::set_var(
+            "KIMICODEBAR_KEYRING_SERVICE",
+            format!("KimiCodeBar-test-{}", uuid::Uuid::new_v4()),
+        );
+        let settings = crate::storage::Settings {
+            accounts: vec![crate::storage::Account {
+                id: "acc-a".to_string(),
+                name: "A".to_string(),
+                login_method: Some("api_key".to_string()),
+                provider: "kimi".to_string(),
+            }],
+            ..Default::default()
+        };
+        std::fs::write(
+            config.join("settings.json"),
+            serde_json::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+        crate::creds::save_api_key("acc-a", "sk-kimi-main-a").unwrap();
+        crate::creds::save_api_key_extra(
+            "acc-a",
+            &["sk-kimi-extra-1".to_string(), "sk-kimi-extra-2".to_string()],
+        )
+        .unwrap();
+
+        let input = harness_input(Some(dir.as_os_str()));
+        // 主 key + 两把额外 key 各占一条目，同指 acc-a
+        assert_eq!(
+            input.key_accounts,
+            vec![
+                ("sk-kimi-main-a".to_string(), "acc-a".to_string()),
+                ("sk-kimi-extra-1".to_string(), "acc-a".to_string()),
+                ("sk-kimi-extra-2".to_string(), "acc-a".to_string()),
+            ]
+        );
+
+        std::env::remove_var("USERPROFILE");
+        std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
+        let service = std::env::var("KIMICODEBAR_KEYRING_SERVICE").unwrap();
+        std::env::remove_var("KIMICODEBAR_KEYRING_SERVICE");
+        for slot in ["api_key/acc-a", "api_key_extra/acc-a"] {
+            let _ = keyring::Entry::new(&service, slot).map(|e| e.delete_credential());
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&config);
+    }
+
+    /// harness 事件按额外 key 归属（key_accounts 含额外 key 时 Claude 格式事件归该账号）
+    #[test]
+    fn harness_claude_attributed_via_extra_key() {
+        let dir = temp_dir("harness-claude-extra");
+        let claude = write_claude_dir(
+            &dir,
+            "sk-ds-extra",
+            &[claude_line(
+                "m1",
+                "claude-opus-4-6",
+                300,
+                "2026-08-22T10:00:00Z",
+            )],
+        );
+        let harness = HarnessInput {
+            claude_dir: Some(claude),
+            // 主 key 不中、额外 key 命中（harness_input 会把两者都收进来）
+            key_accounts: vec![
+                ("sk-ds-main".to_string(), "acc-a".to_string()),
+                ("sk-ds-extra".to_string(), "acc-a".to_string()),
+            ],
+            ..HarnessInput::default()
+        };
+        let view = scan_full(
+            &[],
+            &harness,
+            &dir.join("scan-state.json"),
+            ms("2026-08-22T12:00:00+08:00"),
+            &tz8(),
+        );
+        assert_eq!(view.for_account("acc-a").today_tokens, 300);
+        assert!(!view.by_account.contains_key(UNASSIGNED_BUCKET));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2456,6 +2973,620 @@ mod tests {
         std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
         std::env::remove_var("KIMICODEBAR_KEYRING_SERVICE");
         let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&config);
+    }
+
+    // ---- 跨 Harness（Claude Code / Codex / OpenCode）----
+
+    /// Claude assistant 行（cache 字段给 0，tokens = input + output）
+    fn claude_line(id: &str, model: &str, tokens: u64, rfc3339: &str) -> String {
+        format!(
+            r#"{{"type":"assistant","message":{{"id":"{id}","model":"{model}","usage":{{"input_tokens":{tokens},"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}},"stop_reason":"end_turn"}},"timestamp":"{rfc3339}"}}"#
+        )
+    }
+
+    /// 造 Claude 目录：settings.json（token）+ projects/p/main.jsonl（给定行）
+    fn write_claude_dir(root: &Path, token: &str, lines: &[String]) -> PathBuf {
+        let claude = root.join(".claude");
+        let projects = claude.join("projects").join("p");
+        std::fs::create_dir_all(&projects).unwrap();
+        std::fs::write(
+            claude.join("settings.json"),
+            format!(r#"{{"env":{{"ANTHROPIC_AUTH_TOKEN":"{token}"}}}}"#),
+        )
+        .unwrap();
+        std::fs::write(projects.join("main.jsonl"), lines.join("\n") + "\n").unwrap();
+        claude
+    }
+
+    /// Codex token_count 行（last_token_usage 精确值形态，tokens = 四字段和）
+    fn codex_token_line(tokens: u64, rfc3339: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{rfc3339}","type":"event_msg","payload":{{"type":"token_count","info":{{"last_token_usage":{{"input_tokens":{tokens},"output_tokens":0,"cached_input_tokens":0,"reasoning_output_tokens":0}}}}}}}}"#
+        )
+    }
+
+    fn codex_turn_line(model: &str, rfc3339: &str) -> String {
+        format!(
+            r#"{{"timestamp":"{rfc3339}","type":"turn_context","payload":{{"model":"{model}"}}}}"#
+        )
+    }
+
+    /// 造 Codex 目录：auth.json（OPENAI_API_KEY）+ sessions/日期分区下 rollout jsonl
+    fn write_codex_dir(root: &Path, api_key: &str, lines: &[String]) -> PathBuf {
+        let codex = root.join(".codex");
+        let day = codex.join("sessions").join("2026").join("08").join("22");
+        std::fs::create_dir_all(&day).unwrap();
+        std::fs::write(
+            codex.join("auth.json"),
+            format!(r#"{{"OPENAI_API_KEY":"{api_key}"}}"#),
+        )
+        .unwrap();
+        std::fs::write(day.join("rollout-x.jsonl"), lines.join("\n") + "\n").unwrap();
+        codex
+    }
+
+    /// 造 OpenCode 数据目录：opencode.db（真实 schema + 给定行）
+    fn write_opencode_dir(parent: &Path, rows: &[(i64, String)]) -> PathBuf {
+        let dir = parent.join("opencode");
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = rusqlite::Connection::open(dir.join("opencode.db")).unwrap();
+        conn.execute(
+            "CREATE TABLE message (
+                id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                time_created INTEGER NOT NULL, time_updated INTEGER, data TEXT NOT NULL
+            )",
+            [],
+        )
+        .unwrap();
+        for (idx, (ts, data)) in rows.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO message (id, session_id, time_created, time_updated, data)
+                 VALUES (?1, 'ses_1', ?2, ?2, ?3)",
+                rusqlite::params![format!("msg_{idx}"), ts, data],
+            )
+            .unwrap();
+        }
+        dir
+    }
+
+    fn opencode_assistant_data(model: &str, provider: &str, tokens: u64) -> String {
+        serde_json::json!({
+            "role": "assistant",
+            "providerID": provider,
+            "modelID": model,
+            "tokens": {"input": tokens, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+            "time": {"created": 1, "completed": 2},
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn harness_claude_attributed_incremental_no_double() {
+        let dir = temp_dir("harness-claude");
+        let claude = write_claude_dir(
+            &dir,
+            "sk-kimi-acc",
+            &[
+                claude_line("m1", "claude-opus-4-6", 300, "2026-08-22T10:00:00Z"),
+                claude_line("m2", "claude-opus-4-6", 50, "2026-08-22T11:00:00Z"),
+            ],
+        );
+        let state_path = dir.join("config").join("scan-state.json");
+        let harness = HarnessInput {
+            claude_dir: Some(claude.clone()),
+            key_accounts: vec![("sk-kimi-acc".to_string(), "acc-a".to_string())],
+            ..HarnessInput::default()
+        };
+        let tz = tz8();
+        let now = ms("2026-08-22T12:00:00+08:00");
+
+        let view = scan_full(&[], &harness, &state_path, now, &tz);
+        assert_eq!(view.for_account("acc-a").today_tokens, 350);
+        // 全部事件都归属成功：未归属桶不生成，账号页看不到未归属数字
+        assert!(!view.by_account.contains_key(UNASSIGNED_BUCKET));
+        // harness 事件计入机器级活跃判定
+        assert_eq!(view.machine_last_event_at, Some(ms("2026-08-22T11:00:00Z")));
+
+        // 二次扫描：偏移续读 + id 去重，不重复计数
+        let view2 = scan_full(&[], &harness, &state_path, now, &tz);
+        assert_eq!(view2.for_account("acc-a").today_tokens, 350);
+
+        // 追加新消息：只增量这一条（流式重复 id 不双计）
+        let file = claude.join("projects").join("p").join("main.jsonl");
+        let mut content = std::fs::read_to_string(&file).unwrap();
+        content.push_str(&claude_line(
+            "m3",
+            "claude-opus-4-6",
+            70,
+            "2026-08-22T11:30:00Z",
+        ));
+        content.push('\n');
+        std::fs::write(&file, content).unwrap();
+        let view3 = scan_full(&[], &harness, &state_path, now, &tz);
+        assert_eq!(view3.for_account("acc-a").today_tokens, 420);
+        // by_model 按日志原样显示模型名
+        assert_eq!(view3.for_account("acc-a").by_model.len(), 1);
+        assert_eq!(
+            view3.for_account("acc-a").by_model[0].model,
+            "claude-opus-4-6"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn harness_claude_unmatched_key_goes_unassigned() {
+        let dir = temp_dir("harness-claude-unmatched");
+        let claude = write_claude_dir(
+            &dir,
+            "sk-stranger",
+            &[claude_line(
+                "m1",
+                "claude-opus-4-6",
+                300,
+                "2026-08-22T10:00:00Z",
+            )],
+        );
+        let state_path = dir.join("scan-state.json");
+        let harness = HarnessInput {
+            claude_dir: Some(claude),
+            key_accounts: vec![("sk-kimi-acc".to_string(), "acc-a".to_string())],
+            ..HarnessInput::default()
+        };
+        let view = scan_full(
+            &[],
+            &harness,
+            &state_path,
+            ms("2026-08-22T12:00:00+08:00"),
+            &tz8(),
+        );
+        // key 谁都不认识：进未归属桶，账号页是诚实零
+        assert_eq!(view.for_account(UNASSIGNED_BUCKET).today_tokens, 300);
+        assert_eq!(view.for_account("acc-a").today_tokens, 0);
+        // 未归属事件的活跃判定仍算机器级活跃
+        assert_eq!(view.machine_last_event_at, Some(ms("2026-08-22T10:00:00Z")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn harness_key_matches_account_of_any_provider() {
+        // harness 的 key 与 DeepSeek 账号登记的 key 相同：不分 provider 照样归它
+        let dir = temp_dir("harness-cross-provider");
+        let claude = write_claude_dir(
+            &dir,
+            "sk-ds-key",
+            &[claude_line(
+                "m1",
+                "claude-opus-4-6",
+                100,
+                "2026-08-22T10:00:00Z",
+            )],
+        );
+        let harness = HarnessInput {
+            claude_dir: Some(claude),
+            key_accounts: vec![("sk-ds-key".to_string(), "acc-deepseek".to_string())],
+            ..HarnessInput::default()
+        };
+        let view = scan_full(
+            &[],
+            &harness,
+            &dir.join("scan-state.json"),
+            ms("2026-08-22T12:00:00+08:00"),
+            &tz8(),
+        );
+        assert_eq!(view.for_account("acc-deepseek").today_tokens, 100);
+        assert!(!view.by_account.contains_key(UNASSIGNED_BUCKET));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn harness_codex_attributed_incremental_no_double() {
+        let dir = temp_dir("harness-codex");
+        let codex = write_codex_dir(
+            &dir,
+            "sk-codex-key",
+            &[
+                codex_turn_line("gpt-5.4-codex", "2026-08-22T10:00:00Z"),
+                codex_token_line(200, "2026-08-22T10:00:01Z"),
+                codex_token_line(30, "2026-08-22T10:01:00Z"),
+            ],
+        );
+        let state_path = dir.join("config").join("scan-state.json");
+        let harness = HarnessInput {
+            codex_dir: Some(codex.clone()),
+            key_accounts: vec![("sk-codex-key".to_string(), "acc-c".to_string())],
+            ..HarnessInput::default()
+        };
+        let tz = tz8();
+        let now = ms("2026-08-22T12:00:00+08:00");
+
+        let view = scan_full(&[], &harness, &state_path, now, &tz);
+        assert_eq!(view.for_account("acc-c").today_tokens, 230);
+        assert_eq!(view.for_account("acc-c").by_model[0].model, "gpt-5.4-codex");
+        assert!(!view.by_account.contains_key(UNASSIGNED_BUCKET));
+
+        // 二次扫描不重复；追加事件只增量
+        assert_eq!(
+            scan_full(&[], &harness, &state_path, now, &tz)
+                .for_account("acc-c")
+                .today_tokens,
+            230
+        );
+        let file = codex
+            .join("sessions")
+            .join("2026")
+            .join("08")
+            .join("22")
+            .join("rollout-x.jsonl");
+        let mut content = std::fs::read_to_string(&file).unwrap();
+        content.push_str(&codex_token_line(45, "2026-08-22T11:00:00Z"));
+        content.push('\n');
+        std::fs::write(&file, content).unwrap();
+        assert_eq!(
+            scan_full(&[], &harness, &state_path, now, &tz)
+                .for_account("acc-c")
+                .today_tokens,
+            275
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn harness_opencode_attributed_via_provider_key() {
+        let dir = temp_dir("harness-opencode");
+        let base = ms("2026-08-22T10:00:00Z");
+        let data_dir = write_opencode_dir(
+            &dir,
+            &[
+                (base, opencode_assistant_data("kimi-k3", "kimi", 80)),
+                (base + 1000, opencode_assistant_data("glm-4.6", "glm", 20)),
+            ],
+        );
+        let config_dir = dir.join("oc-config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("auth.json"),
+            r#"{"kimi":{"type":"api","key":"sk-oc-key"},"glm":{"type":"oauth","key":"no"}}"#,
+        )
+        .unwrap();
+        let state_path = dir.join("config").join("scan-state.json");
+        let harness = HarnessInput {
+            opencode_data_dirs: vec![data_dir],
+            opencode_config_dirs: vec![config_dir],
+            key_accounts: vec![("sk-oc-key".to_string(), "acc-oc".to_string())],
+            ..HarnessInput::default()
+        };
+        let tz = tz8();
+        let now = ms("2026-08-22T12:00:00+08:00");
+
+        let view = scan_full(&[], &harness, &state_path, now, &tz);
+        // kimi provider 消耗归账号；glm provider 的 key 是 oauth 形态取不到 → 未归属
+        assert_eq!(view.for_account("acc-oc").today_tokens, 80);
+        assert_eq!(view.for_account(UNASSIGNED_BUCKET).today_tokens, 20);
+        assert_eq!(view.machine_last_event_at, Some(base + 1000));
+
+        // 二次扫描不重复
+        let view2 = scan_full(&[], &harness, &state_path, now, &tz);
+        assert_eq!(view2.for_account("acc-oc").today_tokens, 80);
+        assert_eq!(view2.for_account(UNASSIGNED_BUCKET).today_tokens, 20);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 旧版 scan-state（v1.4.1 形态：last_scan_at/files/buckets，无任何 harness 键）
+    /// 直接兼容：不清零、不重扫、harness 新键按 serde(default) 空起步
+    #[test]
+    fn harness_legacy_state_compatible_no_wipe_no_rescan() {
+        let dir = temp_dir("harness-legacy");
+        let claude = write_claude_dir(
+            &dir,
+            "sk-kimi-acc",
+            &[claude_line(
+                "m1",
+                "claude-opus-4-6",
+                300,
+                "2026-08-22T10:00:00Z",
+            )],
+        );
+        let file = claude.join("projects").join("p").join("main.jsonl");
+        // 旧状态：文件偏移已越过全部内容 + acc-a 桶有既有累计 999
+        let legacy = serde_json::json!({
+            "last_scan_at": ms("2026-08-22T09:00:00+08:00") / 1000,
+            "files": { file.to_string_lossy().into_owned(): std::fs::metadata(&file).unwrap().len() },
+            "buckets": {
+                "acc-a": {
+                    "by_date": { "2026-08-22": 999 },
+                    "by_date_model": { "2026-08-22": { "claude-opus-4-6": 999 } },
+                    "last_event_at": ms("2026-08-22T09:30:00Z"),
+                }
+            },
+        });
+        let state_path = dir.join("config").join("scan-state.json");
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::fs::write(&state_path, serde_json::to_string(&legacy).unwrap()).unwrap();
+
+        let harness = HarnessInput {
+            claude_dir: Some(claude),
+            key_accounts: vec![("sk-kimi-acc".to_string(), "acc-a".to_string())],
+            ..HarnessInput::default()
+        };
+        let view = scan_full(
+            &[],
+            &harness,
+            &state_path,
+            ms("2026-08-22T12:00:00+08:00"),
+            &tz8(),
+        );
+        // 既有桶保留（不清零），文件按旧偏移跳过（不重扫、不双计）
+        assert_eq!(view.for_account("acc-a").today_tokens, 999);
+        // 落盘的新状态带上了 harness 键（serde(default) 起步）且 buckets 原样
+        let saved = std::fs::read_to_string(&state_path).unwrap();
+        let state: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert!(state.get("claude_ids").is_some());
+        assert!(state.get("codex_models").is_some());
+        assert!(state.get("opencode").is_some());
+        assert_eq!(state["buckets"]["acc-a"]["by_date"]["2026-08-22"], 999);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 端到端合成验收：临时 HOME 伪造三家真实格式日志 + 对应 key 配置 + 账号登记，
+    /// 驱动 scan_fresh（环境解析 + 快照 + 扫描全链）：目标账号桶恰为预期值、
+    /// 回归：auth.json 的真实位置是**数据目录**（~/.local/share/opencode/，实机踩坑
+    /// 2026-08-23）——只查配置目录会漏 key，OpenCode 事件全落未归属
+    #[test]
+    fn harness_opencode_auth_json_in_data_dir_attributes() {
+        let dir = temp_dir("harness-oc-datadir");
+        let now = ms("2026-08-22T12:00:00+08:00");
+        let data = write_opencode_dir(
+            &dir,
+            &[(now, opencode_assistant_data("kimi-k3", "kimi", 77))],
+        );
+        // auth.json 只写进数据目录；配置目录留空
+        std::fs::write(
+            data.join("auth.json"),
+            r#"{"kimi":{"type":"api","key":"sk-oc-data"}}"#,
+        )
+        .unwrap();
+        let config = dir.join("config-only");
+        std::fs::create_dir_all(&config).unwrap();
+        let harness = HarnessInput {
+            opencode_data_dirs: vec![data],
+            opencode_config_dirs: vec![config],
+            key_accounts: vec![("sk-oc-data".to_string(), "acc-oc".to_string())],
+            ..HarnessInput::default()
+        };
+        let view = scan_full(&[], &harness, &dir.join("scan-state.json"), now, &tz8());
+        assert_eq!(view.for_account("acc-oc").today_tokens, 77);
+        assert!(!view.by_account.contains_key(UNASSIGNED_BUCKET));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 账号视图不含未归属、二次扫描不重复计数
+    #[test]
+    fn harness_end_to_end_three_harnesses_synthetic() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = temp_dir("harness-e2e-home");
+        let roaming = temp_dir("harness-e2e-roaming");
+        let localapp = temp_dir("harness-e2e-local");
+        let config = temp_dir("harness-e2e-conf");
+
+        let now = chrono::Local::now();
+        let now_ms = now.timestamp_millis();
+        let rfc3339 = now.to_rfc3339();
+
+        // Claude：token = Kimi 账号的 key
+        write_claude_dir(
+            &home,
+            "sk-kimi-e2e",
+            &[claude_line("m1", "claude-opus-4-6", 111, &rfc3339)],
+        );
+        // Codex：OPENAI_API_KEY = DeepSeek 账号的 key（跨 provider 归属）
+        write_codex_dir(
+            &home,
+            "sk-ds-e2e",
+            &[
+                codex_turn_line("gpt-5.4-codex", &rfc3339),
+                codex_token_line(222, &rfc3339),
+            ],
+        );
+        // OpenCode：数据目录在伪造 APPDATA 下，auth.json 里 kimi provider 的 key 同 Kimi 账号
+        write_opencode_dir(
+            &roaming,
+            &[(now_ms, opencode_assistant_data("kimi-k3", "kimi", 33))],
+        );
+        std::fs::write(
+            roaming.join("opencode").join("auth.json"),
+            r#"{"kimi":{"type":"api","key":"sk-kimi-e2e"}}"#,
+        )
+        .unwrap();
+
+        // 应用侧：两个账号（Kimi + DeepSeek），api_key 走隔离 keyring
+        std::env::set_var("KIMICODEBAR_CONFIG_DIR", &config);
+        std::env::set_var(
+            "KIMICODEBAR_KEYRING_SERVICE",
+            format!("KimiCodeBar-test-{}", uuid::Uuid::new_v4()),
+        );
+        let settings = crate::storage::Settings {
+            accounts: vec![
+                crate::storage::Account {
+                    id: "acc-kimi".to_string(),
+                    name: "K".to_string(),
+                    login_method: Some("api_key".to_string()),
+                    provider: "kimi".to_string(),
+                },
+                crate::storage::Account {
+                    id: "acc-ds".to_string(),
+                    name: "D".to_string(),
+                    login_method: Some("api_key".to_string()),
+                    provider: "deepseek".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        std::fs::write(
+            config.join("settings.json"),
+            serde_json::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+        crate::creds::save_api_key("acc-kimi", "sk-kimi-e2e").unwrap();
+        crate::creds::save_api_key("acc-ds", "sk-ds-e2e").unwrap();
+        // 环境解析全部指向伪造目录（三家 harness + 配置目录 + 状态目录）
+        std::env::set_var("USERPROFILE", &home);
+        std::env::set_var("APPDATA", &roaming);
+        std::env::set_var("LOCALAPPDATA", &localapp);
+        std::env::remove_var("XDG_DATA_HOME");
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("KIMI_SECONDARY_MODEL");
+
+        let view = scan_fresh(now_ms, &chrono::Local);
+        // Claude(111) + OpenCode(33) 归 Kimi 账号；Codex(222) 归 DeepSeek 账号
+        assert_eq!(view.for_account("acc-kimi").today_tokens, 111 + 33);
+        assert_eq!(view.for_account("acc-ds").today_tokens, 222);
+        // 三家全部归属成功：未归属桶不生成（账号视图不含未归属数字）
+        assert!(!view.by_account.contains_key(UNASSIGNED_BUCKET));
+        assert_eq!(view.machine_last_event_at, Some(now_ms));
+
+        // 二次扫描：不重复计数
+        let view2 = scan_fresh(now_ms, &chrono::Local);
+        assert_eq!(view2.for_account("acc-kimi").today_tokens, 111 + 33);
+        assert_eq!(view2.for_account("acc-ds").today_tokens, 222);
+
+        std::env::remove_var("USERPROFILE");
+        std::env::remove_var("APPDATA");
+        std::env::remove_var("LOCALAPPDATA");
+        std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
+        std::env::remove_var("KIMICODEBAR_KEYRING_SERVICE");
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&roaming);
+        let _ = std::fs::remove_dir_all(&localapp);
+        let _ = std::fs::remove_dir_all(&config);
+    }
+
+    /// 端到端合成验收（账号级多 key 归属）：账号 A 登记主 key k1 + 额外 key k2；
+    /// 伪造两个 CLI home（config.toml 分别用 k2 / 未登记的 k3）各放一条 wire.jsonl 事件，
+    /// 外加一个 Claude harness（settings.json token = k2）放一条 assistant 事件，
+    /// 驱动 scan_fresh（环境解析 + 快照 + 扫描全链）：
+    /// A 桶 = wire(k2) + claude(k2) 恰为预期值；k3 事件落 unassigned；
+    /// 且 k1/k2/k3 明文都不出现在 scan-state.json
+    #[test]
+    fn extra_key_end_to_end_wire_and_harness_attribution() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = temp_dir("extra-key-e2e-home");
+        let roaming = temp_dir("extra-key-e2e-roaming");
+        let localapp = temp_dir("extra-key-e2e-local");
+        let config = temp_dir("extra-key-e2e-conf");
+
+        let main_key = "sk-kimi-main-e2e-0001";
+        let extra_key = "sk-kimi-extra-e2e-0002";
+        let stray_key = "sk-kimi-stray-e2e-0003";
+
+        let now = chrono::Local::now();
+        let now_ms = now.timestamp_millis();
+        let rfc3339 = now.to_rfc3339();
+
+        // CLI home 1（默认 home）：config.toml 用额外 key k2；一条 wire 事件
+        let home_a = home.join(".kimi-code");
+        std::fs::create_dir_all(home_a.join("sessions")).unwrap();
+        std::fs::write(
+            home_a.join("config.toml"),
+            format!("[providers.\"managed:kimi-code\"]\napi_key = \"{extra_key}\"\n"),
+        )
+        .unwrap();
+        write_wire(
+            &home_a.join("sessions"),
+            "main",
+            &[usage_line("kimi-code/k3", &rfc3339, 100, 10)],
+        );
+        // CLI home 2：用未登记的 k3；一条 wire 事件应落 unassigned
+        let home_b = write_cli_home(
+            &home,
+            ".kimi-code-alt",
+            &format!("[providers.\"managed:kimi-code\"]\napi_key = \"{stray_key}\"\n"),
+            None,
+        );
+        write_wire(
+            &home_b.join("sessions"),
+            "main",
+            &[usage_line("kimi-code/k3", &rfc3339, 200, 20)],
+        );
+        // Claude harness：token = k2（harness 通道：key_accounts 含 k2 时事件归 A）
+        write_claude_dir(
+            &home,
+            extra_key,
+            &[claude_line("m1", "claude-opus-4-6", 55, &rfc3339)],
+        );
+
+        // 应用侧：账号 A 登记主 key k1 + 额外 key k2（隔离 keyring）
+        std::env::set_var("KIMICODEBAR_CONFIG_DIR", &config);
+        let service = format!("KimiCodeBar-test-{}", uuid::Uuid::new_v4());
+        std::env::set_var("KIMICODEBAR_KEYRING_SERVICE", &service);
+        let settings = crate::storage::Settings {
+            accounts: vec![crate::storage::Account {
+                id: "acc-a".to_string(),
+                name: "A".to_string(),
+                login_method: Some("api_key".to_string()),
+                provider: "kimi".to_string(),
+            }],
+            ..Default::default()
+        };
+        std::fs::write(
+            config.join("settings.json"),
+            serde_json::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+        crate::creds::save_api_key("acc-a", main_key).unwrap();
+        crate::creds::save_api_key_extra("acc-a", &[extra_key.to_string()]).unwrap();
+        // 环境解析全部指向伪造目录
+        std::env::set_var("USERPROFILE", &home);
+        std::env::set_var("APPDATA", &roaming);
+        std::env::set_var("LOCALAPPDATA", &localapp);
+        std::env::remove_var("XDG_DATA_HOME");
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("KIMI_SECONDARY_MODEL");
+
+        // usage_line 每条另含 inputCacheRead 11264；claude_line tokens 即 input_tokens
+        let wire_a = 100 + 10 + 11264;
+        let wire_b = 200 + 20 + 11264;
+        let claude_tokens = 55;
+
+        let view = scan_fresh(now_ms, &chrono::Local);
+        // 额外 key k2：wire 事件与 Claude 事件都归 A
+        assert_eq!(
+            view.for_account("acc-a").today_tokens,
+            wire_a + claude_tokens
+        );
+        // 未登记的 k3 仍落 unassigned
+        assert_eq!(view.for_account(UNASSIGNED_BUCKET).today_tokens, wire_b);
+        // 铁律：任何 key 的明文都不得落盘进 scan-state.json
+        let saved = std::fs::read_to_string(config.join("scan-state.json")).unwrap();
+        assert!(!saved.contains(main_key));
+        assert!(!saved.contains(extra_key));
+        assert!(!saved.contains(stray_key));
+
+        // 二次扫描：不重复计数
+        let view2 = scan_fresh(now_ms, &chrono::Local);
+        assert_eq!(
+            view2.for_account("acc-a").today_tokens,
+            wire_a + claude_tokens
+        );
+        assert_eq!(view2.for_account(UNASSIGNED_BUCKET).today_tokens, wire_b);
+
+        std::env::remove_var("USERPROFILE");
+        std::env::remove_var("APPDATA");
+        std::env::remove_var("LOCALAPPDATA");
+        std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
+        for slot in ["api_key/acc-a", "api_key_extra/acc-a"] {
+            let _ = keyring::Entry::new(&service, slot).map(|e| e.delete_credential());
+        }
+        std::env::remove_var("KIMICODEBAR_KEYRING_SERVICE");
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&roaming);
+        let _ = std::fs::remove_dir_all(&localapp);
         let _ = std::fs::remove_dir_all(&config);
     }
 }

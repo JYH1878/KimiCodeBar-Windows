@@ -33,6 +33,9 @@ tauri-plugin-global-shortcut = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tracing-appender = "0.2"
+# 只读打开 OpenCode 的 opencode.db（local_usage/opencode.rs，PRAGMA query_only=ON）；
+# bundled 特性内嵌编译 SQLite，不依赖系统库
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 # credentials.json 的 DPAPI 加密（CryptProtectData / CryptUnprotectData，CurrentUser 作用域），
 # CLI 模式的 AttachConsole / FreeConsole（Win32_System_Console，见 cli.rs），

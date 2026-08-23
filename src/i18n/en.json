@@ -171,7 +171,12 @@
     "saved": "API Key saved",
     "cleared": "API Key cleared",
     "clear": "Clear",
-    "save": "Save"
+    "save": "Save",
+    "extraHint": "Extra API keys: register additional keys used by this account in other tools (Kimi CLI / Claude Code / Codex / OpenCode, etc.) here (up to 5); their local token usage is aggregated into this account. Used only for local usage attribution, never for quota or balance queries.",
+    "extraAdd": "Add",
+    "extraRemove": "Remove",
+    "extraAdded": "Extra key added",
+    "extraRemoved": "Extra key removed"
   },
   "deviceLogin": {
     "title": "Method B: Sign in with account",

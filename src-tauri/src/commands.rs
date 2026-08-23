@@ -115,6 +115,8 @@ pub struct CredentialStatus {
     pub api_key_configured: bool,
     /// 脱敏展示，如 sk-kimi-****…a4nr；未配置为 None
     pub api_key_masked: Option<String>,
+    /// 额外 API Key（本地消耗归属用）的脱敏列表，按登记顺序；未登记为空数组
+    pub api_key_extra_masked: Vec<String>,
     pub oauth_configured: bool,
     /// 网页 token（月度总量用）是否已配置
     pub web_token_configured: bool,
@@ -922,17 +924,83 @@ pub fn clear_api_key(app: AppHandle, account_id: String) -> Result<(), String> {
 pub fn get_credential_status(account_id: String) -> CredentialStatus {
     let settings = storage::load_settings().unwrap_or_default();
     let api_key = creds::load_api_key(&account_id).ok().flatten();
+    let extra_keys = creds::load_api_key_extra(&account_id).unwrap_or_default();
     CredentialStatus {
         login_method: settings
             .account(&account_id)
             .and_then(|a| a.login_method.clone()),
         api_key_configured: api_key.is_some(),
         api_key_masked: api_key.as_deref().map(mask_api_key),
+        // 按登记顺序脱敏（额外 key 只参与本地消耗归属，绝不出网）
+        api_key_extra_masked: extra_keys.iter().map(|k| mask_api_key(k)).collect(),
         oauth_configured: matches!(oauth::load_credentials(&account_id), Ok(Some(_))),
         // 新旧体系任一配置都算"已配置"（web_token=kimi-auth / web_refresh_token）
         web_token_configured: matches!(creds::load_web_token(&account_id), Ok(Some(_)))
             || matches!(creds::load_web_refresh_token(&account_id), Ok(Some(_))),
     }
+}
+
+/// 每账号额外 API Key（本地消耗归属用）的登记上限
+const MAX_EXTRA_API_KEYS: usize = 5;
+
+/// 给该账号登记一把额外 API Key（同一账号在不同工具挂的多把 key 汇总归属到同一桶；
+/// 额外 key 只参与本地消耗归属，不参与任何网络请求）。
+/// 按该账号 provider 复用主 key 同款格式校验；拒绝与主 key / 已有额外 key 重复；
+/// 超上限报错
+#[tauri::command]
+pub fn add_account_extra_key(account_id: String, key: String) -> Result<(), String> {
+    let settings = storage::load_settings().unwrap_or_default();
+    let Some(account) = settings.account(&account_id) else {
+        return Err("账号不存在".to_string());
+    };
+    // 与 set_api_key 同一套按提供商校验
+    let key = if account.is_deepseek() {
+        validate_deepseek_api_key(&key)?
+    } else if account.is_glm() {
+        validate_glm_api_key(&key)?
+    } else {
+        validate_api_key(&key)?
+    };
+    if creds::load_api_key(&account_id)
+        .map_err(|e| e.to_string())?
+        .as_deref()
+        == Some(key)
+    {
+        return Err("该 Key 已配置为主 API Key，无需重复登记".to_string());
+    }
+    let mut extras = creds::load_api_key_extra(&account_id).map_err(|e| e.to_string())?;
+    if extras.iter().any(|k| k == key) {
+        return Err("该 Key 已在额外 Key 列表中".to_string());
+    }
+    if extras.len() >= MAX_EXTRA_API_KEYS {
+        return Err(format!("每个账号最多登记 {MAX_EXTRA_API_KEYS} 把额外 Key"));
+    }
+    extras.push(key.to_string());
+    creds::save_api_key_extra(&account_id, &extras).map_err(|e| e.to_string())?;
+    // 只记"已登记"，严禁记录 Key 本身
+    tracing::info!(
+        "额外 API Key 已登记（账号 {account_id}，共 {} 把）",
+        extras.len()
+    );
+    Ok(())
+}
+
+/// 移除该账号的一把额外 API Key：参数为脱敏串（UI 只持有脱敏串），
+/// 对每把额外 key 重算 mask 后移除第一个精确匹配；无匹配报错
+#[tauri::command]
+pub fn remove_account_extra_key(account_id: String, masked: String) -> Result<(), String> {
+    let mut extras = creds::load_api_key_extra(&account_id).map_err(|e| e.to_string())?;
+    let Some(idx) = extras.iter().position(|k| mask_api_key(k) == masked.trim()) else {
+        return Err("未找到该额外 Key（可能已被移除）".to_string());
+    };
+    extras.remove(idx);
+    creds::save_api_key_extra(&account_id, &extras).map_err(|e| e.to_string())?;
+    // 只记剩余数量，严禁记录 Key 本身（脱敏串也不记）
+    tracing::info!(
+        "额外 API Key 已移除（账号 {account_id}，剩余 {} 把）",
+        extras.len()
+    );
+    Ok(())
 }
 
 /// 保存该账号的网页 token（月度总量用）：接受新体系 refresh_token 或旧体系 kimi-auth。
@@ -2370,5 +2438,236 @@ mod tests {
         let panel = assemble_panel_state_with(&inner, &settings, &|_| true);
         let tip = worst_account_tooltip(&panel, i18n::Lang::Zh).unwrap();
         assert_eq!(tip, "\n7天剩余 87% · 5h剩余 36%", "实际: {tip}");
+    }
+
+    // ---- 额外 API Key（本地消耗归属用）----
+    //
+    // 以下测试改动 KIMICODEBAR_CONFIG_DIR / KIMICODEBAR_KEYRING_SERVICE（进程级全局
+    // 状态），须持锁串行。本锁为 bin 测试进程内私有：lib 测试在另一进程跑，互不相干；
+    // bin 侧其余测试均不碰这两个环境变量
+    static EXTRA_KEY_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 独立临时配置目录（落地含给定账号的 settings.json）+ 独立 keyring service，
+    /// 绝不碰真实 %APPDATA% 与生产凭据；返回 (配置目录, service 名)
+    fn setup_extra_key_env(accounts: Vec<Account>) -> (std::path::PathBuf, String) {
+        let dir = std::env::temp_dir().join(format!(
+            "kimicodebar-extra-key-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var("KIMICODEBAR_CONFIG_DIR", &dir);
+        let service = format!("KimiCodeBar-test-{}", uuid::Uuid::new_v4());
+        std::env::set_var("KIMICODEBAR_KEYRING_SERVICE", &service);
+        storage::save_settings(&storage::Settings {
+            accounts,
+            ..Default::default()
+        })
+        .unwrap();
+        (dir, service)
+    }
+
+    fn cleanup_extra_key_env(dir: &std::path::Path, service: &str, account_ids: &[&str]) {
+        // 先清 keyring 测试条目（趁 service 环境变量还在），再撤环境变量与临时目录
+        for id in account_ids {
+            for slot in ["api_key", "api_key_extra"] {
+                let _ = keyring::Entry::new(service, &format!("{slot}/{id}"))
+                    .map(|e| e.delete_credential());
+            }
+        }
+        std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
+        std::env::remove_var("KIMICODEBAR_KEYRING_SERVICE");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn extra_key_add_and_status_lists_masked_in_order() {
+        let _guard = EXTRA_KEY_ENV_LOCK.lock().unwrap();
+        let (dir, service) = setup_extra_key_env(vec![account("acc-x", "X")]);
+        creds::save_api_key("acc-x", "sk-kimi-main-key-0001").unwrap();
+
+        add_account_extra_key(
+            "acc-x".to_string(),
+            " sk-kimi-extra-key-0002 \n".to_string(),
+        )
+        .unwrap();
+        add_account_extra_key("acc-x".to_string(), "sk-kimi-extra-key-0003".to_string()).unwrap();
+
+        // 空白 trim 后按登记顺序落盘（与主 key 同一套校验语义）
+        let stored = creds::load_api_key_extra("acc-x").unwrap();
+        assert_eq!(
+            stored,
+            vec![
+                "sk-kimi-extra-key-0002".to_string(),
+                "sk-kimi-extra-key-0003".to_string()
+            ]
+        );
+        // CredentialStatus 按登记顺序给出脱敏串
+        let status = get_credential_status("acc-x".to_string());
+        assert_eq!(
+            status.api_key_extra_masked,
+            vec!["sk-kimi-…0002".to_string(), "sk-kimi-…0003".to_string()]
+        );
+
+        cleanup_extra_key_env(&dir, &service, &["acc-x"]);
+    }
+
+    #[test]
+    fn extra_key_add_rejects_duplicate_of_main() {
+        let _guard = EXTRA_KEY_ENV_LOCK.lock().unwrap();
+        let (dir, service) = setup_extra_key_env(vec![account("acc-x", "X")]);
+        creds::save_api_key("acc-x", "sk-kimi-main-key-0001").unwrap();
+
+        let err = add_account_extra_key("acc-x".to_string(), "sk-kimi-main-key-0001".to_string())
+            .unwrap_err();
+        assert_eq!(err, "该 Key 已配置为主 API Key，无需重复登记");
+        // 拒绝不产生任何写入
+        assert!(creds::load_api_key_extra("acc-x").unwrap().is_empty());
+
+        cleanup_extra_key_env(&dir, &service, &["acc-x"]);
+    }
+
+    #[test]
+    fn extra_key_add_rejects_duplicate_extra() {
+        let _guard = EXTRA_KEY_ENV_LOCK.lock().unwrap();
+        let (dir, service) = setup_extra_key_env(vec![account("acc-x", "X")]);
+
+        add_account_extra_key("acc-x".to_string(), "sk-kimi-extra-key-0002".to_string()).unwrap();
+        let err = add_account_extra_key("acc-x".to_string(), "sk-kimi-extra-key-0002".to_string())
+            .unwrap_err();
+        assert_eq!(err, "该 Key 已在额外 Key 列表中");
+        assert_eq!(creds::load_api_key_extra("acc-x").unwrap().len(), 1);
+
+        cleanup_extra_key_env(&dir, &service, &["acc-x"]);
+    }
+
+    #[test]
+    fn extra_key_add_enforces_limit_five() {
+        let _guard = EXTRA_KEY_ENV_LOCK.lock().unwrap();
+        let (dir, service) = setup_extra_key_env(vec![account("acc-x", "X")]);
+
+        for i in 1..=MAX_EXTRA_API_KEYS {
+            add_account_extra_key("acc-x".to_string(), format!("sk-kimi-extra-key-{i:04}"))
+                .unwrap();
+        }
+        let err = add_account_extra_key("acc-x".to_string(), "sk-kimi-extra-key-0006".to_string())
+            .unwrap_err();
+        assert_eq!(
+            err,
+            format!("每个账号最多登记 {MAX_EXTRA_API_KEYS} 把额外 Key")
+        );
+        assert_eq!(
+            creds::load_api_key_extra("acc-x").unwrap().len(),
+            MAX_EXTRA_API_KEYS
+        );
+
+        cleanup_extra_key_env(&dir, &service, &["acc-x"]);
+    }
+
+    #[test]
+    fn extra_key_add_validates_by_provider() {
+        let _guard = EXTRA_KEY_ENV_LOCK.lock().unwrap();
+        let (dir, service) = setup_extra_key_env(vec![
+            account("acc-k", "K"),
+            deepseek_account("acc-d", "D"),
+            glm_account("acc-g", "G"),
+        ]);
+
+        // Kimi：必须 sk-kimi- 前缀（复用主 key 同款校验）
+        assert_eq!(
+            add_account_extra_key("acc-k".to_string(), "sk-other".to_string()).unwrap_err(),
+            INVALID_API_KEY_MESSAGE
+        );
+        add_account_extra_key("acc-k".to_string(), "sk-kimi-extra-key-0001".to_string()).unwrap();
+        // DeepSeek：sk- 前缀即可（sk-kimi- 开头也含 sk-，与 set_api_key 语义一致）
+        add_account_extra_key("acc-d".to_string(), "sk-kimi-extra-key-0001".to_string()).unwrap();
+        assert_eq!(
+            add_account_extra_key("acc-d".to_string(), "nope".to_string()).unwrap_err(),
+            INVALID_DEEPSEEK_API_KEY_MESSAGE
+        );
+        // GLM：非空即可；空白拒绝
+        add_account_extra_key("acc-g".to_string(), "abc.def".to_string()).unwrap();
+        assert_eq!(
+            add_account_extra_key("acc-g".to_string(), "   ".to_string()).unwrap_err(),
+            INVALID_GLM_API_KEY_MESSAGE
+        );
+
+        cleanup_extra_key_env(&dir, &service, &["acc-k", "acc-d", "acc-g"]);
+    }
+
+    #[test]
+    fn extra_key_add_unknown_account_errors() {
+        let _guard = EXTRA_KEY_ENV_LOCK.lock().unwrap();
+        let (dir, service) = setup_extra_key_env(vec![account("acc-x", "X")]);
+
+        assert_eq!(
+            add_account_extra_key("nope".to_string(), "sk-kimi-extra-key-0001".to_string())
+                .unwrap_err(),
+            "账号不存在"
+        );
+
+        cleanup_extra_key_env(&dir, &service, &["acc-x"]);
+    }
+
+    #[test]
+    fn extra_key_remove_by_masked_roundtrip() {
+        let _guard = EXTRA_KEY_ENV_LOCK.lock().unwrap();
+        let (dir, service) = setup_extra_key_env(vec![account("acc-x", "X")]);
+        creds::save_api_key("acc-x", "sk-kimi-main-key-0001").unwrap();
+        add_account_extra_key("acc-x".to_string(), "sk-kimi-extra-key-0002".to_string()).unwrap();
+        add_account_extra_key("acc-x".to_string(), "sk-kimi-extra-key-0003".to_string()).unwrap();
+
+        // 按脱敏串移除（UI 只持有脱敏串）：移除第一个精确匹配，顺序保持
+        remove_account_extra_key("acc-x".to_string(), "sk-kimi-…0002".to_string()).unwrap();
+        assert_eq!(
+            creds::load_api_key_extra("acc-x").unwrap(),
+            vec!["sk-kimi-extra-key-0003".to_string()]
+        );
+        let status = get_credential_status("acc-x".to_string());
+        assert_eq!(
+            status.api_key_extra_masked,
+            vec!["sk-kimi-…0003".to_string()]
+        );
+        // 再删同一脱敏串：已无匹配 → 报错
+        assert!(
+            remove_account_extra_key("acc-x".to_string(), "sk-kimi-…0002".to_string()).is_err()
+        );
+
+        cleanup_extra_key_env(&dir, &service, &["acc-x"]);
+    }
+
+    #[test]
+    fn extra_key_remove_no_match_errors() {
+        let _guard = EXTRA_KEY_ENV_LOCK.lock().unwrap();
+        let (dir, service) = setup_extra_key_env(vec![account("acc-x", "X")]);
+
+        // 空列表：报错
+        let err =
+            remove_account_extra_key("acc-x".to_string(), "sk-kimi-…zzzz".to_string()).unwrap_err();
+        assert_eq!(err, "未找到该额外 Key（可能已被移除）");
+        // 有列表但不匹配：报错且不产生任何写入
+        add_account_extra_key("acc-x".to_string(), "sk-kimi-extra-key-0002".to_string()).unwrap();
+        assert!(
+            remove_account_extra_key("acc-x".to_string(), "sk-kimi-…9999".to_string()).is_err()
+        );
+        assert_eq!(creds::load_api_key_extra("acc-x").unwrap().len(), 1);
+
+        cleanup_extra_key_env(&dir, &service, &["acc-x"]);
+    }
+
+    #[test]
+    fn extra_key_remove_matches_short_key_fully_shown_mask() {
+        let _guard = EXTRA_KEY_ENV_LOCK.lock().unwrap();
+        // 短 key（≤12 字符）脱敏 = 全显：按"脱敏串"移除必须精确相等，前缀不算命中
+        let (dir, service) = setup_extra_key_env(vec![glm_account("acc-g", "G")]);
+        add_account_extra_key("acc-g".to_string(), "abc".to_string()).unwrap();
+        add_account_extra_key("acc-g".to_string(), "abc2".to_string()).unwrap();
+
+        remove_account_extra_key("acc-g".to_string(), "abc".to_string()).unwrap();
+        assert_eq!(
+            creds::load_api_key_extra("acc-g").unwrap(),
+            vec!["abc2".to_string()]
+        );
+
+        cleanup_extra_key_env(&dir, &service, &["acc-g"]);
     }
 }

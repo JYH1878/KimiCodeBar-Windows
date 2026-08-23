@@ -1231,6 +1231,24 @@ body,
   scroll-margin-top: 8px;
 }
 
+/* 额外 API Key 区（主 key 区下方，虚线分隔）：已登记列表 + 添加行 */
+.extra-keys {
+  border-top: 1px dashed var(--border);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.extra-keys .cred-row {
+  justify-content: space-between;
+}
+
+.extra-keys .cred-row .btn {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
 .add-method-row {
   display: flex;
   gap: 12px;

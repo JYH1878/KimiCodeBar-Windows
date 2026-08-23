@@ -171,7 +171,12 @@
     "saved": "API Key 已保存",
     "cleared": "API Key 已清除",
     "clear": "清除",
-    "save": "保存"
+    "save": "保存",
+    "extraHint": "额外 API Key：同一账号在其他工具（Kimi CLI / Claude Code / Codex / OpenCode 等）挂的多把 Key 可登记到此处（最多 5 把），本地 token 消耗按 Key 汇总到本账号；仅用于本地消耗归属，不参与额度/余额查询。",
+    "extraAdd": "添加",
+    "extraRemove": "删除",
+    "extraAdded": "额外 Key 已登记",
+    "extraRemoved": "额外 Key 已删除"
   },
   "deviceLogin": {
     "title": "方式B：账号授权登录",

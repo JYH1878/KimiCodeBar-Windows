@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AccountProvider, CredentialStatus } from "../types";
-import { clearApiKey, openExternalUrl, setApiKey } from "../ipc";
+import { addAccountExtraKey, clearApiKey, openExternalUrl, removeAccountExtraKey, setApiKey } from "../ipc";
 
 /** API Key 控制台地址（kimi.com/code 专用，与开放平台不通用） */
 const CONSOLE_URL = "https://www.kimi.com/code/console";
@@ -69,9 +69,15 @@ export function ApiKeySection({ accountId, provider = "kimi", status, onChanged 
   const [busy, setBusy] = useState(false);
   const [okMsg, setOkMsg] = useState<string | null>(null);
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  // 额外 API Key（本地消耗归属用）区：独立 busy/提示，与主 key 区互不干扰
+  const [extraInput, setExtraInput] = useState("");
+  const [extraBusy, setExtraBusy] = useState(false);
+  const [extraOk, setExtraOk] = useState<string | null>(null);
+  const [extraErr, setExtraErr] = useState<string | null>(null);
 
   const configured = status?.api_key_configured ?? false;
   const masked = status?.api_key_masked ?? null;
+  const extraMasked = status?.api_key_extra_masked ?? [];
   const isDeepSeek = provider === "deepseek";
   const isGlm = provider === "glm";
 
@@ -110,6 +116,44 @@ export function ApiKeySection({ accountId, provider = "kimi", status, onChanged 
       setErrMsg(String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const addExtra = async () => {
+    const key = extraInput.trim();
+    if (key === "") {
+      setExtraErr(t("apiKey.errEmpty"));
+      setExtraOk(null);
+      return;
+    }
+    setExtraBusy(true);
+    setExtraErr(null);
+    setExtraOk(null);
+    try {
+      await addAccountExtraKey(accountId, key);
+      setExtraInput("");
+      setExtraOk(t("apiKey.extraAdded"));
+      onChanged();
+    } catch (e) {
+      // 后端中文报错原样展示
+      setExtraErr(String(e));
+    } finally {
+      setExtraBusy(false);
+    }
+  };
+
+  const removeExtra = async (maskedKey: string) => {
+    setExtraBusy(true);
+    setExtraErr(null);
+    setExtraOk(null);
+    try {
+      await removeAccountExtraKey(accountId, maskedKey);
+      setExtraOk(t("apiKey.extraRemoved"));
+      onChanged();
+    } catch (e) {
+      setExtraErr(String(e));
+    } finally {
+      setExtraBusy(false);
     }
   };
 
@@ -172,6 +216,45 @@ export function ApiKeySection({ accountId, provider = "kimi", status, onChanged 
         >
           {t("apiKey.save")}
         </button>
+      </div>
+      {/* 额外 API Key（三种 provider 通用）：同一账号在不同工具挂的多把 Key 都登记到这里，
+          本地 token 消耗汇总到本账号；只参与归属比对，不参与额度/余额查询 */}
+      <div className="extra-keys">
+        <p className="hint-muted">{t("apiKey.extraHint")}</p>
+        {extraMasked.map((maskedKey) => (
+          <div className="cred-row" key={maskedKey}>
+            <span className="mono-text">{maskedKey}</span>
+            <button
+              type="button"
+              className="btn danger"
+              onClick={() => void removeExtra(maskedKey)}
+              disabled={extraBusy}
+            >
+              {t("apiKey.extraRemove")}
+            </button>
+          </div>
+        ))}
+        <div className="input-row">
+          <input
+            className="input grow"
+            type="password"
+            placeholder={isDeepSeek ? "sk-…" : isGlm ? t("apiKey.glmPlaceholder") : "sk-kimi-…"}
+            value={extraInput}
+            onChange={(e) => setExtraInput(e.target.value)}
+            spellCheck={false}
+            autoComplete="off"
+          />
+          <button
+            type="button"
+            className="btn primary"
+            onClick={() => void addExtra()}
+            disabled={extraBusy || extraInput.trim() === ""}
+          >
+            {t("apiKey.extraAdd")}
+          </button>
+        </div>
+        {extraErr !== null && <p className="hint-err">{extraErr}</p>}
+        {extraOk !== null && <p className="hint-ok">{extraOk}</p>}
       </div>
     </div>
   );

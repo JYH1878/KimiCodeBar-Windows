@@ -136,6 +136,8 @@ export interface CredentialStatus {
   api_key_configured: boolean;
   /** 脱敏展示，如 sk-kimi-****…a4nr；未配置为 null */
   api_key_masked: string | null;
+  /** 额外 API Key（本地消耗归属用）的脱敏列表，按登记顺序；未登记为空数组 */
+  api_key_extra_masked: string[];
   oauth_configured: boolean;
   /** 网页凭证（refresh_token 或旧 kimi-auth，月度总量用）是否已配置 */
   web_token_configured: boolean;

@@ -98,6 +98,8 @@ fn main() {
             commands::set_api_key,
             commands::clear_api_key,
             commands::get_credential_status,
+            commands::add_account_extra_key,
+            commands::remove_account_extra_key,
             commands::set_web_token,
             commands::clear_web_token,
             commands::start_device_login,

@@ -24,6 +24,10 @@ pub(crate) const SLOT_API_KEY: &str = "api_key";
 pub(crate) const SLOT_WEB_TOKEN: &str = "web_token";
 /// 槽位名前缀：网页端 refresh_token（月度总量用，新鉴权体系）
 pub(crate) const SLOT_WEB_REFRESH_TOKEN: &str = "web_refresh_token";
+/// 槽位名前缀：额外 API Key（本地消耗归属用；值 = JSON 字符串数组，完整槽位名
+/// `api_key_extra/<账号id>`）。同一账号在不同工具挂的多把 key 都登记到这里，
+/// 归属比对时与主 key 同权；不参与任何网络请求（配额/余额/月度永远走主 key）
+pub(crate) const SLOT_API_KEY_EXTRA: &str = "api_key_extra";
 /// OAuth token 剩余有效期小于该值（秒）即提前刷新，与 Mac 版 5 分钟一致
 const REFRESH_MARGIN_SECS: i64 = 300;
 
@@ -88,6 +92,33 @@ pub fn load_web_refresh_token(account_id: &str) -> Result<Option<String>, CredEr
 /// 删除该账号的网页端 refresh_token：本来就不存在也算成功
 pub fn clear_web_refresh_token(account_id: &str) -> Result<(), CredError> {
     clear(SLOT_WEB_REFRESH_TOKEN, account_id)
+}
+
+/// 保存该账号的额外 API Key 列表（本地消耗归属用）到 Windows 凭据管理器。
+/// 值 = JSON 字符串数组；空数组也正常落盘（等价于清空语义，clear 用专用函数）
+pub fn save_api_key_extra(account_id: &str, keys: &[String]) -> Result<(), CredError> {
+    let value = serde_json::to_string(keys).map_err(|e| CredError::Storage(e.to_string()))?;
+    save(SLOT_API_KEY_EXTRA, account_id, &value)
+}
+
+/// 读取该账号的额外 API Key 列表：未保存过 → 空数组；
+/// 值不是合法 JSON 字符串数组（损坏/手改）→ 记 warn 并容忍为空数组（不丢主 key 数据）
+pub fn load_api_key_extra(account_id: &str) -> Result<Vec<String>, CredError> {
+    match load(SLOT_API_KEY_EXTRA, account_id)? {
+        None => Ok(Vec::new()),
+        Some(raw) => match serde_json::from_str::<Vec<String>>(&raw) {
+            Ok(keys) => Ok(keys),
+            Err(e) => {
+                tracing::warn!("账号 {account_id} 的额外 API Key 槽位 JSON 损坏，按空处理: {e}");
+                Ok(Vec::new())
+            }
+        },
+    }
+}
+
+/// 删除该账号的额外 API Key 槽位：本来就不存在也算成功
+pub fn clear_api_key_extra(account_id: &str) -> Result<(), CredError> {
+    clear(SLOT_API_KEY_EXTRA, account_id)
 }
 
 /// 取该账号当前生效的 token：
@@ -299,6 +330,90 @@ mod tests {
         assert!(super::legacy_load(super::SLOT_API_KEY).unwrap().is_none());
         assert!(super::load_api_key("acc-a").unwrap().is_none());
 
+        cleanup_service();
+    }
+
+    #[test]
+    fn extra_slots_isolated_per_account() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        use_test_service();
+
+        // 额外 key 槽位与主 key 槽位、不同账号之间各自独立
+        super::save_api_key("acc-a", "main-a").unwrap();
+        super::save_api_key_extra("acc-a", &["x1".to_string(), "x2".to_string()]).unwrap();
+        super::save_api_key_extra("acc-b", &["y1".to_string()]).unwrap();
+
+        assert_eq!(
+            super::load_api_key("acc-a").unwrap().as_deref(),
+            Some("main-a")
+        );
+        assert_eq!(
+            super::load_api_key_extra("acc-a").unwrap(),
+            vec!["x1".to_string(), "x2".to_string()]
+        );
+        assert_eq!(
+            super::load_api_key_extra("acc-b").unwrap(),
+            vec!["y1".to_string()]
+        );
+        // 清 acc-a 的额外槽位：不影响主 key，也不影响 acc-b 的额外槽位
+        super::clear_api_key_extra("acc-a").unwrap();
+        assert!(super::load_api_key_extra("acc-a").unwrap().is_empty());
+        assert_eq!(
+            super::load_api_key("acc-a").unwrap().as_deref(),
+            Some("main-a")
+        );
+        assert_eq!(
+            super::load_api_key_extra("acc-b").unwrap(),
+            vec!["y1".to_string()]
+        );
+        // 重复删除也算成功
+        super::clear_api_key_extra("acc-a").unwrap();
+
+        // 收尾
+        super::clear_api_key("acc-a").unwrap();
+        super::clear_api_key_extra("acc-b").unwrap();
+        cleanup_service();
+    }
+
+    #[test]
+    fn extra_keys_roundtrip_preserves_order() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        use_test_service();
+
+        // 未保存过 → 空数组
+        assert!(super::load_api_key_extra("acc-a").unwrap().is_empty());
+        // 空数组也正常落盘读回
+        super::save_api_key_extra("acc-a", &[]).unwrap();
+        assert!(super::load_api_key_extra("acc-a").unwrap().is_empty());
+        // 多把按登记顺序读回
+        let keys: Vec<String> = (1..=5).map(|i| format!("sk-kimi-extra-{i}")).collect();
+        super::save_api_key_extra("acc-a", &keys).unwrap();
+        assert_eq!(super::load_api_key_extra("acc-a").unwrap(), keys);
+        // 覆盖写：后写全量替换
+        let shorter = vec!["only".to_string()];
+        super::save_api_key_extra("acc-a", &shorter).unwrap();
+        assert_eq!(super::load_api_key_extra("acc-a").unwrap(), shorter);
+
+        super::clear_api_key_extra("acc-a").unwrap();
+        cleanup_service();
+    }
+
+    #[test]
+    fn extra_keys_load_tolerates_corrupt_json() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        use_test_service();
+
+        // 直接把坏值写进槽位（绕过 save_api_key_extra 的序列化保障）
+        super::save(super::SLOT_API_KEY_EXTRA, "acc-a", "not-json").unwrap();
+        // 损坏容忍为空数组，不报错
+        assert!(super::load_api_key_extra("acc-a").unwrap().is_empty());
+        // 合法 JSON 但不是字符串数组：同样容忍为空
+        super::save(super::SLOT_API_KEY_EXTRA, "acc-a", r#"{"k":1}"#).unwrap();
+        assert!(super::load_api_key_extra("acc-a").unwrap().is_empty());
+        super::save(super::SLOT_API_KEY_EXTRA, "acc-a", "[1,2]").unwrap();
+        assert!(super::load_api_key_extra("acc-a").unwrap().is_empty());
+
+        super::clear_api_key_extra("acc-a").unwrap();
         cleanup_service();
     }
 }
