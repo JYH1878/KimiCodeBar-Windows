@@ -111,7 +111,7 @@ Kimi Code 的按量付费钱包：订阅额度用完后，可用预存余额继�
 
 **我的数据会被上传到别处吗？**
 
-不会。所有凭证与配置仅存本机（API Key 在 Windows 凭据管理器，其余在 `%APPDATA%\KimiCodeBar\`）。网络请求只发往：`api.kimi.com`（用量）、`auth.kimi.com`（授权）、`api.deepseek.com`（DeepSeek 余额，仅当配置了 DeepSeek 账号）、`open.bigmodel.cn`（GLM 额度，仅当配置了 GLM 账号）、`api.github.com`（更新检查）。
+不会。所有凭证与配置仅存本机（API Key 在 Windows 凭据管理器，其余在 `%APPDATA%\KimiCodeBar\`）。网络请求只发往：`api.kimi.com`（用量）、`auth.kimi.com`（授权）、`api.deepseek.com`（DeepSeek 余额，仅当配置了 DeepSeek 账号）、`open.bigmodel.cn`（GLM 额度，仅当配置了 GLM 账号）、`api.github.com`（更新检查）。详见 [PRIVACY.md](PRIVACY.md)（隐私政策）与 [CODE_SIGNING_POLICY.md](CODE_SIGNING_POLICY.md)（代码签名政策）。
 
 ## 从源码构建
 
@@ -163,3 +163,6 @@ cd src-tauri && cargo test
 ## License
 
 [MIT](LICENSE) © 2026 xifandev, JYH1878
+
+本项目的 Windows 发布包已申请 SignPath Foundation 的免费代码签名（申请中，批准前发布包保持未签名）：
+Free code signing provided by SignPath.io, certificate by SignPath Foundation

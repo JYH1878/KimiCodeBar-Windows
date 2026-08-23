@@ -120,7 +120,7 @@ The panel shows the last cached result with a non-blocking banner — no errors,
 
 **Is my data uploaded anywhere?**
 
-No. All credentials and settings stay on your machine (API key in Windows Credential Manager; everything else in `%APPDATA%\KimiCodeBar\`). Network requests go only to: `api.kimi.com` (usage), `auth.kimi.com` (authorization), `api.deepseek.com` (DeepSeek balance, only if a DeepSeek account is configured), `open.bigmodel.cn` (GLM quota, only if a GLM account is configured), `api.github.com` (update checks).
+No. All credentials and settings stay on your machine (API key in Windows Credential Manager; everything else in `%APPDATA%\KimiCodeBar\`). Network requests go only to: `api.kimi.com` (usage), `auth.kimi.com` (authorization), `api.deepseek.com` (DeepSeek balance, only if a DeepSeek account is configured), `open.bigmodel.cn` (GLM quota, only if a GLM account is configured), `api.github.com` (update checks). See [PRIVACY.md](PRIVACY.md) and [CODE_SIGNING_POLICY.md](CODE_SIGNING_POLICY.md).
 
 ## Build from source
 
@@ -173,3 +173,6 @@ This project's behavior and API details (device flow, edge cases in usage parsin
 ## License
 
 [MIT](LICENSE) © 2026 xifandev, JYH1878
+
+This project has applied for free code signing from the SignPath Foundation (pending — releases stay unsigned until approved):
+Free code signing provided by SignPath.io, certificate by SignPath Foundation

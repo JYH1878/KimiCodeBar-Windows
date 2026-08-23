@@ -1486,7 +1486,7 @@
                 </svg>
               </div>
               <h3 data-i18n="privacyCard2T">官方直连</h3>
-              <p data-i18n="privacyCard2D">所有网络请求仅与 Kimi 官方接口（api.kimi.com / auth.kimi.com）及 GitHub（更新检查）通信，没有中间商，没有统计埋点。</p>
+              <p data-i18n="privacyCard2D">网络请求只发往官方接口：api.kimi.com（用量）、auth.kimi.com（授权）、api.deepseek.com（DeepSeek 余额，仅配置了 DeepSeek 账号时）、open.bigmodel.cn（GLM 额度，仅配置了 GLM 账号时）、api.github.com（更新检查）；没有中间商，没有统计埋点。</p>
             </div>
             <div class="card reveal">
               <div class="icon">
@@ -1561,6 +1561,7 @@
               <span data-i18n="downloadCtaPrimary">前往 GitHub Releases 下载</span>
             </a>
           </div>
+          <p class="hero-note" data-i18n="signPathNote">代码签名（申请中）：Free code signing provided by SignPath.io, certificate by SignPath Foundation</p>
         </div>
       </section>
     </main>
@@ -1690,7 +1691,8 @@
             privacyCard1T: '本地存储',
             privacyCard1D: '用量数据与登录凭据只保存在本地：API Key 存入 Windows 凭据管理器，其余配置仅存本机，不上传、不同步到任何第三方。',
             privacyCard2T: '官方直连',
-            privacyCard2D: '所有网络请求仅与 Kimi 官方接口（api.kimi.com / auth.kimi.com）及 GitHub（更新检查）通信，没有中间商，没有统计埋点。',
+            privacyCard2D: '网络请求只发往官方接口：api.kimi.com（用量）、auth.kimi.com（授权）、api.deepseek.com（DeepSeek 余额，仅配置了 DeepSeek 账号时）、open.bigmodel.cn（GLM 额度，仅配置了 GLM 账号时）、api.github.com（更新检查）；没有中间商，没有统计埋点。',
+            signPathNote: '代码签名（申请中）：Free code signing provided by SignPath.io, certificate by SignPath Foundation',
             privacyCard3T: '开源可审计',
             privacyCard3D: 'MIT 协议全量开源，每一行代码都在 GitHub 上，欢迎审阅与共建。',
             platformTag: 'Platforms',
@@ -1804,7 +1806,8 @@
             privacyCard1T: 'Local Storage',
             privacyCard1D: 'Usage data and credentials are stored locally only: the API key in Windows Credential Manager, everything else on your machine. No upload, no third-party sync.',
             privacyCard2T: 'Official Direct',
-            privacyCard2D: 'All network requests talk only to Kimi official endpoints (api.kimi.com / auth.kimi.com) and GitHub (update checks). No middlemen, no tracking.',
+            privacyCard2D: 'All network requests go only to official endpoints: api.kimi.com (usage), auth.kimi.com (authorization), api.deepseek.com (DeepSeek balance, only when a DeepSeek account is configured), open.bigmodel.cn (GLM quota, only when a GLM account is configured) and api.github.com (update checks). No middlemen, no tracking.',
+            signPathNote: 'Code signing (application pending): Free code signing provided by SignPath.io, certificate by SignPath Foundation',
             privacyCard3T: 'Open Source',
             privacyCard3D: 'Fully open source under MIT. Every line is on GitHub for review and contribution.',
             platformTag: 'Platforms',
