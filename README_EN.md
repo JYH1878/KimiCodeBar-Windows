@@ -9,7 +9,7 @@
 
 A Windows system tray monitor for Kimi Code usage quotas. Sits quietly in the tray; one left-click shows your quota, and it turns red to warn you before you run out.
 
-Built with **Tauri 2 + Rust + React**: installer under 4 MB, ~10–20 MB RAM in daily use. **Bilingual UI (Chinese / English)** since v0.4.0.
+Built with **Tauri 2 + Rust + React**: installer under 5 MB, ~10–20 MB RAM in daily use. **Bilingual UI (Chinese / English)** since v0.4.0.
 
 > Community project, not an official Kimi product.
 >
@@ -23,7 +23,7 @@ Built with **Tauri 2 + Rust + React**: installer under 4 MB, ~10–20 MB RAM in 
 - **Dual quota windows**: used percentage, remaining amount and reset countdown for both the 7-day and 5-hour rolling windows
 - **Membership & wallet**: shows membership tier (Andante / Moderato / Allegretto / Allegro), Booster wallet balance and monthly usage
 - **Monthly totals**: combined Kimi + Code monthly usage from the web console (paste the web refresh_token once in Settings; the app renews it automatically)
-- **Local token stats**: scans local `wire.jsonl` session logs for per-day token consumption (today/yesterday + 7-day bar chart + today's per-model breakdown) — no API needed; tracked per account (auto-attributed by CLI credentials, covering every `~/.kimi-code-*` home from `KIMI_CODE_HOME` multi-instance setups)
+- **Local token stats**: scans local `wire.jsonl` session logs for per-day token consumption (today/yesterday + 7-day bar chart + today's per-model breakdown) — no API needed; tracked per account (auto-attributed by CLI credentials, covering every `~/.kimi-code-*` home from `KIMI_CODE_HOME` multi-instance setups); also picks up Claude Code, Codex and OpenCode local logs, attributed to registered accounts by exact API-key match; multiple keys of the same account used across tools can be registered as "extra keys" in Settings (up to 5 per account) to aggregate usage — keys are matched in memory only, never persisted or sent anywhere
 - **Usage trend chart**: 24-hour dual-line history (7-day / 5-hour), recorded locally — facts only, no prediction
 - **Light / dark theme**: follows the system or switch manually
 - **Panel background**: preset gradients (Night / Aurora / Violet / Ember, each adapted to light & dark themes) or a custom image (PNG / JPG / WebP, ≤10MB), with translucent frosted cards
@@ -154,7 +154,7 @@ cd src-tauri && cargo test
 ## Engineering & quality
 
 - **CI gates**: every push / PR runs `cargo fmt --check`, `cargo clippy -D warnings`, ESLint and `cargo test` ([workflow](.github/workflows/ci.yml))
-- **Test strategy**: 180+ unit/integration tests focusing on defensive parsing of the usage API (missing fields, proto3 omissions, field aliases, currency unit conversion), OAuth flow logic, version comparison and storage round-trips; real API responses (sanitized) are kept as regression fixtures
+- **Test strategy**: 330+ unit/integration tests focusing on defensive parsing of the usage API (missing fields, proto3 omissions, field aliases, currency unit conversion), OAuth flow logic, version comparison and storage round-trips; real API responses (sanitized) are kept as regression fixtures
 - **Dependabot**: weekly PRs for npm / cargo / GitHub Actions updates
 - **Automated releases**: pushing a `v*` tag builds the NSIS installer and portable zip in CI and drafts a GitHub Release ([workflow](.github/workflows/release.yml))
 

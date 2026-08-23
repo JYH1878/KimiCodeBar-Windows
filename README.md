@@ -9,7 +9,7 @@
 
 Kimi Code 用量监控的 Windows 系统托盘工具。常驻托盘不打扰，左键一点看额度，快烧完了变红提醒你。
 
-基于 **Tauri 2 + Rust + React** 构建：安装包不到 4 MB，运行内存约 10–20 MB。
+基于 **Tauri 2 + Rust + React** 构建：安装包不到 5 MB，运行内存约 10–20 MB。
 
 > **官网**：[jyh1878.github.io/KimiCodeBar-Windows](https://jyh1878.github.io/KimiCodeBar-Windows/)
 >
@@ -22,7 +22,7 @@ Kimi Code 用量监控的 Windows 系统托盘工具。常驻托盘不打扰，�
 - **系统托盘常驻**：左键弹出用量面板（自动定位到托盘图标上方，失焦收起）；右键菜单（刷新 / 设置 / 退出）
 - **双窗口用量**：7 天窗口 + 5 小时窗口的已用百分比、剩余量、重置倒计时
 - **月度总量**：Kimi + Code 每月总用量分列显示（设置中粘贴一次网页 refresh_token，插件自动续期）
-- **本地消耗统计**：扫描本地 `wire.jsonl` 会话日志，按天统计 token 消耗（今日/昨日 + 近 7 天柱状图 + 今日分模型占比），不依赖 API；多账号各自独立统计（按 CLI 凭证自动归属，支持 `KIMI_CODE_HOME` 多开的全部 `~/.kimi-code-*` 配置目录）
+- **本地消耗统计**：扫描本地 `wire.jsonl` 会话日志，按天统计 token 消耗（今日/昨日 + 近 7 天柱状图 + 今日分模型占比），不依赖 API；多账号各自独立统计（按 CLI 凭证自动归属，支持 `KIMI_CODE_HOME` 多开的全部 `~/.kimi-code-*` 配置目录）；并接入 Claude Code、Codex、OpenCode 的本地日志，按各家配置的 API key 精确归属到已登记账号；同一账号在不同工具挂的多把 key 可在设置页登记为「额外 Key」（每账号最多 5 把）汇总归属——所有 key 只在内存比对，不落盘、不用于任何网络请求
 - **用量趋势**：近 24 小时双线折线图（7 天/5 小时），本地记录 7 天历史，纯事实不预测
 - **会员与钱包**：显示会员档位（Andante / Moderato / Allegretto / Allegro）与加油包（Booster）钱包余额、月度用量
 - **多账号**：最多 10 个账号，面板左右翻页（像手机桌面）一页一个账号；滚轮 / 拖拽 / 点圆点翻页，末尾「+」快捷添加，设置页集中管理（改名 / 排序 / 删除）。旧版单账号数据自动迁移为「账号 1」，升级无感
@@ -145,7 +145,7 @@ cd src-tauri && cargo test
 ## 工程与质量
 
 - **CI 门禁**：每次 push / PR 自动执行 `cargo fmt --check`、`cargo clippy -D warnings`、ESLint、`cargo test`（[工作流](.github/workflows/ci.yml)）
-- **测试策略**：180+ 单元/集成测试，重点覆盖用量响应的防御性解析（字段缺失、proto3 省略、字段别名、金额单位换算）、OAuth 流程纯逻辑、版本比较、配置读写回环；真实 API 响应脱敏后作为 fixture 常驻回归
+- **测试策略**：330+ 单元/集成测试，重点覆盖用量响应的防御性解析（字段缺失、proto3 省略、字段别名、金额单位换算）、OAuth 流程纯逻辑、版本比较、配置读写回环；真实 API 响应脱敏后作为 fixture 常驻回归
 - **Dependabot**：每周自动检查 npm / cargo / GitHub Actions 依赖升级并开 PR
 - **自动发版**：打 `v*` tag → CI 自动构建 NSIS 安装包与便携 zip → 生成 Release 草稿，人工确认后发布（[工作流](.github/workflows/release.yml)）
 

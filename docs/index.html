@@ -1207,7 +1207,7 @@
                 <span class="sec-divider-line"></span>
                 <span class="sec-divider-glow"></span>
               </div>
-              <p class="sub" data-i18n-html="heroSub">基于 Tauri 2 + Rust + React 构建：安装包不到 4&nbsp;MB，运行内存约 10–20&nbsp;MB。<br>静默驻留系统托盘，左键一点看额度，快烧完了变红提醒你。</p>
+              <p class="sub" data-i18n-html="heroSub">基于 Tauri 2 + Rust + React 构建：安装包不到 5&nbsp;MB，运行内存约 10–20&nbsp;MB。<br>静默驻留系统托盘，左键一点看额度，快烧完了变红提醒你。</p>
               <ul class="check-list">
                 <li>
                   <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
@@ -1278,7 +1278,7 @@
             <div class="card reveal">
               <div class="icon"><i data-lucide="database"></i></div>
               <h3 data-i18n="f4T">本地消耗统计</h3>
-              <p data-i18n="f4D">扫描本地 wire.jsonl 会话日志，按天统计 token 消耗（今日/昨日 + 近 7 天柱状图 + 今日分模型占比），不依赖 API；多账号各自独立统计</p>
+              <p data-i18n="f4D">扫描本地 wire.jsonl 会话日志，按天统计 token 消耗（今日/昨日 + 近 7 天柱状图 + 今日分模型占比），不依赖 API；多账号各自独立统计，并接入 Claude Code / Codex / OpenCode 本地日志（按 API key 归属到已登记账号）；同一账号的多把 key 可登记「额外 Key」汇总归属，key 只在内存比对、不落盘不联网</p>
             </div>
             <div class="card reveal">
               <div class="icon"><i data-lucide="trending-up"></i></div>
@@ -1604,7 +1604,7 @@
             heroPill: 'Kimi 社区版',
             heroPillNote: '非官方产品',
             heroHeading: '✨免费开源<br><span class="grad">Kimi Code 用量监控</span>',
-            heroSub: '基于 Tauri 2 + Rust + React 构建：安装包不到 4&nbsp;MB，运行内存约 10–20&nbsp;MB。<br>静默驻留系统托盘，左键一点看额度，快烧完了变红提醒你。',
+            heroSub: '基于 Tauri 2 + Rust + React 构建：安装包不到 5&nbsp;MB，运行内存约 10–20&nbsp;MB。<br>静默驻留系统托盘，左键一点看额度，快烧完了变红提醒你。',
             heroCheck1: '<b>托盘常驻</b> 7 天 / 5 小时用量，一点即见',
             heroCheck2: '<b>低额度预警</b> 图标变红 + 系统通知',
             downloadWindows: 'Windows 版',
@@ -1622,7 +1622,7 @@
             f3T: '月度总量',
             f3D: 'Kimi + Code 每月总用量分列显示（设置中粘贴一次 refresh_token，插件自动续期）',
             f4T: '本地消耗统计',
-            f4D: '扫描本地 wire.jsonl 会话日志，按天统计 token 消耗（今日/昨日 + 近 7 天柱状图 + 今日分模型占比），不依赖 API；多账号各自独立统计',
+            f4D: '扫描本地 wire.jsonl 会话日志，按天统计 token 消耗（今日/昨日 + 近 7 天柱状图 + 今日分模型占比），不依赖 API；多账号各自独立统计，并接入 Claude Code / Codex / OpenCode 本地日志（按 API key 归属到已登记账号）；同一账号的多把 key 可登记「额外 Key」汇总归属，key 只在内存比对、不落盘不联网',
             f5T: '用量趋势',
             f5D: '近 24 小时双线折线图（7 天 / 5 小时），本地记录 7 天历史，纯事实不预测',
             f6T: '会员与钱包',
@@ -1718,7 +1718,7 @@
             heroPill: 'Kimi Community Edition',
             heroPillNote: 'not an official product',
             heroHeading: '✨ Free & Open Source<br><span class="grad">Kimi Code Usage Monitor</span>',
-            heroSub: 'Built with Tauri 2 + Rust + React: installer under 4&nbsp;MB, ~10–20&nbsp;MB RAM in daily use.<br>Lives quietly in the system tray; one left-click shows your quota, and it turns red before you run out.',
+            heroSub: 'Built with Tauri 2 + Rust + React: installer under 5&nbsp;MB, ~10–20&nbsp;MB RAM in daily use.<br>Lives quietly in the system tray; one left-click shows your quota, and it turns red before you run out.',
             heroCheck1: '<b>Lives in the tray</b> 7-day / 5-hour usage at a glance',
             heroCheck2: '<b>Low-quota alerts</b> red tray icon + system notification',
             downloadWindows: 'Windows',
@@ -1736,7 +1736,7 @@
             f3T: 'Monthly Totals',
             f3D: 'Combined Kimi + Code monthly usage from the web console (paste the refresh_token once in Settings; the app renews it automatically)',
             f4T: 'Local Token Stats',
-            f4D: 'Scans local wire.jsonl session logs for per-day token consumption — today/yesterday, 7-day bar chart, per-model breakdown. No API needed; tracked per account',
+            f4D: 'Scans local wire.jsonl session logs for per-day token consumption — today/yesterday, 7-day bar chart, per-model breakdown. No API needed; tracked per account, plus Claude Code / Codex / OpenCode local logs (attributed to registered accounts by API key); multiple keys of one account can be registered as "extra keys" to aggregate usage — matched in memory only, never persisted or sent anywhere',
             f5T: 'Usage Trends',
             f5D: '24-hour dual-line history (7-day / 5-hour) recorded locally — facts only, no prediction',
             f6T: 'Membership & Wallet',
