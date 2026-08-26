@@ -41,6 +41,7 @@ Built with **Tauri 2 + Rust + React**: installer under 5 MB, ~10–20 MB RAM in 
 - **Auto update**: silently checks GitHub Releases; an update badge appears in the panel when a new version is available
 - **Global hotkey**: summon/dismiss the panel anywhere (e.g. `Ctrl+Shift+K`, record it by pressing the combo in Settings, off by default)
 - **CLI mode**: `kimicodebar.exe --status` prints quota JSON for scripts and CI (exit codes 0/1/2)
+- **Kimi Code status line**: one toggle in Settings pins your quota to the Kimi Code terminal footer (model and cwd kept, 5-hour / 7-day remaining and plan tier appended, ⚠ prefix when low); reads the local cache with zero network cost and wires up all `~/.kimi-code-*` CLI homes automatically
 - **Usage export**: one-click CSV/JSON export of your usage history for expense reports and reviews
 - **Launch at login**: optional, one toggle in Settings
 
@@ -154,7 +155,7 @@ cd src-tauri && cargo test
 ## Engineering & quality
 
 - **CI gates**: every push / PR runs `cargo fmt --check`, `cargo clippy -D warnings`, ESLint and `cargo test` ([workflow](.github/workflows/ci.yml))
-- **Test strategy**: 330+ unit/integration tests focusing on defensive parsing of the usage API (missing fields, proto3 omissions, field aliases, currency unit conversion), OAuth flow logic, version comparison and storage round-trips; real API responses (sanitized) are kept as regression fixtures
+- **Test strategy**: 360+ unit/integration tests focusing on defensive parsing of the usage API (missing fields, proto3 omissions, field aliases, currency unit conversion), OAuth flow logic, version comparison and storage round-trips; real API responses (sanitized) are kept as regression fixtures
 - **Dependabot**: weekly PRs for npm / cargo / GitHub Actions updates
 - **Automated releases**: pushing a `v*` tag builds the NSIS installer and portable zip in CI and drafts a GitHub Release ([workflow](.github/workflows/release.yml))
 

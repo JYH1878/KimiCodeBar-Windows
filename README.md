@@ -38,6 +38,7 @@ Kimi Code 用量监控的 Windows 系统托盘工具。常驻托盘不打扰，�
 - **自动更新**：静默检查 GitHub Releases，有新版本时面板出现更新徽标，点击直达下载页
 - **全局热键**：任意界面一键唤起/收起面板（如 `Ctrl+Shift+K`，设置页按组合键直接录制，默认关闭）
 - **CLI 模式**：`kimicodebar.exe --status` 输出配额 JSON，可接入脚本与 CI/CD（退出码 0/1/2）
+- **Kimi Code 状态栏**：设置页一键开启后，Kimi Code 终端底栏实时显示额度（模型与工作区信息保留，5 小时 / 7 天额度与档位缀后，低额度带 ⚠ 前缀）；数据读本地缓存零网络开销，多开的 `~/.kimi-code-*` 配置目录自动接线
 - **中英双语**：界面、通知、托盘提示全覆盖（跟随系统 / 中文 / English）
 - **浅色 / 深色主题**：跟随系统或手动切换
 - **面板背景**：预设渐变色（夜空 / 极光 / 紫藤 / 暖阳，各配明暗两套色随主题切换）或自定义图片（PNG / JPG / WebP，≤10MB），卡片为半透明毛玻璃
@@ -145,7 +146,7 @@ cd src-tauri && cargo test
 ## 工程与质量
 
 - **CI 门禁**：每次 push / PR 自动执行 `cargo fmt --check`、`cargo clippy -D warnings`、ESLint、`cargo test`（[工作流](.github/workflows/ci.yml)）
-- **测试策略**：330+ 单元/集成测试，重点覆盖用量响应的防御性解析（字段缺失、proto3 省略、字段别名、金额单位换算）、OAuth 流程纯逻辑、版本比较、配置读写回环；真实 API 响应脱敏后作为 fixture 常驻回归
+- **测试策略**：360+ 单元/集成测试，重点覆盖用量响应的防御性解析（字段缺失、proto3 省略、字段别名、金额单位换算）、OAuth 流程纯逻辑、版本比较、配置读写回环；真实 API 响应脱敏后作为 fixture 常驻回归
 - **Dependabot**：每周自动检查 npm / cargo / GitHub Actions 依赖升级并开 PR
 - **自动发版**：打 `v*` tag → CI 自动构建 NSIS 安装包与便携 zip → 生成 Release 草稿，人工确认后发布（[工作流](.github/workflows/release.yml)）
 
