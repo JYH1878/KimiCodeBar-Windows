@@ -2,7 +2,9 @@
 //! 聚合为今日/昨日/最近 7 天/分模型累计（语义移植自 macOS 版 KimiLocalUsage.swift）。
 //!
 //! 数据源：枚举全部 CLI home（默认 `{userprofile}/.kimi-code` + glob `.kimi-code-*`，
-//! 见 cli_homes），递归遍历各 home 的 `sessions/**/wire.jsonl`，逐行 JSON，
+//! 见 cli_homes；另含 WSL 侧 home——发行版名单读注册表 Lxss 键，经 `\\wsl.localhost`
+//! 枚举各发行版 home/ 下用户目录与 root/ 的 .kimi-code，见 wsl_homes），递归遍历
+//! 各 home 的 `sessions/**/wire.jsonl`，逐行 JSON，
 //! 只认 `{"type":"usage.record",...}` 事件，实测样例：
 //! `{"type":"usage.record","model":"kimi-code/k3","usage":{"inputOther":11592,"output":504,"inputCacheRead":11264,"inputCacheCreation":0},"usageScope":"turn","time":1784973672311}`
 //! （time 为 epoch 毫秒；tokens = inputOther + output + inputCacheRead + inputCacheCreation；
@@ -177,7 +179,7 @@ where
     Tz::Offset: std::fmt::Display,
 {
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
-    let targets: Vec<(PathBuf, Attribution)> = home
+    let mut targets: Vec<(PathBuf, Attribution)> = home
         .as_deref()
         .map(Path::new)
         .map(cli_homes)
@@ -189,6 +191,12 @@ where
             (h.join("sessions"), attribution)
         })
         .collect();
+    // WSL 侧 home 并列进扫描目标：与本地 home 同一节流节奏，各用自己 home 的
+    // 凭证快照归属（同账号自然归同桶）；WSL 未装/关机时 wsl_homes 为空，无特殊分支
+    for wsl_home in wsl_homes() {
+        let attribution = snapshot_attribution(&wsl_home);
+        targets.push((wsl_home.join("sessions"), attribution));
+    }
     let harness = harness_input(home.as_deref());
     let mut view = scan_full(&targets, &harness, &state_file_path(), now_ms, tz);
     // __secondary__ 桶并入真实副模型（展示层折叠，不落盘；解析不到保留原样）：逐桶折叠
@@ -1152,6 +1160,72 @@ fn is_valid_cli_home(dir: &Path) -> bool {
         && (dir.join("config.toml").is_file() || dir.join("credentials").is_dir())
 }
 
+/// WSL 侧 CLI home 发现的纯函数（wsl_root 与发行版名单入参化，可单测）：
+/// 对每个发行版，枚举 `<wsl_root>/<发行版>/home/` 下每个用户目录的 `.kimi-code`，
+/// 外加探测 `<wsl_root>/<发行版>/root/.kimi-code`（root 用户不在 home/ 下）；
+/// 合法判定与本地 home 同标准（is_valid_cli_home），结果按路径字典序排序去重。
+/// 发行版目录不存在/不可读（WSL 关机、发行版已删）等一切 IO 错误容忍为空
+fn wsl_homes_from(wsl_root: &Path, distros: &[String]) -> Vec<PathBuf> {
+    let mut homes = Vec::new();
+    for distro in distros {
+        let distro_root = wsl_root.join(distro);
+        if let Ok(entries) = std::fs::read_dir(distro_root.join("home")) {
+            for entry in entries.flatten() {
+                let candidate = entry.path().join(".kimi-code");
+                if is_valid_cli_home(&candidate) {
+                    homes.push(candidate);
+                }
+            }
+        }
+        let root_home = distro_root.join("root").join(".kimi-code");
+        if is_valid_cli_home(&root_home) {
+            homes.push(root_home);
+        }
+    }
+    homes.sort();
+    homes.dedup();
+    homes
+}
+
+/// WSL 发行版名单：注册表 HKCU\Software\Microsoft\Windows\CurrentVersion\Lxss 每个
+/// 子键（一个已安装发行版一个 GUID 子键）的 DistributionName 值。
+/// 背景：\\wsl.localhost 根目录无法枚举（报「UNC 路径格式应为 \\server\share」），
+/// 名单只能从这里拿。任何失败（无 WSL、键缺失、读错）返回空 vec，绝不 panic
+#[cfg(windows)]
+fn wsl_distro_names() -> Vec<String> {
+    let Ok(lxss) = winreg::RegKey::predef(winreg::enums::HKEY_CURRENT_USER)
+        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Lxss")
+    else {
+        return Vec::new();
+    };
+    lxss.enum_keys()
+        .flatten()
+        .filter_map(|guid| {
+            lxss.open_subkey(guid)
+                .and_then(|key| key.get_value::<String, _>("DistributionName"))
+                .ok()
+        })
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// 非 Windows 无 WSL：恒空（本工具仅发 Windows 版，桩为跨平台编译兜底）
+#[cfg(not(windows))]
+fn wsl_distro_names() -> Vec<String> {
+    Vec::new()
+}
+
+/// WSL 侧 CLI home 发现（薄壳）：注册表拿发行版名单 + 以 \\wsl.localhost 为根调纯函数。
+/// 环境变量 KIMICODEBAR_WSL_ROOT 可改写根（测试把扫描指向伪造/不存在目录做环境隔离，
+/// 生产不设）；注册表名单为空（未装 WSL）时纯函数零迭代，不会触碰 \\wsl.localhost
+fn wsl_homes() -> Vec<PathBuf> {
+    let root = std::env::var_os("KIMICODEBAR_WSL_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"\\wsl.localhost"));
+    wsl_homes_from(&root, &wsl_distro_names())
+}
+
 /// 扫描状态路径：{config_dir}/scan-state.json（config_dir 规则与 storage.rs 一致）
 fn state_file_path() -> PathBuf {
     crate::storage::config_dir().join("scan-state.json")
@@ -1717,6 +1791,8 @@ mod tests {
         let config = temp_dir("local-usage-conf");
         std::env::set_var("USERPROFILE", &home);
         std::env::set_var("KIMICODEBAR_CONFIG_DIR", &config);
+        // 本机真实 WSL home 不进本测试（scan 会发现它）：根指到不存在目录
+        std::env::set_var("KIMICODEBAR_WSL_ROOT", home.join("no-wsl"));
 
         // 今日事件（用真实本地时钟，scan() 走 chrono::Local）
         let now_ms = chrono::Local::now().timestamp_millis();
@@ -1737,6 +1813,7 @@ mod tests {
 
         std::env::remove_var("USERPROFILE");
         std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
+        std::env::remove_var("KIMICODEBAR_WSL_ROOT");
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_dir_all(&config);
     }
@@ -2981,6 +3058,8 @@ mod tests {
             format!("KimiCodeBar-test-{}", uuid::Uuid::new_v4()),
         );
         std::env::remove_var("KIMI_SECONDARY_MODEL");
+        // 本机真实 WSL home 不进本测试（scan_fresh 会发现它）：根指到不存在目录
+        std::env::set_var("KIMICODEBAR_WSL_ROOT", root.join("no-wsl"));
 
         let view = scan_fresh(now_ms, &chrono::Local);
         // 两个 home 都被扫到、各归各账号（cli_homes 只认默认 home 时本测试必红：acc-b 为 0）
@@ -2991,6 +3070,7 @@ mod tests {
         std::env::remove_var("USERPROFILE");
         std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
         std::env::remove_var("KIMICODEBAR_KEYRING_SERVICE");
+        std::env::remove_var("KIMICODEBAR_WSL_ROOT");
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&config);
     }
@@ -3461,6 +3541,8 @@ mod tests {
         std::env::remove_var("XDG_DATA_HOME");
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var("KIMI_SECONDARY_MODEL");
+        // 本机真实 WSL home 不进本测试（scan_fresh 会发现它）：根指到不存在目录
+        std::env::set_var("KIMICODEBAR_WSL_ROOT", home.join("no-wsl"));
 
         let view = scan_fresh(now_ms, &chrono::Local);
         // Claude(111) + OpenCode(33) 归 Kimi 账号；Codex(222) 归 DeepSeek 账号
@@ -3480,6 +3562,7 @@ mod tests {
         std::env::remove_var("LOCALAPPDATA");
         std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
         std::env::remove_var("KIMICODEBAR_KEYRING_SERVICE");
+        std::env::remove_var("KIMICODEBAR_WSL_ROOT");
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_dir_all(&roaming);
         let _ = std::fs::remove_dir_all(&localapp);
@@ -3567,6 +3650,8 @@ mod tests {
         std::env::remove_var("XDG_DATA_HOME");
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::remove_var("KIMI_SECONDARY_MODEL");
+        // 本机真实 WSL home 不进本测试（scan_fresh 会发现它）：根指到不存在目录
+        std::env::set_var("KIMICODEBAR_WSL_ROOT", home.join("no-wsl"));
 
         // usage_line 每条另含 inputCacheRead 11264；claude_line tokens 即 input_tokens
         let wire_a = 100 + 10 + 11264;
@@ -3603,9 +3688,227 @@ mod tests {
             let _ = keyring::Entry::new(&service, slot).map(|e| e.delete_credential());
         }
         std::env::remove_var("KIMICODEBAR_KEYRING_SERVICE");
+        std::env::remove_var("KIMICODEBAR_WSL_ROOT");
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_dir_all(&roaming);
         let _ = std::fs::remove_dir_all(&localapp);
+        let _ = std::fs::remove_dir_all(&config);
+    }
+
+    // ---- WSL home 发现 ----
+
+    /// 两个假发行版各带 home 用户 + root 的合法 home：全部发现、按路径字典序返回、
+    /// 名单乱序与重复不影响结果（去重）
+    #[test]
+    fn wsl_homes_discovers_users_and_root_across_distros() {
+        let root = temp_dir("wsl-homes-enum");
+        // write_cli_home 的 name 走 join 语义、允许带层级：造 <distro>/home/<user>/.kimi-code
+        let a_user = write_cli_home(
+            &root.join("UbuntuA").join("home"),
+            "jyh/.kimi-code",
+            "",
+            None,
+        );
+        let a_root = write_cli_home(&root.join("UbuntuA"), "root/.kimi-code", "", None);
+        let b_user = write_cli_home(
+            &root.join("UbuntuB").join("home"),
+            "tom/.kimi-code",
+            "",
+            None,
+        );
+        let b_root = write_cli_home(&root.join("UbuntuB"), "root/.kimi-code", "", None);
+
+        let mut expected = vec![a_user, a_root, b_user, b_root];
+        expected.sort();
+        // 名单乱序 + 重复条目：结果仍按路径字典序且不重复
+        let distros = vec![
+            "UbuntuB".to_string(),
+            "UbuntuA".to_string(),
+            "UbuntuB".to_string(),
+        ];
+        let homes = wsl_homes_from(&root, &distros);
+        assert_eq!(homes, expected);
+        // 再跑一遍结果一致（确定性）
+        assert_eq!(wsl_homes_from(&root, &distros), homes);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// root 探测独立于 home/ 枚举：无 home/ 目录的发行版照收 root home；
+    /// home/ 是普通文件、home/ 下无 .kimi-code 的发行版容忍为空
+    #[test]
+    fn wsl_homes_probes_root_independent_of_home_dir() {
+        let root = temp_dir("wsl-homes-root");
+        // 发行版 A：没有 home/ 目录，只有 root/.kimi-code（合法）→ 收
+        let a_root = write_cli_home(&root.join("NoHome"), "root/.kimi-code", "", None);
+        // 发行版 B：home/ 是普通文件（不是目录），root/.kimi-code 合法 → 只收 root
+        std::fs::create_dir_all(root.join("HomeIsFile")).unwrap();
+        std::fs::write(root.join("HomeIsFile").join("home"), "").unwrap();
+        let b_root = write_cli_home(&root.join("HomeIsFile"), "root/.kimi-code", "", None);
+        // 发行版 C：home/ 下用户目录没有 .kimi-code → 空
+        std::fs::create_dir_all(root.join("EmptyHome").join("home").join("jyh")).unwrap();
+
+        let distros = vec![
+            "NoHome".to_string(),
+            "HomeIsFile".to_string(),
+            "EmptyHome".to_string(),
+        ];
+        let mut expected = vec![a_root, b_root];
+        expected.sort();
+        assert_eq!(wsl_homes_from(&root, &distros), expected);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 合法判定与本地 home 同标准：缺 sessions/、缺凭证（config.toml 与 credentials/
+    /// 皆无）、.kimi-code 是普通文件的都过滤；合法依据为 credentials/ 的照收
+    #[test]
+    fn wsl_homes_filters_invalid_homes() {
+        let root = temp_dir("wsl-homes-invalid");
+        let distro = root.join("Ubuntu");
+        // 合法：sessions + config.toml
+        let good = write_cli_home(&distro.join("home"), "good/.kimi-code", "", None);
+        // 缺 sessions/：不合法
+        let no_sessions = distro.join("home").join("nosess").join(".kimi-code");
+        std::fs::create_dir_all(&no_sessions).unwrap();
+        std::fs::write(no_sessions.join("config.toml"), "").unwrap();
+        // 缺凭证：只有 sessions/ → 不合法
+        std::fs::create_dir_all(
+            distro
+                .join("home")
+                .join("nocred")
+                .join(".kimi-code")
+                .join("sessions"),
+        )
+        .unwrap();
+        // .kimi-code 是普通文件：不合法
+        std::fs::create_dir_all(distro.join("home").join("afile")).unwrap();
+        std::fs::write(distro.join("home").join("afile").join(".kimi-code"), "").unwrap();
+        // root/.kimi-code 缺 sessions/：不合法
+        let bad_root = distro.join("root").join(".kimi-code");
+        std::fs::create_dir_all(&bad_root).unwrap();
+        std::fs::write(bad_root.join("config.toml"), "").unwrap();
+        // 合法依据也可以是 credentials/（无 config.toml）
+        let cred_home = distro.join("home").join("withcred").join(".kimi-code");
+        std::fs::create_dir_all(cred_home.join("sessions")).unwrap();
+        std::fs::create_dir_all(cred_home.join("credentials")).unwrap();
+
+        let homes = wsl_homes_from(&root, &["Ubuntu".to_string()]);
+        let mut expected = vec![good, cred_home];
+        expected.sort();
+        assert_eq!(homes, expected);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 容忍缺失：发行版目录不存在跳过、wsl_root 不存在/空名单返回空——且不是「恒空」，
+    /// 名单里真实存在的发行版照样发现（本断言保证反向验证时本测试一起红）
+    #[test]
+    fn wsl_homes_tolerates_missing_dirs() {
+        let root = temp_dir("wsl-homes-missing");
+        let good = write_cli_home(&root.join("Real").join("home"), "jyh/.kimi-code", "", None);
+        // 不存在的发行版夹在名单里：跳过，不影响其余
+        let distros = vec!["Ghost".to_string(), "Real".to_string()];
+        assert_eq!(wsl_homes_from(&root, &distros), vec![good]);
+        // wsl_root 本身不存在：空
+        assert_eq!(
+            wsl_homes_from(&root.join("nonexistent"), &distros),
+            Vec::<PathBuf>::new()
+        );
+        // 空名单：空（不触碰 wsl_root）
+        assert_eq!(wsl_homes_from(&root, &[]), Vec::<PathBuf>::new());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 端到端：发现的 WSL home 用自己 config.toml 的 api_key 快照归属（scan_fresh 的
+    /// WSL 段同款串联：发现 → 各 home 自己的快照 → 扫描）——命中登记的 key 归该账号，
+    /// 未登记的落未归属桶，与本地 home 同一规则
+    #[test]
+    fn wsl_home_events_attribute_by_own_config_api_key() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let wsl_root = temp_dir("wsl-e2e-root");
+        let config = temp_dir("wsl-e2e-conf");
+        let state_path = wsl_root.join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-08-26T12:00:00+08:00");
+
+        // WSL home 1（home 用户）：config.toml 用已登记的 key
+        let home_a = write_cli_home(
+            &wsl_root.join("Ubuntu").join("home"),
+            "jyh/.kimi-code",
+            "[providers.\"managed:kimi-code\"]\napi_key = \"sk-kimi-wsl-a\"\n",
+            None,
+        );
+        write_wire(
+            &home_a.join("sessions"),
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-08-26T10:00:00+08:00",
+                100,
+                10,
+            )],
+        );
+        // WSL home 2（root 用户）：config.toml 用未登记的 key
+        let home_b = write_cli_home(
+            &wsl_root,
+            "Ubuntu/root/.kimi-code",
+            "[providers.\"managed:kimi-code\"]\napi_key = \"sk-kimi-wsl-unknown\"\n",
+            None,
+        );
+        write_wire(
+            &home_b.join("sessions"),
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-08-26T11:00:00+08:00",
+                200,
+                20,
+            )],
+        );
+
+        // 应用侧：acc-a 登记 sk-kimi-wsl-a（隔离 keyring + 配置目录）
+        std::env::set_var("KIMICODEBAR_CONFIG_DIR", &config);
+        std::env::set_var(
+            "KIMICODEBAR_KEYRING_SERVICE",
+            format!("KimiCodeBar-test-{}", uuid::Uuid::new_v4()),
+        );
+        let settings = crate::storage::Settings {
+            accounts: vec![crate::storage::Account {
+                id: "acc-a".to_string(),
+                name: "A".to_string(),
+                login_method: Some("api_key".to_string()),
+                provider: "kimi".to_string(),
+            }],
+            ..Default::default()
+        };
+        std::fs::write(
+            config.join("settings.json"),
+            serde_json::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+        crate::creds::save_api_key("acc-a", "sk-kimi-wsl-a").unwrap();
+
+        let homes = wsl_homes_from(&wsl_root, &["Ubuntu".to_string()]);
+        assert_eq!(homes.len(), 2);
+        let targets: Vec<(PathBuf, Attribution)> = homes
+            .iter()
+            .map(|h| (h.join("sessions"), snapshot_attribution(h)))
+            .collect();
+        let view = scan_with(&targets, &state_path, now, &tz);
+        // usage_line 每条另含 inputCacheRead 11264
+        assert_eq!(view.for_account("acc-a").today_tokens, 100 + 10 + 11264);
+        assert_eq!(
+            view.for_account(UNASSIGNED_BUCKET).today_tokens,
+            200 + 20 + 11264
+        );
+
+        std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
+        let service = std::env::var("KIMICODEBAR_KEYRING_SERVICE").unwrap();
+        std::env::remove_var("KIMICODEBAR_KEYRING_SERVICE");
+        let _ = keyring::Entry::new(&service, "api_key/acc-a").map(|e| e.delete_credential());
+        let _ = std::fs::remove_dir_all(&wsl_root);
         let _ = std::fs::remove_dir_all(&config);
     }
 }
