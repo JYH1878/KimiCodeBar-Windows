@@ -25,8 +25,8 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 use tokio::sync::watch;
 
-use crate::i18n;
 use crate::tray;
+use kimicodebar::i18n;
 
 /// 面板距上次成功刷新超过该秒数，再次显示时触发后台刷新
 const STALE_SECS: i64 = 60;
@@ -48,6 +48,8 @@ pub struct AppSettings {
     pub deepseek_warn_threshold: f64,
     /// 开机自启（保存时同步注册表）
     pub autostart: bool,
+    /// Kimi Code 状态栏额度显示（保存时同步全部 CLI home 的 tui.toml）
+    pub statusline_enabled: bool,
     /// 极简模式：开后面板只显示 7 天 / 5 小时额度条（窗口压矮），默认关
     pub minimal_mode: bool,
     /// 全局热键（如 "Ctrl+Shift+K"），None/空串表示禁用；保存时重新注册
@@ -75,6 +77,7 @@ impl From<storage::Settings> for AppSettings {
             warn_threshold_pct: s.warn_threshold_pct,
             deepseek_warn_threshold: s.deepseek_warn_threshold,
             autostart: s.autostart,
+            statusline_enabled: s.statusline_enabled,
             minimal_mode: s.minimal_mode,
             hotkey: s.hotkey,
             language: s.language,
@@ -97,6 +100,7 @@ impl From<AppSettings> for storage::Settings {
             warn_threshold_pct: s.warn_threshold_pct,
             deepseek_warn_threshold: s.deepseek_warn_threshold,
             autostart: s.autostart,
+            statusline_enabled: s.statusline_enabled,
             minimal_mode: s.minimal_mode,
             hotkey: s.hotkey,
             language: s.language,
@@ -721,6 +725,27 @@ pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String
         }
         Ok(_) => {}
         Err(e) => tracing::warn!("读取开机自启状态失败: {e}"),
+    }
+
+    // 同步 Kimi Code 状态栏命令到全部 CLI home（目标 = local_usage::cli_homes 枚举，
+    // 含 ~/.kimi-code-* 横线后缀 home）：开 → 逐个安装，关 → 逐个摘除；
+    // 单 home 失败（含用户自定义 command 冲突）只记日志不阻断保存，与 autostart 同款
+    let home_root = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(std::path::PathBuf::from);
+    let homes = home_root
+        .as_deref()
+        .map(kimicodebar::local_usage::cli_homes)
+        .unwrap_or_default();
+    for home in &homes {
+        let result = if settings.statusline_enabled {
+            kimicodebar::statusline::install(home)
+        } else {
+            kimicodebar::statusline::uninstall(home)
+        };
+        if let Err(e) = result {
+            tracing::warn!("同步状态栏配置失败（{}）: {e}", home.display());
+        }
     }
 
     // 保存成功后重注册全局热键（先全量注销再按新值注册）；
@@ -1830,6 +1855,26 @@ mod tests {
         let dto = AppSettings::from(storage::Settings::default());
         assert!(!dto.minimal_mode);
         assert!(!storage::Settings::from(dto).minimal_mode);
+    }
+
+    #[test]
+    fn app_settings_dto_roundtrip_covers_statusline_enabled() {
+        // storage → DTO：状态栏开关字段透出
+        let stored = storage::Settings {
+            statusline_enabled: true,
+            ..Default::default()
+        };
+        let dto = AppSettings::from(stored);
+        assert!(dto.statusline_enabled);
+
+        // DTO → storage：字段带回（账号列表按约定由调用方补，不在此断言）
+        let back = storage::Settings::from(dto);
+        assert!(back.statusline_enabled);
+
+        // 默认（关）双向一致
+        let dto = AppSettings::from(storage::Settings::default());
+        assert!(!dto.statusline_enabled);
+        assert!(!storage::Settings::from(dto).statusline_enabled);
     }
 
     // ---- 多账号状态组装 ----

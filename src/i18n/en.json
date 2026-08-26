@@ -138,6 +138,8 @@
       "saved": "Saved",
       "save": "Save settings"
     },
+    "statusline": "Kimi Code status line",
+    "statuslineHint": "Shows the quota in the Kimi Code terminal status bar when enabled. KimiCodeBar must stay running; applies to newly opened Kimi Code sessions",
     "diagnostics": {
       "title": "Diagnostics & logs",
       "hint": "Running into issues? Export a diagnostics file and attach it to a GitHub issue to speed up troubleshooting (contains no secrets).",

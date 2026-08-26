@@ -39,6 +39,8 @@ interface GeneralForm {
   autostart: boolean;
   /** 极简模式：开后面板只显示 7 天 / 5 小时额度条（窗口压矮），默认关 */
   minimalMode: boolean;
+  /** Kimi Code 状态栏额度显示：开后面板保存时后端写/摘 ~/.kimi-code/tui.toml，默认关 */
+  statuslineEnabled: boolean;
   /** 全局热键文本（由 HotkeyInput 录制写入，保存时 trim，空串→null 禁用） */
   hotkey: string;
   /** 界面语言（"system"/"zh"/"en"，改动立即本地预览，随保存持久化） */
@@ -64,6 +66,7 @@ function SettingsApp() {
     deepseekThreshold: "5",
     autostart: false,
     minimalMode: false,
+    statuslineEnabled: false,
     hotkey: "",
     language: "system",
     theme: "system",
@@ -143,6 +146,7 @@ function SettingsApp() {
           deepseekThreshold: String(s.deepseek_warn_threshold),
           autostart: s.autostart,
           minimalMode: s.minimal_mode,
+          statuslineEnabled: s.statusline_enabled,
           hotkey: s.hotkey ?? "",
           language: s.language ?? "system",
           theme: s.theme ?? "system",
@@ -241,6 +245,8 @@ function SettingsApp() {
       deepseek_warn_threshold: deepseekThreshold,
       autostart: form.autostart,
       minimal_mode: form.minimalMode,
+      // Kimi Code 状态栏额度显示：开关随保存设置由后端写/摘 ~/.kimi-code/tui.toml（同 autostart 先例）
+      statusline_enabled: form.statuslineEnabled,
       // 热键 trim 后提交，空串→null 禁用；后端保存时重新注册，冲突会抛中文错误
       hotkey: form.hotkey.trim() === "" ? null : form.hotkey.trim(),
       // 语言随通用设置一起持久化；保存成功后后端广播 settings-changed
@@ -464,6 +470,16 @@ function SettingsApp() {
                 onChange={(e) => setForm((f) => ({ ...f, minimalMode: e.target.checked }))}
               />
             </div>
+            <div className="form-row">
+              <label htmlFor="statusline">{t("settings.statusline")}</label>
+              <input
+                id="statusline"
+                type="checkbox"
+                checked={form.statuslineEnabled}
+                onChange={(e) => setForm((f) => ({ ...f, statuslineEnabled: e.target.checked }))}
+              />
+            </div>
+            <p className="hint-muted">{t("settings.statuslineHint")}</p>
             <HotkeyInput
               value={form.hotkey}
               onChange={(v) => setForm((f) => ({ ...f, hotkey: v }))}

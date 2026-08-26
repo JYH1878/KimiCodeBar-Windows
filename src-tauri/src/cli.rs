@@ -22,6 +22,8 @@ const EXIT_OK: i32 = 0;
 const EXIT_FETCH_FAILED: i32 = 1;
 /// 退出码：无可用凭证
 const EXIT_NO_CREDENTIALS: i32 = 2;
+/// 退出码：无可展示内容（无缓存 / 渲染为空）——statusline 专用，让 CLI 回退内置布局
+const EXIT_NO_DATA: i32 = 3;
 
 /// 成功输出（stdout）：字段 snake_case 与 serde 一致，monthly 缺失为 null
 #[derive(Serialize)]
@@ -39,14 +41,23 @@ struct ErrorOutput<'a> {
     error: &'a str,
 }
 
-/// CLI 参数拦截入口：含 `--status` 则执行 CLI 路径并返回 Some(退出码)，
-/// 否则返回 None，由 main 继续走 GUI。其他未知参数暂不支持、容忍忽略。
+/// CLI 参数拦截入口：含 `--statusline` 走状态栏快路径（优先），含 `--status` 走
+/// 实时拉取路径，两者都命中时 statusline 优先；否则返回 None，由 main 继续走 GUI。
+/// 其他未知参数暂不支持、容忍忽略。
 pub fn maybe_run() -> Option<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if statusline_requested(&args) {
+        return Some(run_statusline());
+    }
     if !status_requested(&args) {
         return None;
     }
     Some(run_status())
+}
+
+/// 参数中是否含 `--statusline`（同时含其他参数也容忍，只对 --statusline 响应）
+fn statusline_requested(args: &[String]) -> bool {
+    args.iter().any(|arg| arg == "--statusline")
 }
 
 /// 参数中是否含 `--status`（同时含其他参数也容忍，只对 --status 响应）
@@ -69,6 +80,69 @@ fn run_status() -> i32 {
             &error_json(&format!("异步运行时初始化失败: {e}")),
             EXIT_FETCH_FAILED,
         ),
+    }
+}
+
+/// `--statusline` 主流程：同步本地快路径——读设置 → 选账号 → 读缓存 → 渲染 → 打印。
+/// 与 `--status` 不同：零网络、不建 tokio runtime（Kimi Code 状态栏 300ms 预算）。
+/// 输出契约：成功 stdout 单行、退出码 0；无可展示内容（无账号/无快照/渲染为空）时
+/// stdout 干净、退出码非 0（让 CLI 回退内置布局），错误信息只走 stderr。
+fn run_statusline() -> i32 {
+    // 绝不能 AttachConsole：statusline 恒由 Kimi Code 派生并管道捕获 stdout
+    // （经 cmd /c 时父进程带控制台），附着会把输出拐到控制台、管道变空，
+    // 状态栏永久回退内置布局（2026-08-25 实机抓到，见 HANDOFF 待沉淀）
+    let settings = match kimicodebar::storage::load_settings() {
+        Ok(settings) => settings,
+        Err(e) => return print_stderr(&format!("读取设置失败: {e}"), EXIT_NO_DATA),
+    };
+    // stdin 快照在选账号前读：即使后面无账号/无缓存，快照前缀也能保底上屏
+    let snapshot = read_stdin_snapshot()
+        .as_deref()
+        .and_then(kimicodebar::statusline::parse_snapshot);
+    let Some(account) = kimicodebar::statusline::resolve_account(&settings) else {
+        return match &snapshot {
+            // 无账号但快照在：输出快照前缀，底栏不至于退回内置布局丢信息
+            Some(snapshot) => print_stdout(&kimicodebar::statusline::compose_line(
+                Some(snapshot),
+                String::new(),
+            )),
+            None => print_stderr("无可用账号：请先在托盘应用中登录", EXIT_NO_CREDENTIALS),
+        };
+    };
+    let lang = kimicodebar::i18n::resolve(settings.language.as_deref());
+    let quota_line = kimicodebar::storage::load_cache(&account.id)
+        .map(|cache| {
+            kimicodebar::statusline::render_line(
+                &account,
+                &cache,
+                lang,
+                settings.warn_threshold_pct,
+                Utc::now().timestamp(),
+            )
+        })
+        .unwrap_or_default();
+    let line = kimicodebar::statusline::compose_line(snapshot.as_ref(), quota_line);
+    if line.is_empty() {
+        return print_stderr(
+            &format!("账号「{}」暂无可用额度数据", account.name),
+            EXIT_NO_DATA,
+        );
+    }
+    print_stdout(&line)
+}
+
+/// 读取 Kimi Code 经 stdin 传入的 JSON 快照：stdin 是终端（人工交互运行）时跳过；
+/// 管道场景读到 EOF 为止（Kimi Code 写完即关闭，0.38.0 实机验证）
+fn read_stdin_snapshot() -> Option<String> {
+    use std::io::{IsTerminal, Read};
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return None;
+    }
+    let mut buf = String::new();
+    match stdin.lock().read_to_string(&mut buf) {
+        Ok(_) if !buf.trim().is_empty() => Some(buf),
+        _ => None,
     }
 }
 
@@ -320,6 +394,28 @@ mod tests {
         assert!(!status_requested(&args(&["status"])));
         // 大小写敏感，--STATUS 不命中
         assert!(!status_requested(&args(&["--STATUS"])));
+    }
+
+    // ---- statusline_requested ----
+
+    #[test]
+    fn statusline_flag_detected() {
+        assert!(statusline_requested(&args(&["--statusline"])));
+        // 同时含其他参数也容忍
+        assert!(statusline_requested(&args(&["--verbose", "--statusline"])));
+        assert!(statusline_requested(&args(&["--statusline", "--quiet"])));
+    }
+
+    #[test]
+    fn statusline_absent_not_detected() {
+        assert!(!statusline_requested(&args(&[])));
+        assert!(!statusline_requested(&args(&["--help"])));
+        // --status 与 --statusline 是独立参数，互不命中
+        assert!(!statusline_requested(&args(&["--status"])));
+        // 大小写敏感，--STATUSLINE 不命中
+        assert!(!statusline_requested(&args(&["--STATUSLINE"])));
+        // 前缀相似不误命中
+        assert!(!statusline_requested(&args(&["--statuslinex"])));
     }
 
     // ---- success_json ----

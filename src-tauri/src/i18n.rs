@@ -4,7 +4,7 @@
 //! 其他（"system" / None / 未知值）→ 读系统区域（GetUserDefaultLocaleName），
 //! zh 开头 → 中文，否则英文。
 
-use kimicodebar::quota::KimiQuota;
+use crate::quota::KimiQuota;
 
 /// 界面语言（仅后端文案用；前端 i18next 有自己的一份解析）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,10 +129,7 @@ pub fn quota_summary(lang: Lang, quota: &KimiQuota) -> String {
 
 /// DeepSeek 余额摘要（托盘 tooltip 用），如 "DeepSeek 余额 ¥3.20"
 /// （英文 "DeepSeek balance ¥3.20"）；币种无符号时以币种代码前缀（"USD 3.20"）
-pub fn deepseek_summary(
-    lang: Lang,
-    balance: &kimicodebar::deepseek::models::DeepSeekBalance,
-) -> String {
+pub fn deepseek_summary(lang: Lang, balance: &crate::deepseek::models::DeepSeekBalance) -> String {
     let amount = money_text(&balance.currency, balance.total_balance);
     match lang {
         Lang::Zh => format!("DeepSeek 余额 {amount}"),
@@ -152,7 +149,7 @@ fn money_text(currency: &str, amount: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kimicodebar::quota::QuotaDetail;
+    use crate::quota::QuotaDetail;
 
     fn quota(weekly_pct: f64, five_hour_pct: f64) -> KimiQuota {
         KimiQuota {
@@ -254,11 +251,8 @@ mod tests {
 
     // ---- DeepSeek 余额摘要 ----
 
-    fn deepseek_balance(
-        currency: &str,
-        total: f64,
-    ) -> kimicodebar::deepseek::models::DeepSeekBalance {
-        kimicodebar::deepseek::models::DeepSeekBalance {
+    fn deepseek_balance(currency: &str, total: f64) -> crate::deepseek::models::DeepSeekBalance {
+        crate::deepseek::models::DeepSeekBalance {
             is_available: true,
             currency: currency.to_string(),
             total_balance: total,

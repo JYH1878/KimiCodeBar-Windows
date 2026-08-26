@@ -117,6 +117,8 @@ export interface AppSettings {
   autostart: boolean;
   /** 极简模式（默认 false）：开后面板只显示 7 天 / 5 小时额度条，窗口压矮 */
   minimal_mode: boolean;
+  /** Kimi Code 状态栏额度显示（默认 false）：保存时后端写入 ~/.kimi-code/tui.toml 的 [status_line].command */
+  statusline_enabled: boolean;
   /** 全局热键（如 "Ctrl+Shift+K"），null/空串 = 禁用；保存时后端重新注册 */
   hotkey?: string | null;
   /** 界面语言："system"（跟随系统）/ "zh" / "en"，默认 system */

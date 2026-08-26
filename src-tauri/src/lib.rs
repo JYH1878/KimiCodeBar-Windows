@@ -7,10 +7,12 @@ pub mod creds;
 pub mod deepseek;
 pub mod glm;
 pub mod history;
+pub mod i18n;
 pub mod kimi;
 pub mod local_usage;
 pub mod migrate;
 pub mod quota;
+pub mod statusline;
 pub mod storage;
 pub mod update;
 

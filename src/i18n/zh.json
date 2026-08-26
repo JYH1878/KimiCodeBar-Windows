@@ -138,6 +138,8 @@
       "saved": "已保存",
       "save": "保存设置"
     },
+    "statusline": "Kimi Code 状态栏",
+    "statuslineHint": "开后在 Kimi Code 终端底栏显示额度，需 KimiCodeBar 常驻运行；对新开的 Kimi Code 会话生效",
     "diagnostics": {
       "title": "诊断与日志",
       "hint": "遇到问题？导出诊断文件并附到 GitHub issue，可大幅加快排查（不含任何密钥）。",

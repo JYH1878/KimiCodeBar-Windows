@@ -17,7 +17,7 @@ use tauri_plugin_notification::NotificationExt;
 use tokio::time::{interval, MissedTickBehavior};
 
 use crate::commands::{do_refresh, AccountPanel, AppState};
-use crate::i18n;
+use kimicodebar::i18n;
 
 /// 重置提醒提前量：进入重置前 15 分钟窗口才提醒
 const RESET_REMIND_WINDOW_MIN: i64 = 15;

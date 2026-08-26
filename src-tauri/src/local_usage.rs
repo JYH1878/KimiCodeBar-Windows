@@ -578,8 +578,9 @@ struct OpenCodeDbState {
 // 分账号归属（纯函数 + 凭证快照入参化，可直接单测；快照实现见 snapshot_attribution）
 // ---------------------------------------------------------------------------
 
-/// 未归属桶的键：凭证比对全不中 / 第三方路由的事件进此桶，不做任何 UI 展示
-const UNASSIGNED_BUCKET: &str = "unassigned";
+/// 未归属桶的键：凭证比对全不中 / 第三方路由的事件进此桶，不做任何 UI 展示。
+/// pub(crate)：statusline 归属判定要比较返回值是否落入此桶
+pub(crate) const UNASSIGNED_BUCKET: &str = "unassigned";
 
 /// 归属路由（模型 → 哪条凭证比对通道）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -613,9 +614,11 @@ struct AccountCreds {
     extra_api_keys: Vec<String>,
 }
 
-/// 一次扫描的归属上下文：CLI 凭证快照 + 各账号凭证快照 + 模型路由表
+/// 一次扫描的归属上下文：CLI 凭证快照 + 各账号凭证快照 + 模型路由表。
+/// pub(crate)：statusline 的账号解析（statusline.rs）经由 snapshot_attribution /
+/// attribute_cli 复用，类型需与这两个 pub(crate) 函数同可见
 #[derive(Debug, Default, Clone)]
-struct Attribution {
+pub(crate) struct Attribution {
     cli: CliCredentials,
     /// (账号 id, 凭证)，Kimi 账号
     kimi_accounts: Vec<(String, AccountCreds)>,
@@ -698,12 +701,26 @@ fn attribute(model: &str, attribution: &Attribution) -> String {
     }
 }
 
+/// statusline 专用归属（pub(crate)：statusline.rs 的账号解析用它）：
+/// statusline 进程没有事件模型可路由，直接按 CLI 侧凭证通道判定——
+/// 优先 Kimi 通道（api_key 比对 → OAuth user_id 比对；GLM key 也在
+/// managed:kimi-code 槽位，同走此通道）；未命中且 CLI 配了 deepseek key
+/// 再走 DeepSeek 通道兜底（一个 home 双 provider 的场景）；全不中返回未归属桶键
+pub(crate) fn attribute_cli(attribution: &Attribution) -> String {
+    let kimi_bucket = attribute("managed:kimi-code", attribution);
+    if kimi_bucket != UNASSIGNED_BUCKET || attribution.cli.deepseek_api_key.is_none() {
+        return kimi_bucket;
+    }
+    attribute("deepseek", attribution)
+}
+
 /// 归属上下文快照：指定 CLI home 的凭证三处（该 home 的 config.toml 的 kimi/deepseek
 /// api_key 与 [models] 路由表、credentials/kimi-code.json 的 OAuth user_id）+ 各账号凭证
 /// （keyring 主 key + 额外 key / OAuth user_id，与 home 无关，逐 home 快照时每次重读）。
 /// 所有读取失败（文件缺失/损坏、keyring 错误、凭证未配置）一律容忍为空——扫描永不失败；
-/// 某 home 快照为空时该 home 的事件全部进未归属桶，机器级活跃判定不受影响
-fn snapshot_attribution(home: &Path) -> Attribution {
+/// 某 home 快照为空时该 home 的事件全部进未归属桶，机器级活跃判定不受影响。
+/// pub(crate)：statusline 的账号解析（statusline.rs）要复用同一份快照
+pub(crate) fn snapshot_attribution(home: &Path) -> Attribution {
     let mut attribution = Attribution::default();
     if let Ok(text) = std::fs::read_to_string(home.join("config.toml")) {
         if let Ok(doc) = text.parse::<toml::Table>() {
@@ -1101,8 +1118,10 @@ fn resolve_secondary_model() -> Option<String> {
 /// glob 只认横线后缀：`.kimi-code.bak` / `.kimi-code.old` 这类点号命名不匹配，
 /// 防备份目录重复计数；默认 home 自身不带横线，不会被 glob 重复匹配。
 /// 合法 home 判定：是目录、含 sessions/ 子目录、且含 config.toml 或 credentials/ 之一。
-/// 返回顺序确定：默认 home（若合法）在前，其余按路径字典序
-fn cli_homes(home_root: &Path) -> Vec<PathBuf> {
+/// 返回顺序确定：默认 home（若合法）在前，其余按路径字典序。
+/// pub：statusline 的 tui.toml 写/摘目标与 bin 侧 save_settings 同步都枚举它
+/// （跨 crate 访问，不能 pub(crate)）
+pub fn cli_homes(home_root: &Path) -> Vec<PathBuf> {
     let mut homes = Vec::new();
     let default_home = home_root.join(".kimi-code");
     if is_valid_cli_home(&default_home) {

@@ -89,6 +89,10 @@ pub struct Settings {
     /// 开机自启动，默认关
     #[serde(default)]
     pub autostart: bool,
+    /// Kimi Code 状态栏额度显示：开时保存设置会把 `[status_line].command`
+    /// 写入全部 CLI home 的 tui.toml（`<exe> --statusline`），关时摘除，默认关
+    #[serde(default)]
+    pub statusline_enabled: bool,
     /// 极简模式：开后面板只显示 7 天 / 5 小时额度条（窗口压矮），默认关
     #[serde(default)]
     pub minimal_mode: bool,
@@ -141,6 +145,7 @@ impl Default for Settings {
             warn_threshold_pct: DEFAULT_WARN_THRESHOLD_PCT,
             deepseek_warn_threshold: DEFAULT_DEEPSEEK_WARN_THRESHOLD,
             autostart: false,
+            statusline_enabled: false,
             minimal_mode: false,
             hotkey: None,
             language: None,
@@ -381,6 +386,8 @@ mod tests {
             warn_threshold_pct: 33.5,
             deepseek_warn_threshold: 12.5,
             autostart: true,
+            // 顺手覆盖状态栏开关的落盘/读回（true 值往返一致）
+            statusline_enabled: true,
             // 顺手覆盖极简模式的落盘/读回（true 值往返一致）
             minimal_mode: true,
             hotkey: Some("Ctrl+Shift+K".to_string()),
@@ -441,6 +448,27 @@ mod tests {
     }
 
     #[test]
+    fn settings_statusline_enabled_defaults_to_false() {
+        // 状态栏开关默认关（写 tui.toml 是显式行为，绝不能默认开启）
+        assert!(!Settings::default().statusline_enabled);
+    }
+
+    #[test]
+    fn settings_legacy_json_without_statusline_enabled_loads() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = use_temp_config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        // 旧版设置文件无 statusline_enabled 字段：#[serde(default)] 读回 false，其余字段不受影响
+        std::fs::write(dir.join("settings.json"), r#"{"refresh_interval_min":10}"#).unwrap();
+
+        let settings = load_settings().unwrap();
+        assert_eq!(settings.refresh_interval_min, 10);
+        assert!(!settings.statusline_enabled);
+
+        cleanup(&dir);
+    }
+
+    #[test]
     fn settings_legacy_json_without_minimal_mode_loads() {
         let _guard = ENV_LOCK.lock().unwrap();
         let dir = use_temp_config_dir();
@@ -473,6 +501,8 @@ mod tests {
         assert!(settings.low_warn_enabled);
         assert_eq!(settings.warn_threshold_pct, DEFAULT_WARN_THRESHOLD_PCT);
         assert!(!settings.autostart);
+        // 旧版设置文件无 statusline_enabled 字段：读回默认 false（不写 tui.toml）
+        assert!(!settings.statusline_enabled);
         // 旧版设置文件无 hotkey 字段：#[serde(default)] 读回 None
         assert!(settings.hotkey.is_none());
         // 旧版设置文件无 language 字段：读回 None（等同 "system" 跟随系统）

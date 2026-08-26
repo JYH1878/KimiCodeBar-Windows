@@ -327,6 +327,7 @@ const mockDb = {
     deepseek_warn_threshold: 5,
     autostart: false,
     minimal_mode: false,
+    statusline_enabled: false,
     hotkey: null,
     language: "system",
     theme: "system",
