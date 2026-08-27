@@ -27,14 +27,19 @@
 //! 该 home 的新事件按自己 home 的快照归入对应桶
 //! （键 = 账号 id；比对全不中的进 "unassigned" 未归属桶，不做任何 UI 展示）：
 //! - 模型路由：先查该 home config.toml 的 [models] 表拿 provider（含 "kimi" → Kimi 路由，
-//!   覆盖 "managed:kimi-code"；"deepseek" 开头 → DeepSeek；dashscope 等第三方 → 未归属）；
-//!   查不到按前缀兜底——deepseek 开头 → DeepSeek，其余 → Kimi；
+//!   覆盖 "managed:kimi-code"；"deepseek" 开头 → DeepSeek；其余 provider 下模型名小写
+//!   含 "glm" → GLM 路由；dashscope 等第三方 → 未归属）；
+//!   查不到按前缀兜底——deepseek 开头 → DeepSeek、glm 开头 → GLM，其余 → Kimi；
 //! - Kimi 路由：该 home 的 kimi api_key 与各 Kimi 账号登记的任一 key（主 key 或
 //!   任一额外 key，见 creds.rs 的 api_key_extra 槽位）精确相等 → 归该账号；
 //!   否则解该 home OAuth access_token（JWT）的 user_id（缺失退 sub）与各账号 OAuth token 的
 //!   user_id 比对，相等 → 归该账号；都不中 → 未归属；
 //! - DeepSeek 路由：CLI 的 deepseek api_key 与各 DeepSeek 账号登记的任一 key
 //!   （主 key 或任一额外 key）精确相等 → 归该账号，否则未归属；
+//! - GLM 路由：该 home config.toml [providers] 全部段里凡 api_key 与某 GLM 账号
+//!   （Account::is_glm()）主 key 或任一额外 key 精确相等的 key 集合（段名不限、
+//!   反向提取；managed:kimi-code / deepseek 两段维持原通道），任一把命中该账号
+//!   → 归该账号，否则未归属；GLM 账号与 Kimi 账号同列在 kimi_accounts 里不拆；
 //! - 归属判定时机 = 扫描时快照：扫描 ≤3 分钟一轮，换号存在对应误差窗（拍板接受，
 //!   不保证逐条精确）；JWT 只解 payload 不验签、不联网；
 //! - CLI 与各账号的 key / user_id 只在内存比对，绝不落盘进 scan-state.json。
@@ -510,9 +515,17 @@ fn fold_secondary_model(by_model: &mut Vec<ModelUsage>, target: &str) {
     by_model.truncate(TOP_MODELS);
 }
 
-/// 扫描状态（scan-state.json）：文件偏移 + 分桶累计聚合。损坏/不存在容忍为空状态重新全扫
+/// scan-state.json 的格式版本：归属/聚合规则发生变化即 +1，load_state 发现不一致
+/// 整体丢弃全量重扫（老用户的历史消耗按新规则重新归属）。
+/// 1 = 分账号 buckets 时代（无 version 字段的隐式版本）；2 = 新增 GLM 归属路由
+const STATE_VERSION: u32 = 2;
+
+/// 扫描状态（scan-state.json）：格式版本 + 文件偏移 + 分桶累计聚合。损坏/不存在容忍为空状态重新全扫
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ScanState {
+    /// 格式版本（缺失按 0 = GLM 归属路由之前的旧版）：与 STATE_VERSION 不一致即整体丢弃
+    #[serde(default)]
+    version: u32,
     /// 上次完成扫描时间（epoch 秒）
     #[serde(default)]
     last_scan_at: Option<i64>,
@@ -595,6 +608,9 @@ pub(crate) const UNASSIGNED_BUCKET: &str = "unassigned";
 enum Route {
     Kimi,
     DeepSeek,
+    /// GLM 模型（[models] 表命中且 provider 无 kimi/deepseek 标记、模型名小写含 "glm"；
+    /// 或查不到表时前缀兜底 glm 开头）：走 config.toml [providers] 各段的 GLM key 反向比对
+    Glm,
     /// 第三方 provider（dashscope 等）：直接未归属，不比凭证
     Unassigned,
 }
@@ -609,6 +625,10 @@ struct CliCredentials {
     kimi_user_id: Option<String>,
     /// config.toml [providers.deepseek] 的 api_key（空白按未配置）
     deepseek_api_key: Option<String>,
+    /// config.toml [providers] 全部段里与某 GLM 账号（is_glm()）主 key 或任一额外 key
+    /// 精确相等的 api_key 集合（段名不限、反向提取；managed:kimi-code / deepseek 两段
+    /// 维持各自原通道，Kimi/DeepSeek 路由不读本字段）
+    glm_api_keys: Vec<String>,
 }
 
 /// 账号侧凭证快照（比对用，只在内存）
@@ -628,7 +648,7 @@ struct AccountCreds {
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Attribution {
     cli: CliCredentials,
-    /// (账号 id, 凭证)，Kimi 账号
+    /// (账号 id, 凭证)，Kimi 与 GLM 账号（GLM 账号同在此列表，statusline 解析依赖此结构）
     kimi_accounts: Vec<(String, AccountCreds)>,
     /// (账号 id, 凭证)，DeepSeek 账号
     deepseek_accounts: Vec<(String, AccountCreds)>,
@@ -651,14 +671,17 @@ fn jwt_user_id(token: &str) -> Option<String> {
 }
 
 /// 模型路由：先查 [models] 表拿 provider——含 "kimi" → Kimi 路由（覆盖 "managed:kimi-code"），
-/// "deepseek" 开头 → DeepSeek，其余第三方（dashscope 等）→ 未归属；
-/// 查不到按前缀兜底——deepseek 开头 → DeepSeek，其余 → Kimi
+/// "deepseek" 开头 → DeepSeek，其余 provider 下模型名小写含 "glm" → GLM 路由，
+/// dashscope 等第三方 → 未归属；查不到按前缀兜底——deepseek 开头 → DeepSeek、
+/// glm 开头 → GLM，其余 → Kimi
 fn route_model(model: &str, attribution: &Attribution) -> Route {
     match attribution.model_providers.get(model) {
         Some(provider) if provider.contains("kimi") => Route::Kimi,
         Some(provider) if provider.starts_with("deepseek") => Route::DeepSeek,
+        Some(_) if model.to_lowercase().contains("glm") => Route::Glm,
         Some(_) => Route::Unassigned,
         None if model.starts_with("deepseek") => Route::DeepSeek,
+        None if model.to_lowercase().starts_with("glm") => Route::Glm,
         None => Route::Kimi,
     }
 }
@@ -705,6 +728,19 @@ fn attribute(model: &str, attribution: &Attribution) -> String {
             }
             UNASSIGNED_BUCKET.to_string()
         }
+        Route::Glm => {
+            // GLM 账号与 Kimi 账号同列在 kimi_accounts（不拆列表，statusline 依赖）；
+            // 任一把 GLM key 命中其主/额外 key 即归该账号
+            if let Some((id, _)) = attribution.cli.glm_api_keys.iter().find_map(|key| {
+                attribution
+                    .kimi_accounts
+                    .iter()
+                    .find(|(_, creds)| account_has_key(creds, key))
+            }) {
+                return id.clone();
+            }
+            UNASSIGNED_BUCKET.to_string()
+        }
         Route::Unassigned => UNASSIGNED_BUCKET.to_string(),
     }
 }
@@ -712,24 +748,40 @@ fn attribute(model: &str, attribution: &Attribution) -> String {
 /// statusline 专用归属（pub(crate)：statusline.rs 的账号解析用它）：
 /// statusline 进程没有事件模型可路由，直接按 CLI 侧凭证通道判定——
 /// 优先 Kimi 通道（api_key 比对 → OAuth user_id 比对；GLM key 也在
-/// managed:kimi-code 槽位，同走此通道）；未命中且 CLI 配了 deepseek key
-/// 再走 DeepSeek 通道兜底（一个 home 双 provider 的场景）；全不中返回未归属桶键
+/// managed:kimi-code 槽位，同走此通道）；未命中再走 DeepSeek 通道兜底
+/// （一个 home 双 provider 的场景）；两者都不中且快照含 GLM key 时走
+/// GLM 兜底（用 "glm" 作模型名触发 Glm 路由）；全不中返回未归属桶键
 pub(crate) fn attribute_cli(attribution: &Attribution) -> String {
     let kimi_bucket = attribute("managed:kimi-code", attribution);
-    if kimi_bucket != UNASSIGNED_BUCKET || attribution.cli.deepseek_api_key.is_none() {
+    if kimi_bucket != UNASSIGNED_BUCKET {
         return kimi_bucket;
     }
-    attribute("deepseek", attribution)
+    if attribution.cli.deepseek_api_key.is_some() {
+        let deepseek_bucket = attribute("deepseek", attribution);
+        if deepseek_bucket != UNASSIGNED_BUCKET {
+            return deepseek_bucket;
+        }
+    }
+    if !attribution.cli.glm_api_keys.is_empty() {
+        let glm_bucket = attribute("glm", attribution);
+        if glm_bucket != UNASSIGNED_BUCKET {
+            return glm_bucket;
+        }
+    }
+    UNASSIGNED_BUCKET.to_string()
 }
 
-/// 归属上下文快照：指定 CLI home 的凭证三处（该 home 的 config.toml 的 kimi/deepseek
-/// api_key 与 [models] 路由表、credentials/kimi-code.json 的 OAuth user_id）+ 各账号凭证
+/// 归属上下文快照：指定 CLI home 的凭证（该 home 的 config.toml 的 kimi/deepseek
+/// api_key、[providers] 各段里命中 GLM 账号的 key 集合与 [models] 路由表、
+/// credentials/kimi-code.json 的 OAuth user_id）+ 各账号凭证
 /// （keyring 主 key + 额外 key / OAuth user_id，与 home 无关，逐 home 快照时每次重读）。
 /// 所有读取失败（文件缺失/损坏、keyring 错误、凭证未配置）一律容忍为空——扫描永不失败；
 /// 某 home 快照为空时该 home 的事件全部进未归属桶，机器级活跃判定不受影响。
 /// pub(crate)：statusline 的账号解析（statusline.rs）要复用同一份快照
 pub(crate) fn snapshot_attribution(home: &Path) -> Attribution {
     let mut attribution = Attribution::default();
+    // [providers] 全部段的 api_key（GLM 反向提取用；段名不限，见下）
+    let mut provider_keys: Vec<String> = Vec::new();
     if let Ok(text) = std::fs::read_to_string(home.join("config.toml")) {
         if let Ok(doc) = text.parse::<toml::Table>() {
             let provider_key = |name: &str| {
@@ -743,6 +795,18 @@ pub(crate) fn snapshot_attribution(home: &Path) -> Attribution {
             };
             attribution.cli.kimi_api_key = provider_key("managed:kimi-code");
             attribution.cli.deepseek_api_key = provider_key("deepseek");
+            if let Some(providers) = doc.get("providers").and_then(|p| p.as_table()) {
+                for def in providers.values() {
+                    if let Some(key) = def
+                        .get("api_key")
+                        .and_then(|k| k.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                    {
+                        provider_keys.push(key.to_string());
+                    }
+                }
+            }
             if let Some(models) = doc.get("models").and_then(|m| m.as_table()) {
                 for (name, def) in models {
                     if let Some(provider) = def.get("provider").and_then(|p| p.as_str()) {
@@ -762,6 +826,10 @@ pub(crate) fn snapshot_attribution(home: &Path) -> Attribution {
                 .and_then(jwt_user_id);
         }
     }
+    // GLM 账号的主/额外 key 集合：账号列表先加载（上一条循环），再反向匹配
+    // [providers] 各段（段名不限，用户自定义）——命中即记入 glm_api_keys，
+    // managed:kimi-code / deepseek 两段的 key 也在此集合，但只影响 Glm 路由
+    let mut glm_account_keys: Vec<String> = Vec::new();
     for account in &crate::storage::load_settings().unwrap_or_default().accounts {
         let api_key = crate::creds::load_api_key(&account.id)
             .ok()
@@ -769,12 +837,16 @@ pub(crate) fn snapshot_attribution(home: &Path) -> Attribution {
             .map(|k| k.trim().to_string())
             .filter(|s| !s.is_empty());
         // 额外 key（trim + 滤空）：读取失败容忍为空数组，与主 key 同权参与归属
-        let extra_api_keys = crate::creds::load_api_key_extra(&account.id)
+        let extra_api_keys: Vec<String> = crate::creds::load_api_key_extra(&account.id)
             .unwrap_or_default()
             .into_iter()
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty())
             .collect();
+        if account.is_glm() {
+            glm_account_keys.extend(api_key.iter().cloned());
+            glm_account_keys.extend(extra_api_keys.iter().cloned());
+        }
         if account.is_deepseek() {
             attribution.deepseek_accounts.push((
                 account.id.clone(),
@@ -797,6 +869,13 @@ pub(crate) fn snapshot_attribution(home: &Path) -> Attribution {
                     extra_api_keys,
                 },
             ));
+        }
+    }
+    // 账号列表已加载完毕：把 [providers] 各段里命中 GLM 账号任一登记的 key 记入快照
+    // （去重保序；比对只认精确相等）
+    for key in provider_keys {
+        if glm_account_keys.contains(&key) && !attribution.cli.glm_api_keys.contains(&key) {
+            attribution.cli.glm_api_keys.push(key);
         }
     }
     attribution
@@ -1067,21 +1146,33 @@ where
     }
 }
 
+/// 空状态（等价首次全扫）：带当前格式版本，save_state 落盘后下次 load 不再被判为旧版
+fn fresh_state() -> ScanState {
+    ScanState {
+        version: STATE_VERSION,
+        ..Default::default()
+    }
+}
+
 /// 读扫描状态：文件不存在/损坏 → 空状态（等价首次全扫）。
-/// 旧版状态（机器级 totals 合计、无 buckets 键）整体丢弃：返回空状态即
-/// 「清空聚合 + 全部文件偏移归零」，本次扫描全量重读重建分桶（拍板：旧合计不做任何保留）
+/// 旧版状态（机器级 totals 合计、无 buckets 键；或 version 与 STATE_VERSION 不一致）
+/// 整体丢弃：返回空状态即「清空聚合 + 全部文件偏移归零」，本次扫描全量重读重建分桶
+/// （拍板：旧合计不做任何保留；版本不一致 = 归属规则已变，历史按新规则重新归属）
 fn load_state(path: &Path) -> ScanState {
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
-        Err(_) => return ScanState::default(),
+        Err(_) => return fresh_state(),
     };
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-        return ScanState::default();
+        return fresh_state();
     };
     if value.get("buckets").is_none() {
-        return ScanState::default();
+        return fresh_state();
     }
-    serde_json::from_value(value).unwrap_or_default()
+    match serde_json::from_value::<ScanState>(value) {
+        Ok(state) if state.version == STATE_VERSION => state,
+        _ => fresh_state(),
+    }
 }
 
 /// 原子写 scan-state.json（临时文件 + rename；先删目标再 rename，与 storage::save_json 同款）
@@ -1377,6 +1468,32 @@ mod tests {
         let event = parse_usage_line(r#"{"type":"usage.record","time":1000}"#).unwrap();
         assert_eq!(event.model, "unknown");
         assert_eq!(event.tokens, 0);
+    }
+
+    // ---- 状态版本迁移 ----
+
+    #[test]
+    fn state_version_mismatch_discards_old_state() {
+        let dir = temp_dir("state-version-mismatch");
+        let path = dir.join("scan-state.json");
+        // 旧版状态（GLM 归属路由之前，无 version 字段）→ 整体丢弃：buckets/files 全清空
+        std::fs::write(
+            &path,
+            r#"{"last_scan_at":1,"files":{"a.jsonl":999},"buckets":{"acc-x":{"by_date":{"2026-08-26":5},"by_date_model":{},"last_event_at":1}}}"#,
+        )
+        .unwrap();
+        let discarded = load_state(&path);
+        assert!(discarded.files.is_empty() && discarded.buckets.is_empty());
+        assert_eq!(discarded.version, STATE_VERSION);
+
+        // 当前版本状态 → 原样保留（版本字段随 save_state 落盘，下次 load 不再误判）
+        let mut state = fresh_state();
+        state.files.insert("a.jsonl".to_string(), 7);
+        save_state(&path, &state).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"version\": 2"));
+        let kept = load_state(&path);
+        assert_eq!(kept.files.get("a.jsonl"), Some(&7));
     }
 
     // ---- 日期分桶 ----
@@ -2252,6 +2369,7 @@ mod tests {
                 kimi_api_key: opt("sk-kimi-cli"),
                 kimi_user_id: opt("user-cli"),
                 deepseek_api_key: opt("sk-ds-cli"),
+                glm_api_keys: Vec::new(),
             },
             kimi_accounts: vec![(
                 "acc-a".to_string(),
@@ -2357,6 +2475,301 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(attribute("kimi-code/k3", &attribution), UNASSIGNED_BUCKET);
+    }
+
+    // ---- GLM 路由（wire.jsonl 通道：自定义 provider 段 key 反向提取 + glm 模型路由）----
+
+    #[test]
+    fn route_model_glm_via_config_table_and_prefix() {
+        let attribution = Attribution {
+            model_providers: HashMap::from([
+                ("glm-4.6".to_string(), "zhipu".to_string()),
+                ("GLM-5.2".to_string(), "my-custom-glm".to_string()),
+                ("qwen3.8-max".to_string(), "dashscope".to_string()),
+                ("glm-in-kimi".to_string(), "managed:kimi-code".to_string()),
+                ("glm-ds".to_string(), "deepseek-chat".to_string()),
+            ]),
+            ..Default::default()
+        };
+        // [models] 命中且 provider 无 kimi/deepseek 标记：模型名小写含 "glm" → Glm
+        assert_eq!(route_model("glm-4.6", &attribution), Route::Glm);
+        // 大小写不敏感：GLM-5.2 大写也进 Glm 路由
+        assert_eq!(route_model("GLM-5.2", &attribution), Route::Glm);
+        // dashscope 等第三方仍 Unassigned（模型名不含 glm）
+        assert_eq!(route_model("qwen3.8-max", &attribution), Route::Unassigned);
+        // provider 的 kimi / deepseek 标记优先于模型名里的 glm
+        assert_eq!(route_model("glm-in-kimi", &attribution), Route::Kimi);
+        assert_eq!(route_model("glm-ds", &attribution), Route::DeepSeek);
+        // [models] 未命中走前缀兜底：glm 开头 → Glm（大小写不敏感），其余分支原样
+        let bare = Attribution::default();
+        assert_eq!(route_model("glm-4.6", &bare), Route::Glm);
+        assert_eq!(route_model("GLM-5.2", &bare), Route::Glm);
+        assert_eq!(route_model("deepseek-v9-x", &bare), Route::DeepSeek);
+        assert_eq!(route_model("kimi-code/k9", &bare), Route::Kimi);
+        assert_eq!(route_model("whatever", &bare), Route::Kimi);
+    }
+
+    #[test]
+    fn attribute_glm_matches_main_key() {
+        // GLM 账号与 Kimi 账号同列在 kimi_accounts（不拆列表）：主 key 精确命中 → 归它
+        let attribution = Attribution {
+            cli: CliCredentials {
+                glm_api_keys: vec!["glm-key-a".to_string()],
+                ..Default::default()
+            },
+            kimi_accounts: vec![
+                (
+                    "acc-kimi".to_string(),
+                    account_creds(opt("sk-kimi-x"), None),
+                ),
+                ("acc-glm".to_string(), account_creds(opt("glm-key-a"), None)),
+            ],
+            ..Default::default()
+        };
+        assert_eq!(attribute("glm-4.6", &attribution), "acc-glm");
+    }
+
+    #[test]
+    fn attribute_glm_matches_extra_key() {
+        // 额外 key 与主 key 同权：命中任一即归该账号
+        let attribution = Attribution {
+            cli: CliCredentials {
+                glm_api_keys: vec!["glm-key-extra".to_string()],
+                ..Default::default()
+            },
+            kimi_accounts: vec![(
+                "acc-glm".to_string(),
+                account_creds_with_extras(
+                    opt("glm-key-main"),
+                    None,
+                    vec!["glm-key-extra".to_string()],
+                ),
+            )],
+            ..Default::default()
+        };
+        assert_eq!(attribute("glm-4.6", &attribution), "acc-glm");
+    }
+
+    #[test]
+    fn attribute_glm_no_match_goes_unassigned() {
+        // 快照里的 GLM key 与任何账号登记的 key 都不等（含差空格的近似值）：未归属
+        let attribution = Attribution {
+            cli: CliCredentials {
+                glm_api_keys: vec!["glm-key-x".to_string()],
+                ..Default::default()
+            },
+            kimi_accounts: vec![(
+                "acc-glm".to_string(),
+                account_creds_with_extras(
+                    opt("glm-key-main"),
+                    None,
+                    vec!["glm-key-x ".to_string()],
+                ),
+            )],
+            ..Default::default()
+        };
+        assert_eq!(attribute("glm-4.6", &attribution), UNASSIGNED_BUCKET);
+        // 快照没有任何 GLM key：同样未归属
+        assert_eq!(
+            attribute("glm-4.6", &Attribution::default()),
+            UNASSIGNED_BUCKET
+        );
+    }
+
+    #[test]
+    fn attribute_glm_keys_do_not_leak_into_kimi_route() {
+        // GLM key 只走 Glm 路由：Kimi 路由不读 glm_api_keys
+        let attribution = Attribution {
+            cli: CliCredentials {
+                glm_api_keys: vec!["glm-key-a".to_string()],
+                ..Default::default()
+            },
+            kimi_accounts: vec![(
+                "acc-kimi".to_string(),
+                account_creds(opt("sk-kimi-x"), None),
+            )],
+            ..Default::default()
+        };
+        // kimi 模型：CLI 无 kimi key → 未归属（glm_api_keys 不参与 Kimi 通道）
+        assert_eq!(attribute("kimi-code/k3", &attribution), UNASSIGNED_BUCKET);
+        // 反向：glm 模型命中的 key 即使登记在 Kimi 账号（也在 kimi_accounts 里）也归它
+        let attribution2 = Attribution {
+            cli: CliCredentials {
+                glm_api_keys: vec!["sk-kimi-x".to_string()],
+                ..Default::default()
+            },
+            kimi_accounts: vec![(
+                "acc-kimi".to_string(),
+                account_creds(opt("sk-kimi-x"), None),
+            )],
+            ..Default::default()
+        };
+        assert_eq!(attribute("glm-4.6", &attribution2), "acc-kimi");
+    }
+
+    #[test]
+    fn attribute_cli_falls_back_to_glm_when_only_glm_key() {
+        // home 只配了自定义 provider 的 GLM key（无 kimi key / 无 deepseek key）：
+        // Kimi、DeepSeek 通道都不中后 GLM 兜底命中
+        let attribution = Attribution {
+            cli: CliCredentials {
+                glm_api_keys: vec!["glm-key-a".to_string()],
+                ..Default::default()
+            },
+            kimi_accounts: vec![("acc-glm".to_string(), account_creds(opt("glm-key-a"), None))],
+            ..Default::default()
+        };
+        assert_eq!(attribute_cli(&attribution), "acc-glm");
+        // GLM 兜底也不中：全不中维持未归属
+        let no_match = Attribution {
+            cli: CliCredentials {
+                glm_api_keys: vec!["glm-key-x".to_string()],
+                ..Default::default()
+            },
+            kimi_accounts: vec![("acc-glm".to_string(), account_creds(opt("glm-key-a"), None))],
+            ..Default::default()
+        };
+        assert_eq!(attribute_cli(&no_match), UNASSIGNED_BUCKET);
+    }
+
+    #[test]
+    fn attribute_cli_prefers_kimi_then_deepseek_then_glm() {
+        // 通道优先级：Kimi > DeepSeek > GLM；前者命中即返回，不再看后面
+        let attribution = Attribution {
+            cli: CliCredentials {
+                kimi_api_key: opt("sk-kimi-cli"),
+                deepseek_api_key: opt("sk-ds-cli"),
+                glm_api_keys: vec!["glm-key-a".to_string()],
+                ..Default::default()
+            },
+            kimi_accounts: vec![
+                (
+                    "acc-kimi".to_string(),
+                    account_creds(opt("sk-kimi-cli"), None),
+                ),
+                ("acc-glm".to_string(), account_creds(opt("glm-key-a"), None)),
+            ],
+            deepseek_accounts: vec![("acc-d".to_string(), account_creds(opt("sk-ds-cli"), None))],
+            ..Default::default()
+        };
+        assert_eq!(attribute_cli(&attribution), "acc-kimi");
+        // kimi 不中：DeepSeek 命中优先于 GLM 兜底
+        let ds_first = Attribution {
+            cli: CliCredentials {
+                deepseek_api_key: opt("sk-ds-cli"),
+                glm_api_keys: vec!["glm-key-a".to_string()],
+                ..Default::default()
+            },
+            kimi_accounts: vec![("acc-glm".to_string(), account_creds(opt("glm-key-a"), None))],
+            deepseek_accounts: vec![("acc-d".to_string(), account_creds(opt("sk-ds-cli"), None))],
+            ..Default::default()
+        };
+        assert_eq!(attribute_cli(&ds_first), "acc-d");
+        // kimi / deepseek 都不中：GLM 兜底命中
+        let glm_last = Attribution {
+            cli: CliCredentials {
+                deepseek_api_key: opt("sk-ds-other"),
+                glm_api_keys: vec!["glm-key-a".to_string()],
+                ..Default::default()
+            },
+            kimi_accounts: vec![("acc-glm".to_string(), account_creds(opt("glm-key-a"), None))],
+            deepseek_accounts: vec![("acc-d".to_string(), account_creds(opt("sk-ds-cli"), None))],
+            ..Default::default()
+        };
+        assert_eq!(attribute_cli(&glm_last), "acc-glm");
+    }
+
+    #[test]
+    fn snapshot_attribution_extracts_glm_key_from_any_provider_section() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = temp_dir("snapshot-glm");
+        let config = temp_dir("snapshot-glm-conf");
+        std::env::set_var("KIMICODEBAR_CONFIG_DIR", &config);
+        std::env::set_var(
+            "KIMICODEBAR_KEYRING_SERVICE",
+            format!("KimiCodeBar-test-{}", uuid::Uuid::new_v4()),
+        );
+        let settings = crate::storage::Settings {
+            accounts: vec![
+                crate::storage::Account {
+                    id: "acc-glm".to_string(),
+                    name: "G".to_string(),
+                    login_method: Some("api_key".to_string()),
+                    provider: "glm".to_string(),
+                },
+                crate::storage::Account {
+                    id: "acc-kimi".to_string(),
+                    name: "K".to_string(),
+                    login_method: Some("api_key".to_string()),
+                    provider: "kimi".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        std::fs::write(
+            config.join("settings.json"),
+            serde_json::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+        crate::creds::save_api_key("acc-glm", "glm-key-a").unwrap();
+        crate::creds::save_api_key_extra("acc-glm", &["glm-key-b".to_string()]).unwrap();
+        crate::creds::save_api_key("acc-kimi", "sk-kimi-a").unwrap();
+        // 自定义 provider 段（用户随意命名）放 GLM 账号登记的 key；未登记 key 不进；
+        // managed:kimi-code / deepseek 两段维持原通道
+        write_cli_home(
+            &home,
+            ".kimi-code",
+            r#"[providers."managed:kimi-code"]
+api_key = "sk-kimi-a"
+
+[providers.deepseek]
+api_key = "sk-ds-cli"
+
+[providers."my-glm-provider"]
+api_key = "glm-key-a"
+
+[providers."another-custom"]
+api_key = "glm-key-b"
+
+[providers."unregistered"]
+api_key = "glm-key-nobody"
+"#,
+            None,
+        );
+        let attribution = snapshot_attribution(&home.join(".kimi-code"));
+        // kimi / deepseek 两段维持原通道
+        assert_eq!(attribution.cli.kimi_api_key.as_deref(), Some("sk-kimi-a"));
+        assert_eq!(
+            attribution.cli.deepseek_api_key.as_deref(),
+            Some("sk-ds-cli")
+        );
+        // 自定义段里命中 GLM 账号主 key / 额外 key 的都被反向提取；未登记的不进（顺序不定）
+        let mut glm_keys = attribution.cli.glm_api_keys.clone();
+        glm_keys.sort();
+        assert_eq!(
+            glm_keys,
+            vec!["glm-key-a".to_string(), "glm-key-b".to_string()]
+        );
+        // GLM 账号与 Kimi 账号同列在 kimi_accounts（不拆列表，按账号列表顺序）
+        let ids: Vec<&str> = attribution
+            .kimi_accounts
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["acc-glm", "acc-kimi"]);
+
+        std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
+        let service = std::env::var("KIMICODEBAR_KEYRING_SERVICE").unwrap();
+        std::env::remove_var("KIMICODEBAR_KEYRING_SERVICE");
+        for slot in [
+            "api_key/acc-glm",
+            "api_key_extra/acc-glm",
+            "api_key/acc-kimi",
+        ] {
+            let _ = keyring::Entry::new(&service, slot).map(|e| e.delete_credential());
+        }
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&config);
     }
 
     /// harness 归属通道：key_accounts 里每把额外 key 也独立成条目（harness_input 的职责）
@@ -3392,8 +3805,10 @@ mod tests {
             )],
         );
         let file = claude.join("projects").join("p").join("main.jsonl");
-        // 旧状态：文件偏移已越过全部内容 + acc-a 桶有既有累计 999
+        // 旧状态：当前格式版本（version = STATE_VERSION）但缺 v1.6.0 的 harness 键；
+        // 文件偏移已越过全部内容 + acc-a 桶有既有累计 999
         let legacy = serde_json::json!({
+            "version": STATE_VERSION,
             "last_scan_at": ms("2026-08-22T09:00:00+08:00") / 1000,
             "files": { file.to_string_lossy().into_owned(): std::fs::metadata(&file).unwrap().len() },
             "buckets": {
@@ -3422,9 +3837,10 @@ mod tests {
         );
         // 既有桶保留（不清零），文件按旧偏移跳过（不重扫、不双计）
         assert_eq!(view.for_account("acc-a").today_tokens, 999);
-        // 落盘的新状态带上了 harness 键（serde(default) 起步）且 buckets 原样
+        // 落盘的新状态带上了 harness 键（serde(default) 起步）且 buckets 原样、版本不变
         let saved = std::fs::read_to_string(&state_path).unwrap();
         let state: serde_json::Value = serde_json::from_str(&saved).unwrap();
+        assert_eq!(state["version"], STATE_VERSION);
         assert!(state.get("claude_ids").is_some());
         assert!(state.get("codex_models").is_some());
         assert!(state.get("opencode").is_some());
@@ -3910,5 +4326,166 @@ mod tests {
         let _ = keyring::Entry::new(&service, "api_key/acc-a").map(|e| e.delete_credential());
         let _ = std::fs::remove_dir_all(&wsl_root);
         let _ = std::fs::remove_dir_all(&config);
+    }
+
+    // ---- GLM 端到端（config.toml 自定义 provider + wire.jsonl glm 事件 + Claude harness）----
+
+    #[test]
+    fn glm_wire_event_attributes_to_glm_account() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = temp_dir("glm-e2e-home");
+        let config = temp_dir("glm-e2e-conf");
+        let state_path = config.join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-08-27T12:00:00+08:00");
+
+        // CLI home：自定义 provider（用户自命名）+ [models] 映射 + wire 事件（glm-4.6）
+        let cli_home = write_cli_home(
+            &home,
+            ".kimi-code",
+            r#"[models."glm-4.6"]
+provider = "zhipu-custom"
+
+[providers."zhipu-custom"]
+api_key = "glm-key-a"
+"#,
+            None,
+        );
+        write_wire(
+            &cli_home.join("sessions"),
+            "main",
+            &[usage_line("glm-4.6", "2026-08-27T10:00:00+08:00", 100, 10)],
+        );
+
+        // 应用侧：GLM 账号登记 glm-key-a（隔离 keyring + 配置目录）
+        std::env::set_var("KIMICODEBAR_CONFIG_DIR", &config);
+        std::env::set_var(
+            "KIMICODEBAR_KEYRING_SERVICE",
+            format!("KimiCodeBar-test-{}", uuid::Uuid::new_v4()),
+        );
+        let settings = crate::storage::Settings {
+            accounts: vec![crate::storage::Account {
+                id: "acc-glm".to_string(),
+                name: "G".to_string(),
+                login_method: Some("api_key".to_string()),
+                provider: "glm".to_string(),
+            }],
+            ..Default::default()
+        };
+        std::fs::write(
+            config.join("settings.json"),
+            serde_json::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+        crate::creds::save_api_key("acc-glm", "glm-key-a").unwrap();
+
+        let attribution = snapshot_attribution(&cli_home);
+        assert_eq!(attribution.cli.glm_api_keys, vec!["glm-key-a".to_string()]);
+        let targets = vec![(cli_home.join("sessions"), attribution)];
+        let view = scan_with(&targets, &state_path, now, &tz);
+        // usage_line 每条另含 inputCacheRead 11264 → 100 + 10 + 11264
+        assert_eq!(view.for_account("acc-glm").today_tokens, 100 + 10 + 11264);
+        assert_eq!(view.for_account("acc-glm").by_model[0].model, "glm-4.6");
+        assert!(!view.by_account.contains_key(UNASSIGNED_BUCKET));
+
+        std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
+        let service = std::env::var("KIMICODEBAR_KEYRING_SERVICE").unwrap();
+        std::env::remove_var("KIMICODEBAR_KEYRING_SERVICE");
+        let _ = keyring::Entry::new(&service, "api_key/acc-glm").map(|e| e.delete_credential());
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&config);
+    }
+
+    #[test]
+    fn glm_wire_event_prefix_fallback_without_models_table() {
+        // 无 [models] 表：模型名 glm 开头（含大写）走前缀兜底 → Glm 路由
+        let _guard = ENV_LOCK.lock().unwrap();
+        let home = temp_dir("glm-e2e-prefix");
+        let config = temp_dir("glm-e2e-prefix-conf");
+        let state_path = config.join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-08-27T12:00:00+08:00");
+
+        let cli_home = write_cli_home(
+            &home,
+            ".kimi-code",
+            r#"[providers."zhipu"]
+api_key = "glm-key-a"
+"#,
+            None,
+        );
+        write_wire(
+            &cli_home.join("sessions"),
+            "main",
+            &[usage_line("GLM-4.6", "2026-08-27T10:00:00+08:00", 50, 5)],
+        );
+
+        std::env::set_var("KIMICODEBAR_CONFIG_DIR", &config);
+        std::env::set_var(
+            "KIMICODEBAR_KEYRING_SERVICE",
+            format!("KimiCodeBar-test-{}", uuid::Uuid::new_v4()),
+        );
+        let settings = crate::storage::Settings {
+            accounts: vec![crate::storage::Account {
+                id: "acc-glm".to_string(),
+                name: "G".to_string(),
+                login_method: Some("api_key".to_string()),
+                provider: "glm".to_string(),
+            }],
+            ..Default::default()
+        };
+        std::fs::write(
+            config.join("settings.json"),
+            serde_json::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+        crate::creds::save_api_key("acc-glm", "glm-key-a").unwrap();
+
+        let attribution = snapshot_attribution(&cli_home);
+        let targets = vec![(cli_home.join("sessions"), attribution)];
+        let view = scan_with(&targets, &state_path, now, &tz);
+        assert_eq!(view.for_account("acc-glm").today_tokens, 50 + 5 + 11264);
+        assert!(!view.by_account.contains_key(UNASSIGNED_BUCKET));
+
+        std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
+        let service = std::env::var("KIMICODEBAR_KEYRING_SERVICE").unwrap();
+        std::env::remove_var("KIMICODEBAR_KEYRING_SERVICE");
+        let _ = keyring::Entry::new(&service, "api_key/acc-glm").map(|e| e.delete_credential());
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&config);
+    }
+
+    #[test]
+    fn harness_claude_glm_key_attributes_to_glm_account() {
+        // Claude 的 settings.json 里配的是 GLM key：harness 通道不分 provider，
+        // 与 provider=glm 账号登记的 key 精确相等 → 归该账号（仿 3252 行测试写法）
+        let dir = temp_dir("harness-claude-glm");
+        let claude = write_claude_dir(
+            &dir,
+            "glm-key-a",
+            &[claude_line(
+                "m1",
+                "claude-opus-4-6",
+                150,
+                "2026-08-27T10:00:00Z",
+            )],
+        );
+        let state_path = dir.join("scan-state.json");
+        let harness = HarnessInput {
+            claude_dir: Some(claude),
+            key_accounts: vec![("glm-key-a".to_string(), "acc-glm".to_string())],
+            ..HarnessInput::default()
+        };
+        let view = scan_full(
+            &[],
+            &harness,
+            &state_path,
+            ms("2026-08-27T12:00:00+08:00"),
+            &tz8(),
+        );
+        assert_eq!(view.for_account("acc-glm").today_tokens, 150);
+        assert!(!view.by_account.contains_key(UNASSIGNED_BUCKET));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

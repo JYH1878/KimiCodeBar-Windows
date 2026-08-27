@@ -56,7 +56,7 @@ function AccountPage({
   const { t } = useTranslation();
   const quota = panel.quota;
   const isDeepSeek = panel.account.provider === "deepseek";
-  // GLM 页复用 Kimi 额度卡（额度本就映射进 KimiQuota 契约），跳过月度/总额/Booster/本地统计卡
+  // GLM 页复用 Kimi 额度卡（额度本就映射进 KimiQuota 契约），跳过月度/总额/Booster 卡（本地统计卡照常显示）
   const isGlm = panel.account.provider === "glm";
   const balance = panel.deepseek_balance ?? null;
 
@@ -105,7 +105,7 @@ function AccountPage({
           {quota?.weekly && <UsageCard title={t("panel.weeklyUsage")} detail={quota.weekly} />}
           {quota?.five_hour && <UsageCard title={t("panel.fiveHourUsage")} detail={quota.five_hour} />}
           {/* 以下卡片极简模式全部隐藏：月度总量 / 趋势 / 本地统计 / 总额 / 会员 / Booster。
-              GLM 页只有趋势与会员档位（无月度/本地统计/总额/Booster 接口） */}
+              GLM 页只有趋势 / 本地统计 / 会员档位（无月度/总额/Booster 接口） */}
           {!minimal && (
             <>
               {/* 月度总量（网页 token，仅 Kimi 账号）：monthly 与 monthly_error 都为空时整卡不渲染 */}
@@ -113,9 +113,9 @@ function AccountPage({
               {!isGlm && panel.monthly_error && <p className="monthly-error">{panel.monthly_error}</p>}
               {/* 用量趋势（该账号的本地历史采样，纯事实不预测；GLM 同样写采样） */}
               <TrendCard points={history} />
-              {/* 本地 Token 消耗（扫描 wire.jsonl 按 CLI 凭证归属）：仅 Kimi/DeepSeek 账号；
+              {/* 本地 Token 消耗（扫描 wire.jsonl 按 CLI 凭证归属）：各 provider 账号同显；
                   未扫描过（last_scan_at 为空）时整卡不渲染 */}
-              {!isGlm && <LocalUsageCard stats={localUsage} />}
+              <LocalUsageCard stats={localUsage} />
               {!isGlm && quota?.total && (
                 <UsageCard
                   title={t("panel.totalQuota")}
