@@ -56,8 +56,8 @@
 //!   （会话文件按 uuid 命名、只增不改，实际不会触发）；
 //! - 已消失文件的偏移会被清理，同名新文件从头读，不会按旧偏移跳过开头。
 //!
-//! 跨 Harness 扩展（Claude Code / Codex / OpenCode 三家本地日志，解析实现见
-//! local_usage/ 子模块）：三家日志与 Kimi home 并列喂同一套分桶聚合器，事件语义
+//! 跨 Harness 扩展（Claude Code / Codex / OpenCode / ZCode 四家本地日志，解析实现见
+//! local_usage/ 子模块）：四家日志与 Kimi home 并列喂同一套分桶聚合器，事件语义
 //! 不变（ts 毫秒 / model / tokens），UI 零改动。归属：按各家配置文件里的 API key
 //! 与**全部账号（不分 provider）**登记的任一 key（keyring 主 key 或任一额外 key）
 //! 精确相等 → 归该账号；
@@ -65,6 +65,8 @@
 //! 键（Claude 的 message.id 去重集、Codex 的文件级模型/累计、OpenCode 的
 //! time_created 水位 + id 去重集）全走 serde(default)，旧 scan-state 兼容不清零；
 //! 去重集按 48 小时裁剪防膨胀。新 harness 事件同样计入机器级活跃判定。
+//! ZCode（v1.7.3）零新增状态键：model-io jsonl 逐请求一行 append-only，
+//! 去重完全走共用 files 偏移表。
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -78,6 +80,7 @@ use crate::history::HistoryPoint;
 mod claude;
 mod codex;
 mod opencode;
+mod zcode;
 
 /// 扫描节流：距上次扫描小于该秒数直接返回进程内缓存结果
 const THROTTLE_SECS: i64 = 180;
@@ -177,7 +180,7 @@ pub fn scan() -> ScanView {
 
 /// 不节流的完整扫描（scan 去掉进程内缓存的部分，测试可直接驱动）：
 /// 枚举全部 CLI home → 每个 home 用自己的凭证快照 → 逐 home 增量扫描；
-/// 另采集三家 harness（Claude Code / Codex / OpenCode）的扫描输入一并扫。
+/// 另采集四家 harness（Claude Code / Codex / OpenCode / ZCode）的扫描输入一并扫。
 /// home 枚举失败（取不到用户目录）容忍为空目标，按空结果扫描
 fn scan_fresh<Tz: TimeZone>(now_ms: i64, tz: &Tz) -> ScanView
 where
@@ -213,9 +216,9 @@ where
     view
 }
 
-/// 三家 harness 的扫描输入（根目录与账号 key 快照，测试可整体伪造绕开环境解析）：
+/// 四家 harness 的扫描输入（根目录与账号 key 快照，测试可整体伪造绕开环境解析）：
 /// - Claude / Codex 只认默认路径（CLAUDE_CONFIG_DIR / CODEX_HOME 指走的 home
-///   探测不到，拍板接受）；
+///   探测不到，拍板接受）；ZCode 同只认 `{home}/.zcode`；
 /// - OpenCode 候选目录存在几个扫几个（按优先级去重）；
 /// - key_accounts = 全部账号（不分 provider）的 api_key 快照：harness 事件按
 ///   key 精确匹配归属，只在内存比对、不落盘
@@ -223,6 +226,7 @@ where
 struct HarnessInput {
     claude_dir: Option<PathBuf>,
     codex_dir: Option<PathBuf>,
+    zcode_dir: Option<PathBuf>,
     opencode_data_dirs: Vec<PathBuf>,
     opencode_config_dirs: Vec<PathBuf>,
     /// (api_key, 账号 id)
@@ -235,6 +239,7 @@ fn harness_input(home: Option<&std::ffi::OsStr>) -> HarnessInput {
     let mut input = HarnessInput {
         claude_dir: home.map(|h| h.join(".claude")),
         codex_dir: home.map(|h| h.join(".codex")),
+        zcode_dir: home.map(|h| h.join(".zcode")),
         ..HarnessInput::default()
     };
     let mut data_dirs: Vec<PathBuf> = Vec::new();
@@ -979,7 +984,7 @@ where
         files.extend(home_files.into_iter().map(|file| (file, attribution)));
     }
 
-    // ---- 三家 harness：文件发现与归属 key 快照（扫描开头一次）----
+    // ---- 四家 harness：文件发现与归属 key 快照（扫描开头一次）----
     let claude_key = harness.claude_dir.as_deref().and_then(claude::auth_token);
     let claude_files = harness
         .claude_dir
@@ -991,10 +996,20 @@ where
         .as_deref()
         .map(codex::auth_keys)
         .unwrap_or_default();
+    let zcode_keys = harness
+        .zcode_dir
+        .as_deref()
+        .map(zcode::auth_keys)
+        .unwrap_or_default();
     let codex_files = harness
         .codex_dir
         .as_deref()
         .map(codex::collect_files)
+        .unwrap_or_default();
+    let zcode_files = harness
+        .zcode_dir
+        .as_deref()
+        .map(zcode::collect_files)
         .unwrap_or_default();
     // auth.json 实际在数据目录（~/.local/share/opencode/，实机踩坑：只查配置目录会
     // 漏 key 全落未归属），opencode.json 在配置目录——两处候选合并喂入，数据目录优先
@@ -1020,6 +1035,7 @@ where
             .map(|f| f.to_string_lossy().into_owned()),
     );
     disk_paths.extend(codex_files.iter().map(|f| f.to_string_lossy().into_owned()));
+    disk_paths.extend(zcode_files.iter().map(|f| f.to_string_lossy().into_owned()));
     state.files.retain(|p, _| disk_paths.contains(p));
     state.codex_models.retain(|p, _| disk_paths.contains(p));
     state.codex_totals.retain(|p, _| disk_paths.contains(p));
@@ -1076,6 +1092,30 @@ where
             }
             if let Some(model) = model {
                 state.codex_models.insert(key.clone(), model);
+            }
+            state.files.insert(key, new_offset);
+        }
+    }
+
+    // ZCode：续读 → 逐行直接出账（model-io 逐请求一行 append-only，无流式重写，
+    // 无需 Claude 式去重也无 Codex 式累计基线；字节偏移即全部状态）。
+    // 单配置一把 key：v2/config.json 全 provider 候选任一命中账号 key 即归，
+    // 扫描开头判一次，整批共用
+    let zcode_key = zcode_keys
+        .iter()
+        .find(|key| {
+            harness
+                .key_accounts
+                .iter()
+                .any(|(account_key, _)| account_key == *key)
+        })
+        .cloned();
+    for path in &zcode_files {
+        let key = path.to_string_lossy().into_owned();
+        let offset = state.files.get(&key).copied().unwrap_or(0);
+        if let Ok((lines, new_offset)) = read_new_lines(path, offset) {
+            for event in lines.iter().filter_map(|line| zcode::parse_line(line)) {
+                harness_events.push((event, zcode_key.clone()));
             }
             state.files.insert(key, new_offset);
         }
@@ -3573,6 +3613,38 @@ api_key = "glm-key-nobody"
         .to_string()
     }
 
+    /// ZCode model-io 行（真实结构压缩：completedAt / model.modelId /
+    /// response.usage 驼峰字段；tokens = 100 + output + 1000）
+    fn zcode_line(model: &str, output: u64, rfc3339: &str) -> String {
+        format!(
+            r#"{{"completedAt":"{rfc3339}","requestId":"req-{output}","attempt":1,"model":{{"modelId":"{model}","providerId":"builtin:bigmodel-coding-plan"}},"response":{{"usage":{{"inputTokens":100,"outputTokens":{output},"totalTokens":{total},"cacheReadTokens":1000,"cacheWriteTokens":0}}}}}}"#,
+            total = 100 + output,
+        )
+    }
+
+    /// 造 ZCode 目录：v2/config.json（provider 段 key，字段名运行时拼装）
+    /// + cli/rollout/model-io jsonl
+    fn write_zcode_dir(root: &Path, key: &str, lines: &[String]) -> PathBuf {
+        let zcode = root.join(".zcode");
+        let rollout = zcode.join("cli").join("rollout");
+        std::fs::create_dir_all(&rollout).unwrap();
+        std::fs::create_dir_all(zcode.join("v2")).unwrap();
+        let field = format!("api{}", "Key");
+        std::fs::write(
+            zcode.join("v2").join("config.json"),
+            format!(
+                r#"{{"provider":{{"builtin:bigmodel-coding-plan":{{"options":{{"{field}":"{key}"}}}}}}}}"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            rollout.join("model-io-sess_t1.jsonl"),
+            lines.join("\n") + "\n",
+        )
+        .unwrap();
+        zcode
+    }
+
     #[test]
     fn harness_claude_attributed_incremental_no_double() {
         let dir = temp_dir("harness-claude");
@@ -3747,6 +3819,86 @@ api_key = "glm-key-nobody"
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// ZCode 事件按 v2/config.json 的 key 归属（GLM key 命中账号登记 key 即归，
+    /// 模型名照记进 by_model）；字节偏移增量，二次扫描不重复、追加只增量
+    #[test]
+    fn harness_zcode_attributed_incremental_no_double() {
+        let dir = temp_dir("harness-zcode");
+        let zcode = write_zcode_dir(
+            &dir,
+            "sk-glm-acc",
+            &[
+                zcode_line("GLM-5.3-Flash", 200, "2026-08-22T10:00:00Z"),
+                zcode_line("GLM-5.3-Flash", 50, "2026-08-22T11:00:00Z"),
+            ],
+        );
+        let state_path = dir.join("config").join("scan-state.json");
+        let harness = HarnessInput {
+            zcode_dir: Some(zcode.clone()),
+            key_accounts: vec![("sk-glm-acc".to_string(), "acc-g".to_string())],
+            ..HarnessInput::default()
+        };
+        let tz = tz8();
+        let now = ms("2026-08-22T12:00:00+08:00");
+
+        // 每行 tokens = 100 + output + 1000：1300 + 1150 = 2450
+        let view = scan_full(&[], &harness, &state_path, now, &tz);
+        assert_eq!(view.for_account("acc-g").today_tokens, 2450);
+        assert_eq!(view.for_account("acc-g").by_model[0].model, "GLM-5.3-Flash");
+        assert!(!view.by_account.contains_key(UNASSIGNED_BUCKET));
+
+        // 二次扫描不重复
+        assert_eq!(
+            scan_full(&[], &harness, &state_path, now, &tz)
+                .for_account("acc-g")
+                .today_tokens,
+            2450
+        );
+        // 追加一行只增量（1145）
+        let file = zcode
+            .join("cli")
+            .join("rollout")
+            .join("model-io-sess_t1.jsonl");
+        let mut content = std::fs::read_to_string(&file).unwrap();
+        content.push_str(&zcode_line("GLM-5.3-Flash", 45, "2026-08-22T11:30:00Z"));
+        content.push('\n');
+        std::fs::write(&file, content).unwrap();
+        assert_eq!(
+            scan_full(&[], &harness, &state_path, now, &tz)
+                .for_account("acc-g")
+                .today_tokens,
+            3595
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// ZCode 的 key 全不中（未登记/他号）→ 事件进未归属桶，机器级活跃判定仍计入
+    #[test]
+    fn harness_zcode_unmatched_key_goes_unassigned() {
+        let dir = temp_dir("harness-zcode-unmatched");
+        let zcode = write_zcode_dir(
+            &dir,
+            "sk-glm-not-registered",
+            &[zcode_line("GLM-5.3-Flash", 200, "2026-08-22T10:00:00Z")],
+        );
+        let state_path = dir.join("config").join("scan-state.json");
+        let harness = HarnessInput {
+            zcode_dir: Some(zcode),
+            key_accounts: vec![("sk-other".to_string(), "acc-g".to_string())],
+            ..HarnessInput::default()
+        };
+        let tz = tz8();
+        let now = ms("2026-08-22T12:00:00+08:00");
+
+        let view = scan_full(&[], &harness, &state_path, now, &tz);
+        assert_eq!(view.for_account(UNASSIGNED_BUCKET).today_tokens, 1300);
+        assert_eq!(view.for_account("acc-g").today_tokens, 0);
+        assert_eq!(view.machine_last_event_at, Some(ms("2026-08-22T10:00:00Z")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn harness_opencode_attributed_via_provider_key() {
         let dir = temp_dir("harness-opencode");
@@ -3883,7 +4035,7 @@ api_key = "glm-key-nobody"
 
     /// 账号视图不含未归属、二次扫描不重复计数
     #[test]
-    fn harness_end_to_end_three_harnesses_synthetic() {
+    fn harness_end_to_end_four_harnesses_synthetic() {
         let _guard = ENV_LOCK.lock().unwrap();
         let home = temp_dir("harness-e2e-home");
         let roaming = temp_dir("harness-e2e-roaming");
@@ -3919,6 +4071,12 @@ api_key = "glm-key-nobody"
             r#"{"kimi":{"type":"api","key":"sk-kimi-e2e"}}"#,
         )
         .unwrap();
+        // ZCode：v2/config.json 的 key = DeepSeek 账号的 key（与 Codex 同款跨 provider 通道）
+        write_zcode_dir(
+            &home,
+            "sk-ds-e2e",
+            &[zcode_line("GLM-5.3-Flash", 44, &rfc3339)],
+        );
 
         // 应用侧：两个账号（Kimi + DeepSeek），api_key 走隔离 keyring
         std::env::set_var("KIMICODEBAR_CONFIG_DIR", &config);
@@ -3950,7 +4108,7 @@ api_key = "glm-key-nobody"
         .unwrap();
         crate::creds::save_api_key("acc-kimi", "sk-kimi-e2e").unwrap();
         crate::creds::save_api_key("acc-ds", "sk-ds-e2e").unwrap();
-        // 环境解析全部指向伪造目录（三家 harness + 配置目录 + 状态目录）
+        // 环境解析全部指向伪造目录（四家 harness + 配置目录 + 状态目录）
         std::env::set_var("USERPROFILE", &home);
         std::env::set_var("APPDATA", &roaming);
         std::env::set_var("LOCALAPPDATA", &localapp);
@@ -3961,17 +4119,17 @@ api_key = "glm-key-nobody"
         std::env::set_var("KIMICODEBAR_WSL_ROOT", home.join("no-wsl"));
 
         let view = scan_fresh(now_ms, &chrono::Local);
-        // Claude(111) + OpenCode(33) 归 Kimi 账号；Codex(222) 归 DeepSeek 账号
+        // Claude(111) + OpenCode(33) 归 Kimi 账号；Codex(222) + ZCode(1144) 归 DeepSeek 账号
         assert_eq!(view.for_account("acc-kimi").today_tokens, 111 + 33);
-        assert_eq!(view.for_account("acc-ds").today_tokens, 222);
-        // 三家全部归属成功：未归属桶不生成（账号视图不含未归属数字）
+        assert_eq!(view.for_account("acc-ds").today_tokens, 222 + 1144);
+        // 四家全部归属成功：未归属桶不生成（账号视图不含未归属数字）
         assert!(!view.by_account.contains_key(UNASSIGNED_BUCKET));
         assert_eq!(view.machine_last_event_at, Some(now_ms));
 
         // 二次扫描：不重复计数
         let view2 = scan_fresh(now_ms, &chrono::Local);
         assert_eq!(view2.for_account("acc-kimi").today_tokens, 111 + 33);
-        assert_eq!(view2.for_account("acc-ds").today_tokens, 222);
+        assert_eq!(view2.for_account("acc-ds").today_tokens, 222 + 1144);
 
         std::env::remove_var("USERPROFILE");
         std::env::remove_var("APPDATA");
