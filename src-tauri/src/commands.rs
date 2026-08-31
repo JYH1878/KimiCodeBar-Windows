@@ -445,6 +445,9 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
                 let fetched_at = runtime
                     .last_quota
                     .as_ref()
+                    // 空占位不算配额：DeepSeek 账号顶层时间取余额刷新时间，
+                    // 否则缓存顶层 fetched_at 抄占位值自锁死、重启后又被预热回内存
+                    .filter(|(q, _)| !quota_is_placeholder(q))
                     .map(|(_, t)| *t)
                     .or_else(|| runtime.last_balance.as_ref().map(|(_, t)| *t));
                 if let Some(fetched_at) = fetched_at {
@@ -1665,9 +1668,13 @@ fn assemble_panel_state_with(
         .map(|account| {
             let runtime = inner.accounts.get(&account.id);
             let (quota, fetched_at) = match runtime.and_then(|rt| rt.last_quota.as_ref()) {
-                Some((quota, fetched_at)) => (Some(quota.clone()), Some(*fetched_at)),
+                // 空占位不算配额（DeepSeek 账号缓存预热的产物），否则"更新时间"
+                // 会锁死在预热值而不跟随余额刷新；占位组装后也不外露
+                Some((quota, fetched_at)) if !quota_is_placeholder(quota) => {
+                    (Some(quota.clone()), Some(*fetched_at))
+                }
                 // 无配额时取余额时间（DeepSeek 账号的"上次成功刷新"）
-                None => (
+                _ => (
                     None,
                     runtime.and_then(|rt| rt.last_balance.as_ref().map(|(_, t)| *t)),
                 ),
@@ -1714,6 +1721,13 @@ fn assemble_panel_state_with(
 /// 托盘变红判定：任一账号低额（低额本身已排除刷新失败的账号）
 pub(crate) fn any_low_warning(panel: &PanelState) -> bool {
     panel.accounts.iter().any(|a| a.low_warning)
+}
+
+/// 空配额占位判定：weekly / five_hour / total 全 None 即占位。
+/// `CachedQuota.quota` 非 Option，DeepSeek 账号无配额时以 `KimiQuota::default()`
+/// 落盘占位，缓存预热后与真配额在类型上无法区分，取时间链路须显式跳过
+fn quota_is_placeholder(quota: &KimiQuota) -> bool {
+    quota.weekly.is_none() && quota.five_hour.is_none() && quota.total.is_none()
 }
 
 /// 该账号配额中最差（最低）的剩余百分比：weekly / five_hour / total 三者最小
@@ -2300,6 +2314,45 @@ mod tests {
         assert!(!any_low_warning(&panel), "托盘不应变红");
         // 缓存余额照常展示（错误横幅与数据并存）
         assert!(panel.accounts[0].deepseek_balance.is_some());
+    }
+
+    #[test]
+    fn deepseek_placeholder_quota_warmup_takes_balance_time() {
+        // 复现 v1.7.3 实机 bug：启动预热把缓存里的空配额占位装进 last_quota（Some 而非
+        // None），组装若不跳过占位，"更新时间"会锁死在预热值而不跟随余额刷新
+        let acc = deepseek_account("ds-1", "DeepSeek 号");
+        let settings = settings_with_accounts(vec![acc], 20.0);
+        let mut inner = Inner::default();
+        inner.accounts.insert(
+            "ds-1".to_string(),
+            AccountRuntime {
+                // 预热形态：quota = 空占位 + 缓存顶层旧时间；余额是刷新后的新时间
+                last_quota: Some((KimiQuota::default(), 1_700_000_000)),
+                last_balance: Some((deepseek_balance(true, 100.0), 1_900_000_000)),
+                ..AccountRuntime::default()
+            },
+        );
+        let panel = assemble_panel_state_with(&inner, &settings, &|_| true);
+        let p = &panel.accounts[0];
+        assert_eq!(
+            p.fetched_at,
+            Some(1_900_000_000),
+            "空占位不算配额，更新时间应取余额刷新时间"
+        );
+        assert!(p.quota.is_none(), "空占位组装后不应外露为 quota");
+    }
+
+    #[test]
+    fn quota_is_placeholder_distinguishes_default_from_real() {
+        assert!(quota_is_placeholder(&KimiQuota::default()));
+        // 真 Kimi 配额至少有一个窗口
+        assert!(!quota_is_placeholder(&quota_with_weekly(87.0)));
+        // 会员档位/Booster 不算窗口，仅有它们仍是占位
+        let meta_only = KimiQuota {
+            membership_level: Some("basic".to_string()),
+            ..Default::default()
+        };
+        assert!(quota_is_placeholder(&meta_only));
     }
 
     #[test]
