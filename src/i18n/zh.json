@@ -15,6 +15,14 @@
     "pagesAria": "账号页面",
     "addAccountTitle": "添加账号"
   },
+  "overview": {
+    "title": "总览",
+    "fiveHour": "5小时",
+    "weekly": "7天",
+    "fiveHourLeft": "5h 剩 {{remaining}}",
+    "weeklyLeft": "7天 剩 {{remaining}}",
+    "refreshFailed": "刷新失败，显示上次缓存数据"
+  },
   "usage": {
     "remaining": "剩余 {{remaining}}/{{limit}}",
     "countdown": {

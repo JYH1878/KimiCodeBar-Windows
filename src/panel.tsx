@@ -7,7 +7,7 @@ import { useTheme } from "./theme";
 import type { AccountPanel, HistoryPoint, LocalUsageStats, PanelState, QuotaDetail, UpdateInfo } from "./types";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { checkUpdate, getLocalUsage, getPanelState, getSettings, getUsageHistory, isTauri, refreshNow, openSettings, openExternalUrl, onQuotaUpdated, onSettingsChanged, onUpdateInfo } from "./ipc";
-import { UsageCard } from "./components/UsageCard";
+import { UsageCard, resetTimeText } from "./components/UsageCard";
 import { MonthlyCard } from "./components/MonthlyCard";
 import { TrendCard } from "./components/TrendCard";
 import { LocalUsageCard } from "./components/LocalUsageCard";
@@ -15,7 +15,7 @@ import { MembershipCard } from "./components/MembershipCard";
 import { BoosterCard } from "./components/BoosterCard";
 import { ErrorBanner } from "./components/ErrorBanner";
 import { EmptyState } from "./components/EmptyState";
-import { DeepSeekBalanceCard } from "./components/DeepSeekBalanceCard";
+import { DeepSeekBalanceCard, formatMoney } from "./components/DeepSeekBalanceCard";
 import { Tuanzi } from "./components/Tuanzi";
 
 /** epoch 秒 → 本地时间 HH:mm:ss */
@@ -142,7 +142,118 @@ function AccountPage({
   );
 }
 
-/** 用量面板主界面（index.html 入口）：横向翻页容器，一页一个账号，像手机桌面 */
+/** 总览行：一个账号的关键数字（Kimi/GLM 双迷你进度条 / DeepSeek 余额），点击跳该账号详情页。
+ *  极简模式去掉进度条、一行只写关键数字；低额标红直接用后端算好的 low_warning
+ *  （DeepSeek 的 is_available=false 后端已并入，前端不重算阈值）。 */
+function OverviewRow({
+  panel,
+  minimal,
+  onOpen,
+}: {
+  panel: AccountPanel;
+  minimal: boolean;
+  onOpen: () => void;
+}) {
+  const { t } = useTranslation();
+  const isDeepSeek = panel.account.provider === "deepseek";
+  const quota = panel.quota;
+  const balance = panel.deepseek_balance ?? null;
+  // 有无缓存数据（quota / deepseek_balance），决定「加载中 / 失败 / 数据」三分支
+  const hasData = isDeepSeek ? balance !== null : quota !== null;
+
+  let body: React.ReactNode;
+  if (!panel.credential) {
+    body = <p className="ov-hint">{t("empty.noCredential")}</p>;
+  } else if (!hasData && panel.error === null) {
+    body = <p className="ov-hint">{t("panel.loading")}</p>;
+  } else if (!hasData) {
+    // 无缓存又拉取失败：只显示失败提示（完整错误，小字红）
+    body = <p className="ov-error">{panel.error}</p>;
+  } else if (isDeepSeek && balance !== null) {
+    body = (
+      <div className="ov-balance">
+        <span className="ov-balance-num">{formatMoney(balance.currency, balance.total_balance)}</span>
+        <span className="ov-balance-currency">{balance.currency}</span>
+      </div>
+    );
+  } else if (quota !== null && minimal) {
+    // 极简总览：不画进度条，一行关键数字（缺哪个窗口跳过哪个）
+    const parts: string[] = [];
+    if (quota.five_hour) parts.push(t("overview.fiveHourLeft", { remaining: quota.five_hour.remaining }));
+    if (quota.weekly) parts.push(t("overview.weeklyLeft", { remaining: quota.weekly.remaining }));
+    body = <p className="ov-numbers">{parts.length > 0 ? parts.join(" · ") : t("panel.noData")}</p>;
+  } else if (quota !== null) {
+    // Kimi/GLM：5 小时 / 7 天两条迷你进度条（文案复用 UsageCard 的 usage.remaining 与 resetTimeText）
+    const windows: Array<{ label: string; detail: QuotaDetail }> = [];
+    if (quota.five_hour) windows.push({ label: t("overview.fiveHour"), detail: quota.five_hour });
+    if (quota.weekly) windows.push({ label: t("overview.weekly"), detail: quota.weekly });
+    body = (
+      <div className="ov-windows">
+        {windows.map(({ label, detail }) => {
+          const pctRemaining = Math.min(100, Math.max(0, detail.percent_remaining));
+          const pctUsed = 100 - pctRemaining;
+          return (
+            <div key={label} className="ov-window">
+              <div className="ov-window-head">
+                <span className="ov-window-label">{label}</span>
+                <span className="ov-window-pct">{Math.round(pctUsed)}%</span>
+              </div>
+              <div className="progress ov-progress">
+                <div className="progress-fill" style={{ width: `${pctUsed}%` }} />
+              </div>
+              <div className="ov-window-foot">
+                <span>{t("usage.remaining", { remaining: detail.remaining, limit: detail.limit })}</span>
+                <span>{resetTimeText(detail.reset_time)}</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  } else {
+    body = null;
+  }
+
+  return (
+    <button type="button" className={`ov-row${panel.low_warning ? " low" : ""}`} onClick={onOpen}>
+      <span className="ov-row-head">
+        <span className="ov-name">{panel.account.name}</span>
+        <span className="badge provider-badge">
+          {isDeepSeek ? "DeepSeek" : panel.account.provider === "glm" ? "GLM" : "Kimi"}
+        </span>
+      </span>
+      {body}
+      {/* 有缓存数据但本次刷新失败：数据照显示，另加一行小字失败提示 */}
+      {hasData && panel.error !== null && <p className="ov-error">{t("overview.refreshFailed")}</p>}
+    </button>
+  );
+}
+
+/** 总览页（第一页）：一屏列出全部账号的关键数字，点行跳对应账号详情页 */
+function OverviewPage({
+  accounts,
+  minimal,
+  onOpen,
+}: {
+  accounts: AccountPanel[];
+  minimal: boolean;
+  /** 打开第 i 个账号的详情页（调用方 goTo(i+1)） */
+  onOpen: (index: number) => void;
+}) {
+  const { t } = useTranslation();
+  return (
+    <section className="page">
+      <header className="page-head">
+        <span className="page-title">{t("overview.title")}</span>
+      </header>
+      {accounts.map((a, i) => (
+        <OverviewRow key={a.account.id} panel={a} minimal={minimal} onOpen={() => onOpen(i)} />
+      ))}
+    </section>
+  );
+}
+
+/** 用量面板主界面（index.html 入口）：横向翻页容器，首页总览 + 一页一个账号，像手机桌面 */
 function PanelApp() {
   const { t } = useTranslation();
   // 主题：读设置 + 跟随 settings-changed + system 模式跟随系统明暗
@@ -179,7 +290,8 @@ function PanelApp() {
   pageRef.current = page;
 
   const accounts = useMemo(() => state?.accounts ?? [], [state]);
-  const pageCount = accounts.length;
+  // 页码 0 = 总览页，账号 i 在页码 i+1；面板打开默认停在总览（page 初始值 0）
+  const pageCount = accounts.length + 1;
   // pageCount 的 ref 镜像（goTo 不依赖 pageCount，避免回调身份变化）
   const pageCountRef = useRef(0);
   pageCountRef.current = pageCount;
@@ -294,10 +406,12 @@ function PanelApp() {
     } catch (e) {
       setState((prev) => {
         if (prev === null) return prev;
-        const cur = prev.accounts[pageRef.current];
+        // 失败写进「当前页」账号：页码 0 是总览页不对应任何账号，跳过不写
+        const idx = pageRef.current - 1;
+        const cur = idx >= 0 ? prev.accounts[idx] : undefined;
         if (cur === undefined) return prev;
         const accounts = [...prev.accounts];
-        accounts[pageRef.current] = { ...cur, error: String(e) };
+        accounts[idx] = { ...cur, error: String(e) };
         return { ...prev, accounts };
       });
     } finally {
@@ -325,8 +439,9 @@ function PanelApp() {
     const unlisten = onQuotaUpdated((s) => {
       setState(s);
       // 每次刷新成功后历史采样会增长、本地统计可能有新扫描结果：
-      // 同步重拉当前页账号的趋势与本地统计（失败静默，保留旧数据）
-      const cur = s.accounts[pageRef.current];
+      // 同步重拉当前页账号的趋势与本地统计（失败静默，保留旧数据）；页码 0 是总览页，跳过
+      const idx = pageRef.current - 1;
+      const cur = idx >= 0 ? s.accounts[idx] : undefined;
       if (cur !== undefined) {
         fetchHistory(cur.account.id);
         fetchLocalUsage(cur.account.id);
@@ -351,17 +466,17 @@ function PanelApp() {
     };
   }, [doRefresh, fetchHistory, fetchLocalUsage]);
 
-  // 翻页后按需补拉该账号的历史采样（还没拉过的话）
+  // 翻页后按需补拉该账号的历史采样（还没拉过的话）；页码 0 是总览页没有当前账号，accounts[-1] 为 undefined 自然跳过
   useEffect(() => {
-    const cur = accounts[page];
+    const cur = accounts[page - 1];
     if (cur !== undefined && historyMap[cur.account.id] === undefined) {
       fetchHistory(cur.account.id);
     }
   }, [page, accounts, historyMap, fetchHistory]);
 
-  // 翻页后按需补拉该账号的本地 token 统计（还没拉过的话）
+  // 翻页后按需补拉该账号的本地 token 统计（还没拉过的话）；页码 0 是总览页没有当前账号，accounts[-1] 为 undefined 自然跳过
   useEffect(() => {
-    const cur = accounts[page];
+    const cur = accounts[page - 1];
     if (cur !== undefined && localUsageMap[cur.account.id] === undefined) {
       fetchLocalUsage(cur.account.id);
     }
@@ -393,7 +508,14 @@ function PanelApp() {
     );
   }
 
-  const current = accounts[Math.min(page, accounts.length - 1)];
+  // 底栏「更新于」：账号页显示该账号时间；总览页（page 0）取所有账号里最新的一个，全空显示「暂无数据」
+  const currentFetchedAt =
+    page === 0
+      ? accounts.reduce<number | null>(
+          (latest, a) => (a.fetched_at !== null && (latest === null || a.fetched_at > latest) ? a.fetched_at : latest),
+          null,
+        )
+      : (accounts[Math.min(page - 1, accounts.length - 1)]?.fetched_at ?? null);
   const busy = refreshing || state.loading;
   // 有新版本且拿到发布页地址时，底栏"更新于"左侧显示更新徽标
   const updateUrl = update?.has_update ? update.release_url : null;
@@ -416,6 +538,7 @@ function PanelApp() {
         onPointerCancel={endDrag}
       >
         <div className="pager-track" style={trackStyle}>
+          <OverviewPage accounts={accounts} minimal={minimal} onOpen={(i) => goTo(i + 1)} />
           {accounts.map((a) => (
             <AccountPage
               key={a.account.id}
@@ -430,16 +553,23 @@ function PanelApp() {
         </div>
       </div>
 
-      {/* 圆点导航：N 个账号圆点 + 末尾「+」（点开设置页并定位到账号添加表单） */}
+      {/* 圆点导航：总览点（圆角方形，与账号圆点区分）+ N 个账号圆点 + 末尾「+」（点开设置页并定位到账号添加表单） */}
       <nav className="pager-dots" aria-label={t("panel.pagesAria")}>
+        <button
+          type="button"
+          className={`dot dot-ov${page === 0 ? " active" : ""}`}
+          title={t("overview.title")}
+          aria-label={t("overview.title")}
+          onClick={() => goTo(0)}
+        />
         {accounts.map((a, i) => (
           <button
             key={a.account.id}
             type="button"
-            className={`dot${i === page ? " active" : ""}${a.low_warning ? " low" : ""}`}
+            className={`dot${i + 1 === page ? " active" : ""}${a.low_warning ? " low" : ""}`}
             title={a.account.name}
             aria-label={a.account.name}
-            onClick={() => goTo(i)}
+            onClick={() => goTo(i + 1)}
           />
         ))}
         <button
@@ -481,8 +611,8 @@ function PanelApp() {
                 ⬆ v{update.latest}
               </button>
             )}
-            {current.fetched_at
-              ? t("panel.updatedAt", { time: formatFetchedAt(current.fetched_at) })
+            {currentFetchedAt !== null
+              ? t("panel.updatedAt", { time: formatFetchedAt(currentFetchedAt) })
               : t("panel.noData")}
           </span>
         </div>

@@ -211,6 +211,143 @@ body,
   opacity: 1;
 }
 
+/* --- 总览页（第一页）：每个账号一张可点行卡，点击跳该账号详情页 --- */
+
+/* 行卡：复用 pcard 的卡片视觉（同一套背景/圆角/阴影变量），整行是按钮 */
+.ov-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  padding: 10px 14px;
+  border: none;
+  border-radius: 10px;
+  background-color: var(--card-bg);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.ov-row:hover {
+  background-color: var(--card-hover);
+}
+
+/* 低额行：左缘红条 + 名称/已用百分比/余额标红（var(--danger) 与圆点 low 同款） */
+.ov-row.low {
+  border-left: 3px solid var(--danger);
+}
+
+.ov-row.low .ov-name,
+.ov-row.low .ov-window-pct,
+.ov-row.low .ov-balance-num {
+  color: var(--danger);
+}
+
+/* 低额行的迷你进度条也转红（与 .usage-card.low 同款渐变） */
+.ov-row.low .ov-progress .progress-fill {
+  background: linear-gradient(90deg, var(--danger), var(--danger-2));
+}
+
+/* 行头：账号名 + 提供商徽章 */
+.ov-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ov-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 未配置凭证 / 首刷加载中的占位小字 */
+.ov-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 失败提示小字（无数据时为完整错误文本，可换行） */
+.ov-error {
+  font-size: 11px;
+  color: var(--danger);
+  word-break: break-all;
+}
+
+/* Kimi/GLM 双迷你窗口条 */
+.ov-windows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ov-window-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.ov-window-pct {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+/* 细进度条：复用 .progress 的轨道色与填充，压矮一档（8px → 5px） */
+.ov-progress {
+  margin-top: 4px;
+  height: 5px;
+  border-radius: 2.5px;
+}
+
+/* 条下一行小字：剩余量 + 重置时间（文案同 UsageCard 的 usage-foot） */
+.ov-window-foot {
+  margin-top: 3px;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* DeepSeek 行：总余额数字 + 币种小字 */
+.ov-balance {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.ov-balance-num {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.ov-balance-currency {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* 极简总览的一行关键数字 */
+.ov-numbers {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+/* 总览圆点：圆角方形，与账号圆点造型区分 */
+.dot.dot-ov {
+  border-radius: 2.5px;
+}
+
 /* 有自定义背景时：铺满居中（background-image 由面板/设置页内联样式注入：遮罩渐变 + 图片）。
    卡片/底栏按钮改半透明 + 毛玻璃，让背景图透出来（无背景时保持实色） */
 .panel.has-bg {

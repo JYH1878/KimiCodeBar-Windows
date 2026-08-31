@@ -15,6 +15,14 @@
     "pagesAria": "Account pages",
     "addAccountTitle": "Add account"
   },
+  "overview": {
+    "title": "Overview",
+    "fiveHour": "5h",
+    "weekly": "7d",
+    "fiveHourLeft": "5h {{remaining}} left",
+    "weeklyLeft": "7d {{remaining}} left",
+    "refreshFailed": "Refresh failed — showing cached data"
+  },
   "usage": {
     "remaining": "{{remaining}}/{{limit}} left",
     "countdown": {
