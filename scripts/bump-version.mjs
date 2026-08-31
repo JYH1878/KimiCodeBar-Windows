@@ -52,5 +52,6 @@ if (lockM[2] === version) {
 }
 
 console.log(`\n版本号已全部同步为 ${version}，接下来：`);
-console.log(`  git add -A && git commit -m "chore: bump version to ${version}"`);
+console.log(`  git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock`);
+console.log(`  git commit -m "chore: bump version to ${version}"`);
 console.log(`  git push origin main && git tag v${version} && git push origin v${version}`);
