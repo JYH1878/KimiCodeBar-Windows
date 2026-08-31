@@ -50,4 +50,4 @@ windows-sys = { version = "0.61", features = [
 ] }
 # 读注册表 Lxss 键拿 WSL 发行版名单（\\wsl.localhost 根目录无法枚举，
 # 见 local_usage.rs wsl_distro_names）；锁文件已有 0.55.0（传递依赖），不引入新版本
-winreg = "0.55"
+winreg = "0.56"
