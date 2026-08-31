@@ -23,4 +23,5 @@ BLOCKED.md
 调研/
 
 # 本地临时脚本（不进仓库）
-.tmp_*.mimosa/
+.tmp_*
+.mimosa/
