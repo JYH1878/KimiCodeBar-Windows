@@ -11,12 +11,17 @@
   --text-2: #a9b1d6;
   --muted: #7982a9;
   --faint: #565f89;
+  /* 状态灯专用色（比文字色更亮/更暗以过非文本 3:1）：深色下灰灯提亮（原 faint 仅 2.2:1） */
+  --faint-dot: #6b7599;
   --border: #3b4261;
   --border-hover: #565f89;
   --accent: #7aa2f7;
   --accent-hover: #89b4fa;
   --accent-2: #bb9af7;
   --accent-bg: rgba(122, 162, 247, 0.08);
+  /* 大字号数字专用文字色（hero/月度/余额/token 数）：深色下与 accent/danger 同值；
+     浅色下压深保对比度（accent 原色在白底仅 2.5:1，不达大字 3:1 下限） */
+  --accent-text: #7aa2f7;
   --on-accent: #1a1b26;
   --track: #1a1b26;
   --seg-kimi: #3b4261;
@@ -24,13 +29,23 @@
   --danger-2: #ff9e64;
   --danger-border: rgba(247, 118, 142, 0.45);
   --danger-bg: rgba(247, 118, 142, 0.12);
+  --danger-text: #f7768e;
+  /* 提供商徽章分色（总览扫读来源）：深色取主题同族色 */
+  --prov-kimi: #7aa2f7;
+  --prov-deepseek: #bb9af7;
+  --prov-glm: #73daca;
   --ok: #9ece6a;
+  /* 状态灯绿灯：深色下与 --ok 同值；浅色压暗（原色在浅色毛玻璃卡上仅 1.5:1） */
+  --ok-dot: #9ece6a;
   --ok-border: rgba(158, 206, 106, 0.4);
   --ok-bg: rgba(158, 206, 106, 0.12);
   --warn: #e0af68;
   --shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
   /* 自定义背景图上的遮罩（深色：主题底色 45% 透明），压图保卡片文字可读 */
   --bg-scrim: rgba(26, 27, 38, 0.45);
+  /* 关键数字的等宽遥测字体（百分比/金额/token 数）：Cascadia 随 Win11 与 Terminal 预装，
+     Win10 回退 Consolas；中英混排时只有数字与拉丁命中等宽，中文照常回退雅黑 */
+  --font-num: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
 
   font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
   background-color: var(--bg);
@@ -47,10 +62,20 @@
   --text-2: #4b5563;
   --muted: #6e7781;
   --faint: #8b949e;
+  /* 状态灯浅色：绿灯压暗至 #4e7a28（实测最差 4.2:1）、灰灯压暗至 #6e7681（3.8:1） */
+  --ok-dot: #4e7a28;
+  --faint-dot: #6e7681;
   --border: #d0d7de;
   --border-hover: #afb8c1;
   --track: #e5e7eb;
   --seg-kimi: #9aa8bd;
+  /* 浅色大字号数字文字色：蓝 #2b5fd9 白底 5.6:1、红 #d20f39 白底 5.4:1（均过 AA） */
+  --accent-text: #2b5fd9;
+  --danger-text: #d20f39;
+  /* 提供商徽章浅色（文字在 12% 同色淡底上均 ≥4.5:1） */
+  --prov-kimi: #2b5fd9;
+  --prov-deepseek: #7c3aed;
+  --prov-glm: #0f766e;
   --shadow: 0 2px 8px rgba(31, 35, 40, 0.08);
   /* 浅色主题对应的背景遮罩（浅色底 45% 透明） */
   --bg-scrim: rgba(245, 246, 250, 0.45);
@@ -60,6 +85,13 @@
   margin: 0;
   padding: 0;
   box-sizing: border-box;
+}
+
+/* 全局焦点环：主题色描边（--accent-text 深浅主题均过对比度），覆盖行卡/小卡/分段/圆点/按钮；
+   .input 的 outline:none 在后文定义，输入框保持边框式焦点不受影响 */
+:focus-visible {
+  outline: 2px solid var(--accent-text);
+  outline-offset: 2px;
 }
 
 html,
@@ -182,9 +214,9 @@ body,
   transform: scale(1.25);
 }
 
-/* 低额账号的圆点带红色（预览哪页在告警） */
+/* 低额账号的圆点带红色（预览哪页在告警；浅色用 --danger-text 保对比度） */
 .dot.low {
-  background: var(--danger);
+  background: var(--danger-text);
   opacity: 0.85;
 }
 
@@ -235,15 +267,15 @@ body,
   background-color: var(--card-hover);
 }
 
-/* 低额行：左缘红条 + 名称/已用百分比/余额标红（var(--danger) 与圆点 low 同款） */
+/* 低额行：左缘红条 + 名称/剩%/余额标红（文字用 --danger-text 保浅色对比度） */
 .ov-row.low {
   border-left: 3px solid var(--danger);
 }
 
 .ov-row.low .ov-name,
-.ov-row.low .ov-window-pct,
+.ov-row.low .ov-left-pct,
 .ov-row.low .ov-balance-num {
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 /* 低额行的迷你进度条也转红（与 .usage-card.low 同款渐变） */
@@ -251,11 +283,31 @@ body,
   background: linear-gradient(90deg, var(--danger), var(--danger-2));
 }
 
-/* 行头：账号名 + 提供商徽章 */
+/* 行头：状态灯 + 账号名 + 提供商徽章 */
 .ov-row-head {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* 状态灯：绿=正常 / 红=低额（后端 low_warning） / 灰=无数据；颜色同时有 title/aria 文字兜底 */
+.ov-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.ov-dot.ok {
+  background: var(--ok-dot);
+}
+
+.ov-dot.low {
+  background: var(--danger-text);
+}
+
+.ov-dot.none {
+  background: var(--faint-dot);
 }
 
 .ov-name {
@@ -274,10 +326,10 @@ body,
   color: var(--muted);
 }
 
-/* 失败提示小字（无数据时为完整错误文本，可换行） */
+/* 失败提示小字（无数据时为完整错误文本，可换行；文字红用 --danger-text 保浅色对比度） */
 .ov-error {
   font-size: 11px;
-  color: var(--danger);
+  color: var(--danger-text);
   word-break: break-all;
 }
 
@@ -288,18 +340,32 @@ body,
   gap: 8px;
 }
 
+/* 窗口头行：标签 | 重置时间（右靠，过长省略） | 剩 XX%（行尾等宽读数） */
 .ov-window-head {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
+  gap: 8px;
   font-size: 11px;
   color: var(--muted);
 }
 
-.ov-window-pct {
-  font-size: 13px;
+.ov-window-reset {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 「剩 XX%」：监控行的核心读数（等宽，多账号行纵向对位可列扫） */
+.ov-left-pct {
+  flex-shrink: 0;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 15px;
   font-weight: 600;
-  color: var(--text-2);
+  color: var(--text);
 }
 
 /* 细进度条：复用 .progress 的轨道色与填充，压矮一档（8px → 5px） */
@@ -309,17 +375,7 @@ body,
   border-radius: 2.5px;
 }
 
-/* 条下一行小字：剩余量 + 重置时间（文案同 UsageCard 的 usage-foot） */
-.ov-window-foot {
-  margin-top: 3px;
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 11px;
-  color: var(--muted);
-}
-
-/* DeepSeek 行：总余额数字 + 币种小字 */
+/* DeepSeek 行：总余额等宽大数字 + 币种小字 + 可用状态（右端） */
 .ov-balance {
   display: flex;
   align-items: baseline;
@@ -327,9 +383,11 @@ body,
 }
 
 .ov-balance-num {
-  font-size: 20px;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 22px;
   font-weight: 700;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .ov-balance-currency {
@@ -337,10 +395,160 @@ body,
   color: var(--muted);
 }
 
-/* 极简总览的一行关键数字 */
-.ov-numbers {
+.ov-balance-status {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* 消耗视图行：今日大号等宽 token 数 + 「今日」标签 + 昨日小字（右端） */
+.ov-burn {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.ov-burn-today {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--accent-text);
+}
+
+.ov-burn-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.ov-burn-yesterday {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* 总览页头：左标题 + 右分段选择器（额度/消耗） */
+.ov-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 2px;
+}
+
+.ov-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* 分段选择器：浅底轨道胶囊，选中段浮起 */
+.seg {
+  display: flex;
+  padding: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.seg-item {
+  padding: 3px 12px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background-color 0.15s ease,
+    color 0.15s ease;
+}
+
+.seg-item:hover {
+  color: var(--text);
+}
+
+.seg-item.active {
+  background: var(--card-bg);
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: var(--shadow);
+}
+
+/* 极简模式总览：两列小卡网格（10 账号 = 5 行，超出页内滚动） */
+.ov-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.ov-mini {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 10px;
+  background-color: var(--card-bg);
+  box-shadow: var(--shadow);
+  color: var(--text);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.ov-mini:hover {
+  background-color: var(--card-hover);
+}
+
+.ov-mini.low {
+  border-left: 3px solid var(--danger);
+}
+
+.ov-mini .ov-name {
+  font-size: 12px;
+}
+
+/* 小卡关键数字：等宽两行（5小时 剩 98% / 7天 剩 83%；消耗视图=今日 + 昨日） */
+.ov-mini-nums {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
   font-size: 12px;
   color: var(--text-2);
+}
+
+/* 小卡一行：标签定宽（容纳「5小时」），「剩 XX%」上下行左缘对齐 */
+.ov-mini-line {
+  display: flex;
+  align-items: baseline;
+}
+
+.ov-mini-label {
+  flex-shrink: 0;
+  min-width: 3em;
+  color: var(--muted);
+}
+
+.ov-mini-sub {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.ov-mini-money {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent-text);
+}
+
+.ov-mini.low .ov-mini-nums,
+.ov-mini.low .ov-mini-money {
+  color: var(--danger-text);
 }
 
 /* 总览圆点：圆角方形，与账号圆点造型区分 */
@@ -362,8 +570,11 @@ body,
   --card-hover: rgba(238, 240, 246, 0.5);
 }
 
-/* 卡片毛玻璃（半透明度由上方 --card-bg 覆盖驱动，按钮用同一变量自动跟随） */
-.panel.has-bg .pcard {
+/* 卡片毛玻璃（半透明度由上方 --card-bg 覆盖驱动，按钮用同一变量自动跟随）；
+   总览行卡/极简小卡同样压毛玻璃，保持「卡片保持半透明毛玻璃」约定 */
+.panel.has-bg .pcard,
+.panel.has-bg .ov-row,
+.panel.has-bg .ov-mini {
   backdrop-filter: blur(16px);
 }
 
@@ -543,6 +754,12 @@ body,
   color: var(--muted);
 }
 
+/* 行内数字等宽化工具类（如 mini 卡的 ¥ 金额），仅套字体不改字号字重 */
+.num {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+}
+
 /* --- 用量卡 --- */
 
 .usage-head {
@@ -557,14 +774,16 @@ body,
 }
 
 .usage-pct {
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
   font-size: 26px;
   font-weight: 700;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 /* 剩余低于 20%：整体标红 */
 .usage-card.low .usage-pct {
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .progress {
@@ -594,6 +813,61 @@ body,
   color: var(--muted);
 }
 
+/* --- Hero 双联卡（7 天 / 5 小时并置，详情页首屏核心数字） --- */
+
+/* 双联行：两张卡均分卡宽，间距比标准卡距收一档 */
+.hero-row {
+  display: flex;
+  gap: 8px;
+}
+
+/* hero 卡比标准卡矮一截：内边距收紧，纵向让位给下方卡片 */
+.hero-card {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
+}
+
+.hero-title {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* 已用百分比：等宽遥测数字（两卡并置时个/十/百位纵向对位，列扫可比） */
+.hero-pct {
+  margin-top: 2px;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 32px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--accent-text);
+}
+
+/* 剩余低于 20%：数字标红（与 .usage-card.low 同语义同规则） */
+.hero-card.low .hero-pct {
+  color: var(--danger-text);
+}
+
+.hero-progress {
+  margin-top: 6px;
+}
+
+/* 低额时进度条转红（与 .usage-card.low .progress-fill 同款渐变） */
+.hero-card.low .progress-fill {
+  background: linear-gradient(90deg, var(--danger), var(--danger-2));
+}
+
+/* 剩余量 / 重置倒计时两行小字（窄卡内空间换行宽，两行等高对齐双卡） */
+.hero-foot {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
 /* --- 月度总量卡 --- */
 
 /* 分段进度条：Kimi 段与 Code 段连续拼接，两段合计宽度即总已用百分比 */
@@ -618,7 +892,7 @@ body,
   margin-top: -4px;
   padding: 0 4px;
   font-size: 11px;
-  color: var(--danger);
+  color: var(--danger-text);
   word-break: break-all;
 }
 
@@ -626,7 +900,12 @@ body,
 
 /* 低余额：总金额标红（与 .usage-card.low .usage-pct 同语义） */
 .usage-pct.low-text {
-  color: var(--danger);
+  color: var(--danger-text);
+}
+
+/* DeepSeek 页只有这一张主卡：余额数字放大一档作该页 hero（等宽来自 .usage-pct） */
+.balance-card .usage-pct {
+  font-size: 30px;
 }
 
 .balance-rows {
@@ -647,6 +926,25 @@ body,
   margin-left: 8px;
 }
 
+/* 提供商分色徽章：文字取 --prov-*，12% 同色淡底 + 40% 同色描边（深浅主题均过 AA） */
+.provider-badge.pb-kimi {
+  color: var(--prov-kimi);
+  background-color: color-mix(in srgb, var(--prov-kimi) 12%, transparent);
+  border-color: color-mix(in srgb, var(--prov-kimi) 40%, transparent);
+}
+
+.provider-badge.pb-deepseek {
+  color: var(--prov-deepseek);
+  background-color: color-mix(in srgb, var(--prov-deepseek) 12%, transparent);
+  border-color: color-mix(in srgb, var(--prov-deepseek) 40%, transparent);
+}
+
+.provider-badge.pb-glm {
+  color: var(--prov-glm);
+  background-color: color-mix(in srgb, var(--prov-glm) 12%, transparent);
+  border-color: color-mix(in srgb, var(--prov-glm) 40%, transparent);
+}
+
 /* --- 用量趋势卡（手写 SVG，不引图表库） --- */
 
 /* 趋势图 SVG：占满卡宽，高度按 viewBox 比例自适应 */
@@ -664,10 +962,26 @@ body,
   stroke-dasharray: 3 3;
 }
 
-/* 右端图例小字（"7天"/"5h"） */
-.trend-legend-text {
-  font-size: 9px;
-  fill: var(--text-2);
+/* 卡片头行右侧图例（绘图区已无图例占位）：色块 + 小字 */
+.trend-legend {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.trend-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.trend-chip {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex-shrink: 0;
 }
 
 /* 历史数据不足 2 点时的占位文案（高度接近图表，避免卡片跳动） */
@@ -689,9 +1003,11 @@ body,
 }
 
 .local-tokens {
-  font-size: 26px;
+  font-family: var(--font-num);
+  font-variant-numeric: tabular-nums;
+  font-size: 28px;
   font-weight: 700;
-  color: var(--accent);
+  color: var(--accent-text);
 }
 
 .local-today-label {
@@ -782,7 +1098,7 @@ body,
   border: 1px solid var(--danger-border);
   background-color: var(--danger-bg);
   font-size: 12px;
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .error-text {
@@ -889,6 +1205,15 @@ body,
 .footer-actions {
   display: flex;
   gap: 6px;
+}
+
+/* 底栏两按钮同尺寸同行高：inline-flex 使图标与文字垂直居中，固定高度消除 ⟳ 字符与齿轮 SVG 的度量差 */
+.footer-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 10px;
 }
 
 /* 底栏左侧：更新徽标与"更新于"时间横向对齐 */
@@ -1137,7 +1462,7 @@ body,
 
 .hint-err {
   font-size: 12px;
-  color: var(--danger);
+  color: var(--danger-text);
   word-break: break-all;
 }
 
@@ -1173,7 +1498,7 @@ body,
 
 .btn.danger {
   border-color: var(--danger-border);
-  color: var(--danger);
+  color: var(--danger-text);
 }
 
 .btn.danger:hover:not(:disabled) {

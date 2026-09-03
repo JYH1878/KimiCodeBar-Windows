@@ -19,9 +19,13 @@
     "title": "Overview",
     "fiveHour": "5h",
     "weekly": "7d",
-    "fiveHourLeft": "5h {{remaining}} left",
-    "weeklyLeft": "7d {{remaining}} left",
-    "refreshFailed": "Refresh failed — showing cached data"
+    "refreshFailed": "Refresh failed — showing cached data",
+    "segQuota": "Quota",
+    "segBurn": "Tokens",
+    "leftPct": "{{pct}}% left",
+    "dotOk": "Quota healthy",
+    "dotLow": "Quota low",
+    "dotNone": "No data"
   },
   "usage": {
     "remaining": "{{remaining}}/{{limit}} left",

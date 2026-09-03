@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { useTranslation } from "react-i18next";
+import type { TFunction } from "i18next";
 import "./styles.css";
 import i18n, { resolveLang } from "./i18n";
 import { useTheme } from "./theme";
@@ -8,9 +9,10 @@ import type { AccountPanel, HistoryPoint, LocalUsageStats, PanelState, QuotaDeta
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { checkUpdate, getLocalUsage, getPanelState, getSettings, getUsageHistory, isTauri, refreshNow, openSettings, openExternalUrl, onQuotaUpdated, onSettingsChanged, onUpdateInfo } from "./ipc";
 import { UsageCard, resetTimeText } from "./components/UsageCard";
+import { HeroPair } from "./components/HeroPair";
 import { MonthlyCard } from "./components/MonthlyCard";
 import { TrendCard } from "./components/TrendCard";
-import { LocalUsageCard } from "./components/LocalUsageCard";
+import { LocalUsageCard, formatTokens } from "./components/LocalUsageCard";
 import { MembershipCard } from "./components/MembershipCard";
 import { BoosterCard } from "./components/BoosterCard";
 import { ErrorBanner } from "./components/ErrorBanner";
@@ -64,8 +66,8 @@ function AccountPage({
     <section className="page">
       <header className="page-head">
         <span className="page-title">{panel.account.name}</span>
-        {/* 提供商徽章：Kimi / DeepSeek / GLM 同款同色的胶囊，样式由 .page-head flex 与名称胶囊居中对齐 */}
-        <span className="badge provider-badge">{isDeepSeek ? "DeepSeek" : isGlm ? "GLM" : "Kimi"}</span>
+        {/* 提供商徽章：Kimi / DeepSeek / GLM 分色胶囊，样式由 .page-head flex 与名称胶囊居中对齐 */}
+        <span className={`badge provider-badge pb-${panel.account.provider}`}>{isDeepSeek ? "DeepSeek" : isGlm ? "GLM" : "Kimi"}</span>
       </header>
       {/* 该账号未配置任何凭证：页内引导（不挡其他账号页） */}
       {!panel.credential ? (
@@ -102,8 +104,8 @@ function AccountPage({
       ) : (
         <>
           {panel.error !== null && <ErrorBanner error={panel.error} onRetry={onRetry} />}
-          {quota?.weekly && <UsageCard title={t("panel.weeklyUsage")} detail={quota.weekly} />}
-          {quota?.five_hour && <UsageCard title={t("panel.fiveHourUsage")} detail={quota.five_hour} />}
+          {/* Hero 双联卡：7 天 / 5 小时并置（极简模式下同样只保留这一组） */}
+          <HeroPair weekly={quota?.weekly} fiveHour={quota?.five_hour} />
           {/* 以下卡片极简模式全部隐藏：月度总量 / 趋势 / 本地统计 / 总额 / 会员 / Booster。
               GLM 页只有趋势 / 本地统计 / 会员档位（无月度/总额/Booster 接口） */}
           {!minimal && (
@@ -142,16 +144,46 @@ function AccountPage({
   );
 }
 
-/** 总览行：一个账号的关键数字（Kimi/GLM 双迷你进度条 / DeepSeek 余额），点击跳该账号详情页。
- *  极简模式去掉进度条、一行只写关键数字；低额标红直接用后端算好的 low_warning
- *  （DeepSeek 的 is_available=false 后端已并入，前端不重算阈值）。 */
+/** 总览状态灯三态：绿=有数据且未越阈；红=后端 low_warning（DeepSeek 的 is_available=false
+ *  后端已并入，前端不重算阈值；拉取失败恒不为红）；灰=未配置/加载中/无缓存失败 */
+type OvDotState = "ok" | "low" | "none";
+
+function ovDotState(panel: AccountPanel): OvDotState {
+  if (!panel.credential) return "none";
+  const hasData =
+    panel.account.provider === "deepseek" ? (panel.deepseek_balance ?? null) !== null : panel.quota !== null;
+  if (!hasData) return "none";
+  return panel.low_warning ? "low" : "ok";
+}
+
+/** 消耗视图行体：今日大号等宽 token 数 + 昨日小字；未拉取显示占位、从未扫描显示暂无数据 */
+function ovBurnBody(t: TFunction, stats: LocalUsageStats | null): React.ReactNode {
+  if (stats === null) return <p className="ov-hint">…</p>;
+  if (stats.last_scan_at === null) return <p className="ov-hint">{t("panel.noData")}</p>;
+  return (
+    <div className="ov-burn">
+      <span className="ov-burn-today">{formatTokens(stats.today_tokens)}</span>
+      <span className="ov-burn-label">{t("localUsage.today")}</span>
+      <span className="ov-burn-yesterday">
+        {t("localUsage.yesterday", { tokens: formatTokens(stats.yesterday_tokens) })}
+      </span>
+    </div>
+  );
+}
+
+/** 总额度监控行（正常模式）：状态灯 + 名称 + 提供商分色徽章 +
+ *  额度视图（Kimi/GLM 双窗口「标签+重置+剩%」行 + 迷你条；DeepSeek 余额）/ 消耗视图（今日 token）。
+ *  点击跳该账号详情页。 */
 function OverviewRow({
   panel,
-  minimal,
+  seg,
+  stats,
   onOpen,
 }: {
   panel: AccountPanel;
-  minimal: boolean;
+  seg: "quota" | "burn";
+  /** 该账号的本地 token 统计（消耗视图用）；null = 尚未加载 */
+  stats: LocalUsageStats | null;
   onOpen: () => void;
 }) {
   const { t } = useTranslation();
@@ -160,10 +192,16 @@ function OverviewRow({
   const balance = panel.deepseek_balance ?? null;
   // 有无缓存数据（quota / deepseek_balance），决定「加载中 / 失败 / 数据」三分支
   const hasData = isDeepSeek ? balance !== null : quota !== null;
+  const dot = ovDotState(panel);
+  const dotTitle =
+    dot === "low" ? t("overview.dotLow") : dot === "ok" ? t("overview.dotOk") : t("overview.dotNone");
 
   let body: React.ReactNode;
   if (!panel.credential) {
     body = <p className="ov-hint">{t("empty.noCredential")}</p>;
+  } else if (seg === "burn") {
+    // 消耗视图只看本地统计（不依赖 API，配额刷新失败不影响这里）
+    body = ovBurnBody(t, stats);
   } else if (!hasData && panel.error === null) {
     body = <p className="ov-hint">{t("panel.loading")}</p>;
   } else if (!hasData) {
@@ -174,16 +212,13 @@ function OverviewRow({
       <div className="ov-balance">
         <span className="ov-balance-num">{formatMoney(balance.currency, balance.total_balance)}</span>
         <span className="ov-balance-currency">{balance.currency}</span>
+        <span className="ov-balance-status">
+          {balance.is_available ? t("deepseek.statusOk") : t("deepseek.statusUnavailable")}
+        </span>
       </div>
     );
-  } else if (quota !== null && minimal) {
-    // 极简总览：不画进度条，一行关键数字（缺哪个窗口跳过哪个）
-    const parts: string[] = [];
-    if (quota.five_hour) parts.push(t("overview.fiveHourLeft", { remaining: quota.five_hour.remaining }));
-    if (quota.weekly) parts.push(t("overview.weeklyLeft", { remaining: quota.weekly.remaining }));
-    body = <p className="ov-numbers">{parts.length > 0 ? parts.join(" · ") : t("panel.noData")}</p>;
   } else if (quota !== null) {
-    // Kimi/GLM：5 小时 / 7 天两条迷你进度条（文案复用 UsageCard 的 usage.remaining 与 resetTimeText）
+    // Kimi/GLM：5 小时 / 7 天各两行——「标签 + 重置时间 + 剩 XX%」一行，迷你进度条一行
     const windows: Array<{ label: string; detail: QuotaDetail }> = [];
     if (quota.five_hour) windows.push({ label: t("overview.fiveHour"), detail: quota.five_hour });
     if (quota.weekly) windows.push({ label: t("overview.weekly"), detail: quota.weekly });
@@ -196,14 +231,11 @@ function OverviewRow({
             <div key={label} className="ov-window">
               <div className="ov-window-head">
                 <span className="ov-window-label">{label}</span>
-                <span className="ov-window-pct">{Math.round(pctUsed)}%</span>
+                <span className="ov-window-reset">{resetTimeText(detail.reset_time)}</span>
+                <span className="ov-left-pct">{t("overview.leftPct", { pct: Math.round(pctRemaining) })}</span>
               </div>
               <div className="progress ov-progress">
                 <div className="progress-fill" style={{ width: `${pctUsed}%` }} />
-              </div>
-              <div className="ov-window-foot">
-                <span>{t("usage.remaining", { remaining: detail.remaining, limit: detail.limit })}</span>
-                <span>{resetTimeText(detail.reset_time)}</span>
               </div>
             </div>
           );
@@ -217,38 +249,173 @@ function OverviewRow({
   return (
     <button type="button" className={`ov-row${panel.low_warning ? " low" : ""}`} onClick={onOpen}>
       <span className="ov-row-head">
+        <span className={`ov-dot ${dot}`} title={dotTitle} aria-label={dotTitle} />
         <span className="ov-name">{panel.account.name}</span>
-        <span className="badge provider-badge">
+        <span className={`badge provider-badge pb-${panel.account.provider}`}>
           {isDeepSeek ? "DeepSeek" : panel.account.provider === "glm" ? "GLM" : "Kimi"}
         </span>
       </span>
       {body}
-      {/* 有缓存数据但本次刷新失败：数据照显示，另加一行小字失败提示 */}
-      {hasData && panel.error !== null && <p className="ov-error">{t("overview.refreshFailed")}</p>}
+      {/* 有缓存数据但本次刷新失败：数据照显示，另加一行小字失败提示（仅额度视图，消耗视图不依赖配额接口） */}
+      {seg === "quota" && hasData && panel.error !== null && (
+        <p className="ov-error">{t("overview.refreshFailed")}</p>
+      )}
     </button>
   );
 }
 
-/** 总览页（第一页）：一屏列出全部账号的关键数字，点行跳对应账号详情页 */
+/** 极简模式总览小卡（两列网格一员）：状态灯 + 名称 + 一行关键数字（额度=双窗口剩余 / 消耗=今日 token / DeepSeek=余额） */
+function OverviewMiniCard({
+  panel,
+  seg,
+  stats,
+  onOpen,
+}: {
+  panel: AccountPanel;
+  seg: "quota" | "burn";
+  stats: LocalUsageStats | null;
+  onOpen: () => void;
+}) {
+  const { t } = useTranslation();
+  const isDeepSeek = panel.account.provider === "deepseek";
+  const quota = panel.quota;
+  const balance = panel.deepseek_balance ?? null;
+  const hasData = isDeepSeek ? balance !== null : quota !== null;
+  const dot = ovDotState(panel);
+  const dotTitle =
+    dot === "low" ? t("overview.dotLow") : dot === "ok" ? t("overview.dotOk") : t("overview.dotNone");
+
+  let body: React.ReactNode;
+  if (!panel.credential) {
+    body = <p className="ov-hint">{t("empty.noCredential")}</p>;
+  } else if (seg === "burn") {
+    body =
+      stats === null || stats.last_scan_at === null ? (
+        ovBurnBody(t, stats)
+      ) : (
+        <div className="ov-mini-nums">
+          <span>
+            {formatTokens(stats.today_tokens)} {t("localUsage.today")}
+          </span>
+          <span className="ov-mini-sub">
+            {t("localUsage.yesterday", { tokens: formatTokens(stats.yesterday_tokens) })}
+          </span>
+        </div>
+      );
+  } else if (!hasData && panel.error === null) {
+    body = <p className="ov-hint">{t("panel.loading")}</p>;
+  } else if (!hasData) {
+    body = <p className="ov-error">{panel.error}</p>;
+  } else if (isDeepSeek && balance !== null) {
+    body = <p className="ov-mini-money">{formatMoney(balance.currency, balance.total_balance)}</p>;
+  } else if (quota !== null) {
+    // 极简小卡显示剩余百分比（不显示具体额度，跨 provider 口径一致可比）；
+    // 标签定宽，「剩 XX%」上下行左缘对齐
+    const leftPct = (d: QuotaDetail) => Math.round(Math.min(100, Math.max(0, d.percent_remaining)));
+    body = (
+      <div className="ov-mini-nums">
+        {quota.five_hour && (
+          <span className="ov-mini-line">
+            <span className="ov-mini-label">{t("overview.fiveHour")}</span>
+            <span className="ov-mini-val">{t("overview.leftPct", { pct: leftPct(quota.five_hour) })}</span>
+          </span>
+        )}
+        {quota.weekly && (
+          <span className="ov-mini-line">
+            <span className="ov-mini-label">{t("overview.weekly")}</span>
+            <span className="ov-mini-val">{t("overview.leftPct", { pct: leftPct(quota.weekly) })}</span>
+          </span>
+        )}
+        {!quota.five_hour && !quota.weekly && <span>{t("panel.noData")}</span>}
+      </div>
+    );
+  } else {
+    body = null;
+  }
+
+  return (
+    <button type="button" className={`ov-mini${panel.low_warning ? " low" : ""}`} onClick={onOpen}>
+      <span className="ov-row-head">
+        <span className={`ov-dot ${dot}`} title={dotTitle} aria-label={dotTitle} />
+        <span className="ov-name">{panel.account.name}</span>
+      </span>
+      {body}
+    </button>
+  );
+}
+
+/** 总览页（第一页）：页头「总览 + 额度/消耗分段」，正常模式为监控行列表、极简模式为两列小卡网格；
+ *  点行/卡跳对应账号详情页 */
 function OverviewPage({
   accounts,
   minimal,
   onOpen,
+  localUsage,
+  onBurnVisible,
 }: {
   accounts: AccountPanel[];
   minimal: boolean;
   /** 打开第 i 个账号的详情页（调用方 goTo(i+1)） */
   onOpen: (index: number) => void;
+  /** 各账号本地 token 统计（按账号 id 索引，消耗视图用）；未加载的账号缺 key */
+  localUsage: Record<string, LocalUsageStats>;
+  /** 首次切到消耗视图时触发（调用方补拉全部账号的本地统计） */
+  onBurnVisible: () => void;
 }) {
   const { t } = useTranslation();
+  // 分段状态驻留内存：面板隐藏再打开保持上次选择，重启回「额度」
+  const [seg, setSeg] = useState<"quota" | "burn">("quota");
+  const switchSeg = (next: "quota" | "burn") => {
+    if (next === seg) return;
+    setSeg(next);
+    if (next === "burn") onBurnVisible();
+  };
   return (
     <section className="page">
-      <header className="page-head">
-        <span className="page-title">{t("overview.title")}</span>
+      <header className="ov-head">
+        <span className="ov-title">{t("overview.title")}</span>
+        <div className="seg" role="group" aria-label={t("overview.title")}>
+          <button
+            type="button"
+            className={`seg-item${seg === "quota" ? " active" : ""}`}
+            aria-pressed={seg === "quota"}
+            onClick={() => switchSeg("quota")}
+          >
+            {t("overview.segQuota")}
+          </button>
+          <button
+            type="button"
+            className={`seg-item${seg === "burn" ? " active" : ""}`}
+            aria-pressed={seg === "burn"}
+            onClick={() => switchSeg("burn")}
+          >
+            {t("overview.segBurn")}
+          </button>
+        </div>
       </header>
-      {accounts.map((a, i) => (
-        <OverviewRow key={a.account.id} panel={a} minimal={minimal} onOpen={() => onOpen(i)} />
-      ))}
+      {minimal ? (
+        <div className="ov-grid">
+          {accounts.map((a, i) => (
+            <OverviewMiniCard
+              key={a.account.id}
+              panel={a}
+              seg={seg}
+              stats={localUsage[a.account.id] ?? null}
+              onOpen={() => onOpen(i)}
+            />
+          ))}
+        </div>
+      ) : (
+        accounts.map((a, i) => (
+          <OverviewRow
+            key={a.account.id}
+            panel={a}
+            seg={seg}
+            stats={localUsage[a.account.id] ?? null}
+            onOpen={() => onOpen(i)}
+          />
+        ))
+      )}
     </section>
   );
 }
@@ -398,6 +565,13 @@ function PanelApp() {
       .catch(() => {});
   }, []);
 
+  /** 总览切到消耗视图：补拉全部账号的本地统计（只拉没拉过的；后端扫描有节流，重复调便宜） */
+  const fetchAllLocalUsage = useCallback(() => {
+    accounts.forEach((a) => {
+      if (localUsageMap[a.account.id] === undefined) fetchLocalUsage(a.account.id);
+    });
+  }, [accounts, localUsageMap, fetchLocalUsage]);
+
   // 手动刷新：成功用返回值整体替换；失败把错误写进当前页横幅，保留已有缓存
   const doRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -538,7 +712,13 @@ function PanelApp() {
         onPointerCancel={endDrag}
       >
         <div className="pager-track" style={trackStyle}>
-          <OverviewPage accounts={accounts} minimal={minimal} onOpen={(i) => goTo(i + 1)} />
+          <OverviewPage
+            accounts={accounts}
+            minimal={minimal}
+            onOpen={(i) => goTo(i + 1)}
+            localUsage={localUsageMap}
+            onBurnVisible={fetchAllLocalUsage}
+          />
           {accounts.map((a) => (
             <AccountPage
               key={a.account.id}
@@ -597,6 +777,21 @@ function PanelApp() {
               <span className={busy ? "spin" : ""}>⟳</span> {t("panel.refresh")}
             </button>
             <button className="btn" onClick={() => void openSettings()} title={t("panel.settingsTitle")}>
+              {/* 齿轮图标（Feather settings，装饰性，按钮已有文字标签） */}
+              <svg
+                viewBox="0 0 24 24"
+                width="12"
+                height="12"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+              </svg>
               {t("panel.settings")}
             </button>
           </div>

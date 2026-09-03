@@ -21,7 +21,7 @@ export function BoosterCard({ booster }: BoosterCardProps) {
   return (
     <div className="pcard mini-card">
       <div className="mini-title">{t("booster.balanceTitle")}</div>
-      <div className="mini-value">¥{booster.balance_yuan.toFixed(2)}</div>
+      <div className="mini-value num">¥{booster.balance_yuan.toFixed(2)}</div>
       {(used != null || limit != null) && (
         <div className="mini-sub">
           {t("booster.monthly", {

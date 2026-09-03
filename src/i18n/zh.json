@@ -19,9 +19,13 @@
     "title": "总览",
     "fiveHour": "5小时",
     "weekly": "7天",
-    "fiveHourLeft": "5h 剩 {{remaining}}",
-    "weeklyLeft": "7天 剩 {{remaining}}",
-    "refreshFailed": "刷新失败，显示上次缓存数据"
+    "refreshFailed": "刷新失败，显示上次缓存数据",
+    "segQuota": "额度",
+    "segBurn": "消耗",
+    "leftPct": "剩 {{pct}}%",
+    "dotOk": "额度正常",
+    "dotLow": "额度偏低",
+    "dotNone": "暂无数据"
   },
   "usage": {
     "remaining": "剩余 {{remaining}}/{{limit}}",
@@ -131,8 +135,8 @@
       "langEn": "English",
       "theme": "主题",
       "themeSystem": "跟随系统",
-      "themeDark": "深色",
-      "themeLight": "浅色",
+      "themeDark": "月之暗面",
+      "themeLight": "月之亮面",
       "backgroundImage": "面板背景",
       "backgroundNone": "无",
       "backgroundCustom": "自定义图片",
