@@ -154,6 +154,14 @@ export async function getPanelState(): Promise<PanelState> {
   return invoke<PanelState>("get_panel_state");
 }
 
+/** 推送前端实测的面板内容高度（逻辑像素），后端据此自适应窗口高度；
+ *  animate=false（减少动态模式）时后端瞬时到位，否则走 250ms 缓动动画；
+ *  浏览器 mock 为空操作；失败静默（高度校准失败不影响功能） */
+export function setPanelContentHeight(height: number, animate: boolean): void {
+  if (!isTauri) return;
+  invoke("set_panel_content_height", { height, animate }).catch(() => {});
+}
+
 /** 立即刷新一次配额，返回最新面板状态 */
 export async function refreshNow(): Promise<PanelState> {
   if (!isTauri) {

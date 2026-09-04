@@ -7,7 +7,7 @@ import i18n, { resolveLang } from "./i18n";
 import { useTheme } from "./theme";
 import type { AccountPanel, HistoryPoint, LocalUsageStats, PanelState, QuotaDetail, UpdateInfo } from "./types";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { checkUpdate, getLocalUsage, getPanelState, getSettings, getUsageHistory, isTauri, refreshNow, openSettings, openExternalUrl, onQuotaUpdated, onSettingsChanged, onUpdateInfo } from "./ipc";
+import { checkUpdate, getLocalUsage, getPanelState, getSettings, getUsageHistory, isTauri, refreshNow, openSettings, openExternalUrl, onQuotaUpdated, onSettingsChanged, onUpdateInfo, setPanelContentHeight } from "./ipc";
 import { UsageCard, resetTimeText } from "./components/UsageCard";
 import { HeroPair } from "./components/HeroPair";
 import { MonthlyCard } from "./components/MonthlyCard";
@@ -30,10 +30,94 @@ function formatFetchedAt(epochSec: number): string {
 /** 预设背景白名单（与后端 background.rs PRESETS / styles.css .bg-<id> 渐变一致；非法 id 按无背景处理） */
 const BG_PRESETS = ["night", "aurora", "violet", "ember"];
 
-/** 翻页动画时长（与 styles.css .pager-track 的 transition 一致）：动画期间忽略滚轮连击 */
+/** 翻页滑动的名义时长：弹簧时代翻页无固定时长，此值仅用于「压矮窗口延迟到滑动结束」 */
 const PAGE_ANIM_MS = 380;
-/** 滚轮/拖拽触发翻页的阈值（像素） */
-const PAGE_FLIP_THRESHOLD = 50;
+/** 拖拽 commit 阈值（px）：越过才捕获指针并 1:1 跟手，之前放行页内点击 */
+const DRAG_COMMIT_PX = 10;
+/** 滚轮翻页累积阈值（delta 像素，200ms 静默后重新累积）：触摸板轻微滚动不翻页 */
+const WHEEL_FLIP_ACCUM = 50;
+/** 弹簧响应（秒，越小越利落）：非"时长"——沉降时间由参数涌现 */
+const SPRING_RESPONSE = 0.35;
+/** 阻尼比：1.0 = 临界阻尼（默认不回弹）；0.8 = 甩动释放专用的轻微回弹 */
+const SPRING_DAMPING_DEFAULT = 1.0;
+const SPRING_DAMPING_FLICK = 0.8;
+/** 判定「甩动」的释放速度下限（px/s）：超过才允许回弹 */
+const FLICK_VELOCITY = 250;
+
+/** §6 动量投影：指数衰减模型预测松手后的滑行距离（px），手感同 iOS 滚动 */
+function project(velocity: number, decelerationRate = 0.998): number {
+  return (velocity / 1000) * (decelerationRate / (1 - decelerationRate));
+}
+
+/** §9 橡皮筋边界：越过边界越多跟随越少（渐进阻尼，不硬停） */
+function rubberband(overshoot: number, dimension: number, constant = 0.55): number {
+  return (overshoot * dimension * constant) / (dimension + constant * Math.abs(overshoot));
+}
+
+/** 跟随系统「减少动态效果」（Windows 辅助功能关动画时命中）：翻页降级为 200ms 淡入淡出 */
+function usePrefersReducedMotion(): boolean {
+  const [reduced, setReduced] = useState(() => window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const onChange = () => setReduced(mq.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  return reduced;
+}
+
+/** 面板 chrome 高度：上下 padding 18 + 两条 flex gap 20 - 底栏 margin-top 2（styles.css .panel/.footer） */
+const PANEL_CHROME_PX = 36;
+
+/** 内容高度自适应：观测当前页的 .page-body，内容/页码变化时把目标窗口高（内容+圆点+底栏+chrome）
+ *  推给后端；后端据此重算窗口尺寸并重定位（隐藏时记忆，show 时校准）。 */
+function usePanelContentHeight(page: number, ready: boolean) {
+  useEffect(() => {
+    if (!ready || !isTauri) return;
+    const track = document.querySelector(".pager-track");
+    const pageBody = track?.children[page]?.querySelector(".page-body");
+    const dots = document.querySelector(".pager-dots");
+    const footer = document.querySelector(".footer");
+    if (!(pageBody instanceof HTMLElement) || !(dots instanceof HTMLElement) || !(footer instanceof HTMLElement)) {
+      return;
+    }
+    let raf = 0;
+    let shrinkTimer: ReturnType<typeof setTimeout> | null = null;
+    const measure = () => {
+      // 用 getBoundingClientRect 取小数值、向上取整后 +5 逻辑像素兜底：
+      // 逻辑高 × DPI 缩放比存在半像素舍入竞争（614.3 × 1.75 = 1075.5 物理像素，向下舍入
+      // 会让 .page 冒出亚像素溢出滚动条），+5 逻辑像素（肉眼不可见）保证恒不溢出
+      const contentH = pageBody.getBoundingClientRect().height;
+      const desired =
+        Math.ceil(
+          contentH + dots.getBoundingClientRect().height + footer.getBoundingClientRect().height + PANEL_CHROME_PX,
+        ) + 5;
+      const cur = window.innerHeight;
+      if (desired > cur + 0.5) {
+        // 长高立即发：延迟会让高页内容在旧矮窗口里溢出；
+        // 减少动态模式下后端瞬时到位（不播高度缓动）
+        setPanelContentHeight(desired, !window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+      } else if (desired < cur - 2) {
+        // 压矮延迟到翻页滑动结束后发：动画途中压矮会让正在滑出的高页瞬间溢出
+        // （滚动条一闪而过 + 内容被裁切）；滑动期间滚动条另由 .sliding 屏蔽
+        if (shrinkTimer !== null) clearTimeout(shrinkTimer);
+        const animate = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+        shrinkTimer = setTimeout(() => setPanelContentHeight(desired, animate), PAGE_ANIM_MS);
+      }
+    };
+    // rAF 合并同一帧内的多次布局变化；后端另有 2px 阈值防抖
+    const ro = new ResizeObserver(() => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(measure);
+    });
+    ro.observe(pageBody);
+    return () => {
+      cancelAnimationFrame(raf);
+      if (shrinkTimer !== null) clearTimeout(shrinkTimer);
+      ro.disconnect();
+    };
+  }, [page, ready]);
+}
 
 /** 单账号页：页头账号名 + 该账号的卡片组（复用现有卡片，数据全部按账号取）。
  *  极简模式只保留页头 / 错误横幅 / 7天·5小时额度条（未配置凭证引导照常） */
@@ -64,6 +148,8 @@ function AccountPage({
 
   return (
     <section className="page">
+      {/* page-body：内容流容器（fit-content 供窗口自适应测高） */}
+      <div className="page-body">
       <header className="page-head">
         <span className="page-title">{panel.account.name}</span>
         {/* 提供商徽章：Kimi / DeepSeek / GLM 分色胶囊，样式由 .page-head flex 与名称胶囊居中对齐 */}
@@ -140,6 +226,7 @@ function AccountPage({
           )}
         </>
       )}
+      </div>
     </section>
   );
 }
@@ -372,6 +459,8 @@ function OverviewPage({
   };
   return (
     <section className="page">
+      {/* page-body：内容流容器（fit-content 供窗口自适应测高） */}
+      <div className="page-body">
       <header className="ov-head">
         <span className="ov-title">{t("overview.title")}</span>
         <div className="seg" role="group" aria-label={t("overview.title")}>
@@ -416,6 +505,7 @@ function OverviewPage({
           />
         ))
       )}
+      </div>
     </section>
   );
 }
@@ -444,17 +534,36 @@ function PanelApp() {
   // 每分钟触发一次重渲染，让重置倒计时保持新鲜
   const [, setTick] = useState(0);
 
-  // ---- 翻页状态：当前页下标（到头停不循环） ----
+  // ---- 翻页：手势驱动（拖拽 1:1 跟手 + 弹簧吸附），滚轮累积阈值，圆点直达 ----
   const [page, setPage] = useState(0);
-  // 拖拽中的横向位移（px）；非拖拽态为 null（此时轨道带滑动动画）
-  const [dragDelta, setDragDelta] = useState<number | null>(null);
-  // 拖拽跟踪：超过 8px 才认定是拖拽并捕获指针（否则是点击，放行给页内按钮）
-  const dragRef = useRef<{ startX: number; delta: number; capturing: boolean } | null>(null);
-  // 动画期间锁滚轮，防连击翻过多个
-  const wheelLockRef = useRef(false);
   // page 的 ref 镜像（事件回调里读最新页码，避免闭包过期）
   const pageRef = useRef(0);
   pageRef.current = page;
+  // 翻页滑动/弹簧期间屏蔽页内滚动条（压矮落在动画途中时防旧页滚动条闪现）
+  const [sliding, setSliding] = useState(false);
+  const reducedMotion = usePrefersReducedMotion();
+
+  // 轨道位移状态全部在 ref 里：动画帧直写 DOM style，不经 React 重渲染（120Hz 跟手前提）
+  const pagerRef = useRef<HTMLDivElement>(null);
+  const trackRef = useRef<HTMLDivElement>(null);
+  /** 当前位移（px，0 = 第一页；恒等于屏幕上看到的实时 transform） */
+  const posRef = useRef(0);
+  /** 当前速度（px/s） */
+  const velRef = useRef(0);
+  /** 弹簧目标位移（px） */
+  const targetRef = useRef(0);
+  const rafRef = useRef<number | null>(null);
+  const springDampingRef = useRef(SPRING_DAMPING_DEFAULT);
+  /** 拖拽手势：指针位置历史（算释放速度）+ 起点位移；capturing = 已越过 commit 阈值 */
+  const dragRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startPos: number;
+    capturing: boolean;
+    history: Array<{ x: number; t: number }>;
+  } | null>(null);
+  /** 滚轮累积器（触摸板轻微滚动不得翻页：200ms 窗口内累积过阈值才翻） */
+  const wheelAccumRef = useRef({ accum: 0, lastT: 0 });
 
   const accounts = useMemo(() => state?.accounts ?? [], [state]);
   // 页码 0 = 总览页，账号 i 在页码 i+1；面板打开默认停在总览（page 初始值 0）
@@ -463,60 +572,204 @@ function PanelApp() {
   const pageCountRef = useRef(0);
   pageCountRef.current = pageCount;
 
-  /** 翻到指定页（越界钳制：到头停不循环） */
-  const goTo = useCallback((target: number) => {
-    setPage(Math.max(0, Math.min(target, Math.max(0, pageCountRef.current - 1))));
+  // 内容高度自适应：当前页内容驱动窗口高度（翻页/数据到达/极简切换都会重测）
+  usePanelContentHeight(page, state !== null && accounts.length > 0);
+
+  /** 页宽 = 翻页视口宽（.page 宽 100% 与视口一致） */
+  const pageWidth = useCallback(() => pagerRef.current?.clientWidth ?? 336, []);
+
+  /** 把位移直写到轨道（绕过每帧重渲染） */
+  const applyPos = useCallback((x: number) => {
+    posRef.current = x;
+    if (trackRef.current) trackRef.current.style.transform = `translateX(${-x}px)`;
   }, []);
 
-  // 账号增删后页码可能越界（如删掉最后一页）：钳回范围内
-  useEffect(() => {
-    if (page > pageCount - 1) setPage(Math.max(0, pageCount - 1));
-  }, [page, pageCount]);
-
-  // 滚轮翻页：纵向/横向滚动都算，越过阈值翻一页；动画期间忽略
-  const onWheel = useCallback(
-    (e: React.WheelEvent) => {
-      if (pageCount <= 1) return;
-      const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
-      if (wheelLockRef.current || Math.abs(d) < 20) return;
-      const dir = d > 0 ? 1 : -1;
-      const next = pageRef.current + dir;
-      if (next < 0 || next >= pageCountRef.current) return;
-      wheelLockRef.current = true;
-      setTimeout(() => {
-        wheelLockRef.current = false;
-      }, PAGE_ANIM_MS);
-      goTo(next);
+  /** 手写弹簧（§4，damping ratio + response 参数化，rAF 半隐式欧拉积分）：
+   *  从当前实时位移与速度起步（§3 可中断、反向平滑）；不传初速度则沿用当前速度（换目标速度混合不硬切）。
+   *  初速度取绝对 px/s（§5 速度交接无接缝；本实现用绝对值不做归一）。 */
+  const animateTo = useCallback(
+    (targetPx: number, velocity?: number, damping: number = SPRING_DAMPING_DEFAULT) => {
+      targetRef.current = targetPx;
+      if (velocity !== undefined) velRef.current = velocity;
+      springDampingRef.current = damping;
+      setSliding(true);
+      if (rafRef.current !== null) return; // 弹簧在跑：只换目标，运动保持连续
+      const omega = (2 * Math.PI) / SPRING_RESPONSE;
+      const k = omega * omega;
+      let lastT = performance.now();
+      const tick = (now: number) => {
+        const dt = Math.min((now - lastT) / 1000, 0.05); // 钳制帧间隔（防后台恢复大跳）
+        lastT = now;
+        const c = 2 * springDampingRef.current * omega;
+        const t = targetRef.current;
+        const nv = velRef.current + (-k * (posRef.current - t) - c * velRef.current) * dt;
+        let nx = posRef.current + nv * dt;
+        // 沉降：位置与速度都足够小 → 吸附停稳，解除滚动条屏蔽
+        if (Math.abs(nx - t) < 0.05 && Math.abs(nv) < 5) {
+          nx = t;
+          velRef.current = 0;
+          applyPos(nx);
+          rafRef.current = null;
+          setSliding(false);
+          return;
+        }
+        velRef.current = nv;
+        applyPos(nx);
+        rafRef.current = requestAnimationFrame(tick);
+      };
+      rafRef.current = requestAnimationFrame(tick);
     },
-    [goTo, pageCount],
+    [applyPos],
   );
 
-  // 鼠标拖拽翻页：移动超 8px 才跟手（之前不捕获指针，页内按钮点击不受影响），松手过阈值翻页/回弹
+  /** 减少动态：瞬时切页 + 200ms 淡入（切页在 opacity 0 的不可见帧完成） */
+  const jumpWithFade = useCallback(
+    (next: number) => {
+      setPage(next);
+      const x = next * pageWidth();
+      velRef.current = 0;
+      targetRef.current = x;
+      posRef.current = x;
+      const track = trackRef.current;
+      if (track) {
+        track.style.transition = "none";
+        track.style.transform = `translateX(${-x}px)`;
+        track.style.opacity = "0";
+        void track.offsetHeight; // 强制 reflow：让 opacity 0 先生效，再交给 CSS 淡入
+        track.style.transition = "";
+        track.style.opacity = "1";
+      }
+      setSliding(true);
+      setTimeout(() => setSliding(false), 200);
+    },
+    [pageWidth],
+  );
+
+  /** 翻到指定页（越界钳制：到头停不循环）；弹簧起步即当前实时位移与速度 */
+  const goTo = useCallback(
+    (target: number) => {
+      const next = Math.max(0, Math.min(target, Math.max(0, pageCountRef.current - 1)));
+      if (reducedMotion) {
+        if (next !== pageRef.current) jumpWithFade(next);
+        return;
+      }
+      if (next === pageRef.current && rafRef.current === null) return; // 原地不动且弹簧空闲：无事发生
+      setPage(next);
+      animateTo(next * pageWidth(), undefined, SPRING_DAMPING_DEFAULT);
+    },
+    [animateTo, jumpWithFade, pageWidth, reducedMotion],
+  );
+
+  // 卸载时停掉弹簧帧循环
+  useEffect(() => {
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+    };
+  }, []);
+
+  // 账号增删后页码可能越界（如删掉最后一页）：钳回范围内并同步位移（直接吸附，不弹）
+  useEffect(() => {
+    if (page > pageCount - 1) {
+      const next = Math.max(0, pageCount - 1);
+      setPage(next);
+      const x = next * pageWidth();
+      targetRef.current = x;
+      velRef.current = 0;
+      applyPos(x);
+    }
+  }, [page, pageCount, applyPos, pageWidth]);
+
+  // 滚轮翻页：纵/横向都收，delta 在 200ms 窗口内累积过阈值才翻一页（触摸板轻微滚动不翻）；
+  // 弹簧在途时不叠加（防触摸板惯性连翻多页）
+  const onWheel = useCallback(
+    (e: React.WheelEvent) => {
+      if (pageCountRef.current <= 1) return;
+      const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      const now = performance.now();
+      const w = wheelAccumRef.current;
+      if (now - w.lastT > 200) w.accum = 0;
+      w.lastT = now;
+      if (rafRef.current !== null) {
+        w.accum = 0;
+        return;
+      }
+      w.accum += d;
+      if (Math.abs(w.accum) < WHEEL_FLIP_ACCUM) return;
+      const dir = w.accum > 0 ? 1 : -1;
+      w.accum = 0;
+      goTo(pageRef.current + dir);
+    },
+    [goTo],
+  );
+
+  // 拖拽翻页（§2 直接操纵）：越过 10px commit 阈值后捕获指针、页面 1:1 跟手；
+  // 边界橡皮筋（§9）；松手动量投影选落点页（§6）+ 初速度交接弹簧（§5）
   const onPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
-    dragRef.current = { startX: e.clientX, delta: 0, capturing: false };
-  }, []);
-  const onPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    const drag = dragRef.current;
-    if (drag === null) return;
-    const delta = e.clientX - drag.startX;
-    if (!drag.capturing) {
-      if (Math.abs(delta) < 8) return;
-      drag.capturing = true;
-      e.currentTarget.setPointerCapture(e.pointerId);
+    // 打断进行中的弹簧：ref 里的位移/速度就是实时值，拖拽天然从当前值起步（§3 可中断）
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
     }
-    drag.delta = delta;
-    setDragDelta(delta);
+    dragRef.current = {
+      pointerId: e.pointerId,
+      startX: e.clientX,
+      startPos: posRef.current,
+      capturing: false,
+      history: [{ x: e.clientX, t: performance.now() }],
+    };
   }, []);
+
+  const onPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const drag = dragRef.current;
+      if (drag === null || e.pointerId !== drag.pointerId) return;
+      const dx = e.clientX - drag.startX;
+      if (!drag.capturing) {
+        if (Math.abs(dx) < DRAG_COMMIT_PX) return;
+        drag.capturing = true;
+        e.currentTarget.setPointerCapture(e.pointerId);
+        setSliding(true);
+      }
+      // 速度历史：只留最近 100ms 窗口（松手时的初速度从这里来）
+      const now = performance.now();
+      drag.history.push({ x: e.clientX, t: now });
+      while (drag.history.length > 2 && now - drag.history[0].t > 100) drag.history.shift();
+      if (reducedMotion) return; // 减少动态：拖拽不跟手，松手直接淡入淡出到落点页
+      const width = pageWidth();
+      const maxPos = (pageCountRef.current - 1) * width;
+      let pos = drag.startPos - dx;
+      // §9 边界橡皮筋：第一页再向右、最后一页再向左，超出部分渐进阻尼
+      if (pos < 0) pos = -rubberband(-pos, width);
+      else if (pos > maxPos) pos = maxPos + rubberband(pos - maxPos, width);
+      applyPos(pos);
+    },
+    [applyPos, pageWidth, reducedMotion],
+  );
+
   const endDrag = useCallback(() => {
     const drag = dragRef.current;
     dragRef.current = null;
-    setDragDelta(null);
     if (drag === null || !drag.capturing || pageCountRef.current <= 1) return;
-    if (Math.abs(drag.delta) >= PAGE_FLIP_THRESHOLD) {
-      goTo(pageRef.current + (drag.delta < 0 ? 1 : -1));
+    const width = pageWidth();
+    // 释放速度 = 最近 100ms 位移/时间；指针方向与内容位移相反（内容跟手 = -dx）
+    const h = drag.history;
+    let v = 0;
+    if (h.length >= 2) {
+      const dt = (h[h.length - 1].t - h[0].t) / 1000;
+      if (dt > 0) v = -(h[h.length - 1].x - h[0].x) / dt;
     }
-  }, [goTo]);
+    // §6 动量投影预测落点，吸附到最近页（橡皮筋越界时投影自然落回边界页）
+    const projected = posRef.current + project(v);
+    const targetPage = Math.max(0, Math.min(pageCountRef.current - 1, Math.round(projected / width)));
+    setPage(targetPage);
+    if (reducedMotion) {
+      jumpWithFade(targetPage);
+      return;
+    }
+    // §5 初速度交接（无接缝）+ §4：仅甩动释放用 0.8 阻尼允许轻微回弹，其余临界阻尼
+    animateTo(targetPage * width, v, Math.abs(v) > FLICK_VELOCITY ? SPRING_DAMPING_FLICK : SPRING_DAMPING_DEFAULT);
+  }, [animateTo, jumpWithFade, pageWidth, reducedMotion]);
 
   /** 按设置同步背景：预设（白名单校验，纯 CSS class）+ 自定义图（协议 URL，加版本 query 强制重拉） */
   const syncBackground = useCallback((preset: string | null | undefined, filename: string | null | undefined) => {
@@ -694,24 +947,20 @@ function PanelApp() {
   // 有新版本且拿到发布页地址时，底栏"更新于"左侧显示更新徽标
   const updateUrl = update?.has_update ? update.release_url : null;
 
-  // 轨道位移：拖拽态跟手（无动画），非拖拽态按页码定位（带滑动动画）
-  const trackStyle: React.CSSProperties = {
-    transform: `translateX(calc(${-page * 100}% + ${dragDelta ?? 0}px))`,
-    transition: dragDelta === null ? undefined : "none",
-  };
-
   return (
     <div className={panelCls} style={bgStyle}>
-      {/* 横向翻页容器：滚轮 / 拖拽 / 圆点三种翻页方式，到头停不循环 */}
+      {/* 横向翻页容器：滚轮累积 / 拖拽跟手+动量 / 圆点直达，到头停不循环 */}
       <div
         className="pager"
+        ref={pagerRef}
         onWheel={onWheel}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
       >
-        <div className="pager-track" style={trackStyle}>
+        {/* 轨道位移完全由 JS 弹簧直写 style.transform（无 style prop，React 不接管 transform） */}
+        <div ref={trackRef} className={`pager-track${sliding ? " sliding" : ""}${reducedMotion ? " rm" : ""}`}>
           <OverviewPage
             accounts={accounts}
             minimal={minimal}

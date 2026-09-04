@@ -128,15 +128,20 @@ body,
   touch-action: pan-y;
 }
 
-/* 翻页轨道：每页 100% 宽横向排开；位移动画时长与 panel.tsx PAGE_ANIM_MS 一致 */
+/* 翻页轨道：每页 100% 宽横向排开；位移由 JS 弹簧逐帧直写（transform 无 CSS 过渡，防双驱动互相拉扯） */
 .pager-track {
   display: flex;
   height: 100%;
-  transition: transform 0.38s ease;
   will-change: transform;
 }
 
-/* 单账号页：整宽一页，内容超高时页内纵向滚动 */
+/* 减少动态：翻页降级为 200ms 淡入淡出（位移瞬时完成，透明度过渡） */
+.pager-track.rm {
+  will-change: opacity;
+  transition: opacity 200ms ease;
+}
+
+/* 单账号页：整宽一页，内容超高时页内纵向滚动（窗口自适应后极少触发，矮屏/多账号兜底） */
 .page {
   width: 100%;
   flex: 0 0 100%;
@@ -146,7 +151,20 @@ body,
   overflow-x: hidden;
   display: flex;
   flex-direction: column;
+}
+
+/* 页内容器：承载内容流（gap 从 .page 移入）；fit-content 高度供窗口自适应测量；
+   margin 上下 auto 使矮内容（空态/加载态/短页）在页内垂直居中 */
+.page-body {
+  display: flex;
+  flex-direction: column;
   gap: 10px;
+  margin: auto 0;
+}
+
+/* 翻页滑动期间藏起页内滚动条：窗口压矮若落在动画途中，正在滑出的高页会短暂溢出（滚动条一闪而过） */
+.pager-track.sliding .page {
+  overflow: hidden;
 }
 
 /* 页头：账号名胶囊 + 提供商徽章，flex 使两者垂直居中对齐（字号/边框不同也能对齐） */

@@ -247,6 +247,8 @@ pub struct AppState {
     device_login: Mutex<DeviceLoginInner>,
     /// 刷新单航班锁：并发 do_refresh 排队执行，杜绝 loading 快照泄漏卡死
     refresh_lock: tokio::sync::Mutex<()>,
+    /// 前端实测的面板内容高度（逻辑像素；None = 尚未测量，fit 回退配置高/紧凑高）
+    panel_content_height: Mutex<Option<f64>>,
 }
 
 #[derive(Default)]
@@ -309,7 +311,27 @@ impl AppState {
             }),
             device_login: Mutex::new(DeviceLoginInner::default()),
             refresh_lock: tokio::sync::Mutex::new(()),
+            panel_content_height: Mutex::new(None),
         }
+    }
+
+    /// 记录前端实测的面板内容高度（逻辑像素）；返回是否有 ≥0.5px 的有效变化（供调用方决定是否重排窗口）。
+    /// 阈值只挡浮点噪声：前端已按「与 window.innerHeight 实测差」决定是否发送，1px 级增长必须透传（防亚像素溢出滚动条）
+    pub fn set_panel_content_height(&self, height: f64) -> bool {
+        if !height.is_finite() || height <= 0.0 {
+            return false;
+        }
+        let mut h = self.panel_content_height.lock().unwrap();
+        if h.is_some_and(|old| (old - height).abs() < 0.5) {
+            return false;
+        }
+        *h = Some(height);
+        true
+    }
+
+    /// 前端实测的面板内容高度（未测量过为 None）
+    pub fn panel_content_height(&self) -> Option<f64> {
+        *self.panel_content_height.lock().unwrap()
     }
 
     /// 当前内存态组装为 PanelState（settings 每次现读，设置页改阈值即刻生效）
@@ -581,6 +603,16 @@ pub fn get_panel_state(state: State<'_, AppState>) -> PanelState {
     state.snapshot()
 }
 
+/// 前端实测的面板内容高度（逻辑像素）：记忆到 AppState（show 时 fit 用它做基准），
+/// 面板开着时立即重排。高度变化 <0.5px 时跳过防抖。
+/// animate=false（减少动态模式）瞬时到位；true 走 250ms 缓动动画。
+#[tauri::command]
+pub fn set_panel_content_height(app: AppHandle, height: f64, animate: bool) {
+    if app.state::<AppState>().set_panel_content_height(height) {
+        crate::panel::refit_open_panel(&app, animate);
+    }
+}
+
 /// 用量趋势历史（按账号；本地累积的成功刷新采样，纯事实不预测）：
 /// load 后按 t 升序返回；无历史或文件损坏为空数组
 #[tauri::command]
@@ -758,8 +790,8 @@ pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String
     // 全部生效后广播 settings-changed（payload 为钳制后的完整设置），
     // 前端两窗口监听后即时切换语言等；热键失败走 ? 提前返回，不会广播半成品
     let _ = app.emit("settings-changed", AppSettings::from(settings));
-    // 面板正开着时即时重算尺寸并重定位（极简模式开关压矮/恢复窗口）
-    crate::panel::refit_open_panel(&app);
+    // 面板正开着时即时重算尺寸并重定位（极简模式开关压矮/恢复窗口，走缓动动画）
+    crate::panel::refit_open_panel(&app, true);
     Ok(())
 }
 
@@ -2163,6 +2195,7 @@ mod tests {
             inner: Mutex::new(Inner::default()),
             device_login: Mutex::new(DeviceLoginInner::default()),
             refresh_lock: tokio::sync::Mutex::new(()),
+            panel_content_height: Mutex::new(None),
         };
         {
             let mut inner = state.inner.lock().unwrap();

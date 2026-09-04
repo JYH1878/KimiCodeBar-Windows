@@ -76,6 +76,7 @@ fn main() {
         .manage(commands::AppState::new())
         .invoke_handler(tauri::generate_handler![
             commands::get_panel_state,
+            commands::set_panel_content_height,
             commands::get_usage_history,
             commands::get_local_usage,
             commands::refresh_now,
