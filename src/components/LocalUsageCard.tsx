@@ -1,5 +1,5 @@
 import { useTranslation } from "react-i18next";
-import type { DailyUsage, LocalUsageStats } from "../types";
+import type { DailyUsage, HistoryPoint, LocalUsageStats } from "../types";
 
 // 柱状图几何（viewBox 0 0 320 44）：7 根柱，柱宽 28、间距 16，水平居中
 const BAR_W = 28;
@@ -43,15 +43,41 @@ function shortModelName(model: string): string {
 interface LocalUsageCardProps {
   /** 本地统计；null = 尚未加载（不渲染，避免卡片跳动） */
   stats: LocalUsageStats | null;
+  /** 该账号的历史采样点（算「今日已用占周配额」用）；null/缺省 = 未加载或无历史 */
+  history?: HistoryPoint[] | null;
+}
+
+/**
+ * 「今日已用占周配额」纯函数（issue #38）。
+ * 口径：只看**官方周额度已用%的当日增量**（额度消耗情况），与本地 token 消耗无关。
+ * - 基准 = 最后一个 t 早于今日 00:00（本地时区）的点的 weekly；
+ *   没有零点前样本时取今日最早点兜底（此时数字是当日下限）；
+ * - 今日占比 = 最新点 weekly − 基准 weekly；若最新 < 基准（7 天窗口当天重置过）→ 取最新值本身；
+ * - 今日一个点都没有 → null（不显示该行）；所有点 weekly 缺失（DeepSeek / 无套餐）→ null。
+ * 返回未取整的百分数（展示层负责 1 位小数），不封顶。
+ */
+export function todayWeeklyQuotaPct(points: HistoryPoint[], now: Date = new Date()): number | null {
+  const valid = points
+    .filter((p): p is HistoryPoint & { weekly: number } => p.weekly !== null && p.weekly !== undefined)
+    .sort((a, b) => a.t - b.t);
+  if (valid.length === 0) return null;
+  const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000;
+  const todayIdx = valid.findIndex((p) => p.t >= dayStart);
+  if (todayIdx < 0) return null; // 今日无样本
+  const latest = valid[valid.length - 1].weekly;
+  const baseline = todayIdx > 0 ? valid[todayIdx - 1].weekly : valid[todayIdx].weekly;
+  return latest < baseline ? latest : latest - baseline;
 }
 
 /**
  * 本地 Token 消耗卡（扫描 wire.jsonl 的纯本地统计，不依赖 API）：
  * 今日消耗大字 + 昨日小字 + 近 7 天迷你柱状图（今日柱满不透明高亮）
- * + 今日分模型占比一行小字（与卡片主体同为今日窗口，非累计）。
+ * + 今日分模型占比一行小字（与卡片主体同为今日窗口，非累计）
+ * + 「占用周配额」小字内联在「今日」标签后（官方周额度已用%的当日增量，
+ *   issue #38；周配额数据全缺失的账号——DeepSeek / 无套餐——不渲染）。
  * last_scan_at 为空（从未扫描）时整卡不渲染。
  */
-export function LocalUsageCard({ stats }: LocalUsageCardProps) {
+export function LocalUsageCard({ stats, history }: LocalUsageCardProps) {
   const { t } = useTranslation();
   if (stats === null || stats.last_scan_at === null) return null;
 
@@ -71,6 +97,9 @@ export function LocalUsageCard({ stats }: LocalUsageCardProps) {
           .join(" · ")
       : null;
 
+  // 「占用周配额」：周配额历史不足的账号（DeepSeek / 无套餐 / 今日无样本）为 null 不渲染
+  const quotaPct = history ? todayWeeklyQuotaPct(history) : null;
+
   return (
     <div className="pcard local-usage-card">
       <div className="usage-head">
@@ -82,6 +111,11 @@ export function LocalUsageCard({ stats }: LocalUsageCardProps) {
       <div className="local-today-row">
         <span className="local-tokens">{formatTokens(stats.today_tokens)}</span>
         <span className="local-today-label">{t("localUsage.today")}</span>
+        {quotaPct !== null && (
+          <span className="local-today-quota">
+            {t("localUsage.todayQuotaPct", { pct: quotaPct.toFixed(1) })}
+          </span>
+        )}
       </div>
       <svg
         className="local-bars"

@@ -60,7 +60,8 @@
     "title": "本地 Token 消耗",
     "today": "今日",
     "yesterday": "昨日 {{tokens}}",
-    "ariaLabel": "近 7 天每日 Token 消耗柱状图"
+    "ariaLabel": "近 7 天每日 Token 消耗柱状图",
+    "todayQuotaPct": "（占用周额度 {{pct}}%）"
   },
   "membership": {
     "title": "会员等级",

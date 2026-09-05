@@ -177,8 +177,9 @@ function AccountPage({
             {balance !== null && (
               <DeepSeekBalanceCard balance={balance} fetchedAt={panel.fetched_at} low={panel.low_warning} />
             )}
-            {/* 本地 Token 消耗按账号归属，DeepSeek 页同样显示（极简模式隐藏） */}
-            {!minimal && <LocalUsageCard stats={localUsage} />}
+            {/* 本地 Token 消耗按账号归属，DeepSeek 页同样显示（极简模式隐藏）；
+                DeepSeek 无周配额历史，「今日已用占周配额」行自然不渲染 */}
+            {!minimal && <LocalUsageCard stats={localUsage} history={history} />}
           </>
         )
       ) : quota === null && panel.error === null ? (
@@ -202,8 +203,8 @@ function AccountPage({
               {/* 用量趋势（该账号的本地历史采样，纯事实不预测；GLM 同样写采样） */}
               <TrendCard points={history} />
               {/* 本地 Token 消耗（扫描 wire.jsonl 按 CLI 凭证归属）：各 provider 账号同显；
-                  未扫描过（last_scan_at 为空）时整卡不渲染 */}
-              <LocalUsageCard stats={localUsage} />
+                  未扫描过（last_scan_at 为空）时整卡不渲染；history 供「今日已用占周配额」行 */}
+              <LocalUsageCard stats={localUsage} history={history} />
               {!isGlm && quota?.total && (
                 <UsageCard
                   title={t("panel.totalQuota")}

@@ -228,12 +228,15 @@ export function onQuotaUpdated(cb: (state: PanelState) => void): () => void {
 
 /**
  * 获取本地累积的历史采样点（每次成功刷新记录一条，百分比为"已用"语义）。
- * 浏览器 mock 生成近 24 小时、每 10 分钟一个点的合成数据：
- * weekly 从 20 缓慢爬升到 65，five_hour 呈锯齿波（模拟 5 小时窗口到期重置），
+ * 浏览器 mock 生成近 24 小时、每 10 分钟一个点的合成数据（必然跨本地零点）：
+ * weekly 从 20 单调爬升到 65（跨零点 + 单调递增 → 详情页「今日已用占周配额」行
+ * 算出正的当日增量）；five_hour 呈锯齿波（模拟 5 小时窗口到期重置），
  * monthly 从 14 缓升到 15。
+ * DeepSeek 账号与真实后端一致不写历史 → 返回空数组（详情页该行不渲染）。
  */
 export async function getUsageHistory(accountId: string): Promise<HistoryPoint[]> {
   if (!isTauri) {
+    if (accountId === "mock-acc-3") return [];
     const nowSec = Math.floor(Date.now() / 1000);
     const points: HistoryPoint[] = [];
     // 24 小时 × 每小时 6 个点 = 144 个间隔，含首尾共 145 个点
@@ -243,7 +246,7 @@ export async function getUsageHistory(accountId: string): Promise<HistoryPoint[]
       const phase = (i % 30) / 30;
       points.push({
         t: nowSec - 24 * 3600 + i * 600,
-        weekly: Math.min(100, 20 + 45 * ratio + Math.sin(i / 7) * 1.5),
+        weekly: Math.min(100, 20 + 45 * ratio),
         five_hour: Math.min(100, 8 + 80 * phase + Math.sin(i / 5) * 2),
         monthly: 14 + ratio,
       });

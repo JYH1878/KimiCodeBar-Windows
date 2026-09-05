@@ -1034,6 +1034,13 @@ body,
   color: var(--muted);
 }
 
+/* 「占用周配额 X.X%」小字：内联在"今日"标签后，同款弱化灰 */
+.local-today-quota {
+  margin-left: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
 /* 头部右侧"昨日 X"小字 */
 .local-yesterday {
   font-size: 12px;

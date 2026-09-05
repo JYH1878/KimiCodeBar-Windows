@@ -60,7 +60,8 @@
     "title": "Local token usage",
     "today": "today",
     "yesterday": "Yesterday {{tokens}}",
-    "ariaLabel": "Bar chart of daily token usage over the last 7 days"
+    "ariaLabel": "Bar chart of daily token usage over the last 7 days",
+    "todayQuotaPct": "({{pct}}% of weekly quota)"
   },
   "membership": {
     "title": "Membership",
