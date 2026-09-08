@@ -533,7 +533,7 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
     // tooltip 文案语言随设置现读现解析，与 assemble_panel_state 的"设置现读"语义一致
     if total_silence() {
         tracing::info!(
-            "[埋点] KCB_TOTAL_SILENCE=1：本轮跳过 tray 更新与 quota-updated emit（网络与落盘照常）"
+            "KCB_TOTAL_SILENCE=1：本轮跳过 tray 更新与 quota-updated emit（网络与落盘照常）"
         );
     } else {
         let lang = i18n::resolve(
@@ -726,7 +726,7 @@ async fn fetch_update_info() -> UpdateInfo {
 #[tauri::command]
 pub fn open_settings(app: AppHandle, section: Option<String>) {
     if let Some(window) = app.get_webview_window("settings") {
-        tracing::info!("[埋点] window.show+set_focus 调用，caller=commands::open_settings");
+        tracing::info!("window.show+set_focus 调用，caller=commands::open_settings");
         let _ = window.show();
         let _ = window.set_focus();
     }

@@ -11,7 +11,7 @@
 /// 内缩超过 2px 视为「没铺满」，不算全屏
 const COVER_TOLERANCE_PX: i32 = 2;
 
-/// 单次全屏探测快照（埋点取证：每轮轮询打一行，记录判定过程与原始值）。
+/// 单次全屏探测快照（取证用：发送时随探针行落日志，记录判定过程与原始值）。
 #[derive(Debug, Clone)]
 pub struct FullscreenProbe {
     /// SHQueryUserNotificationState 原始状态值（None = API 调用失败）

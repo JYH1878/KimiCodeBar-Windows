@@ -22,10 +22,12 @@ const ICON_WARN: &[u8] = include_bytes!("../icons/tray-warn.png");
 /// 反向保证：low_warning 翻转必改元组首元素，闸门吞不掉换红。
 static LAST_SENT: Mutex<Option<(bool, String)>> = Mutex::new(None);
 
-/// 埋点取证（临时代码，验收后删）：最近一次 update_tray_state 的动作，
-/// polling 每轮取走汇总进探针行。注意：托盘菜单手动刷新也会写它，
-/// 其动作会被归到下一轮探针行（单航班保证不交叉，归因偏差可接受）。
+/// 最近一次 update_tray_state 的动作，polling 取走后在「实际发送」时汇总进探针行。
+/// 注意：托盘菜单手动刷新也会写它，其动作会被归到下一轮（单航班保证不交叉，归因偏差可接受）。
 static LAST_TRAY_ACTION: Mutex<Option<&'static str>> = Mutex::new(None);
+
+/// 守卫命中日志的上升沿记忆：全屏静默期间只打第一行，解除后重置（别长期每轮一行）
+static GUARD_HIT_LOGGED: Mutex<bool> = Mutex::new(false);
 
 /// 记录本轮托盘动作（sent / skipped-diff / skipped-fullscreen / skipped-no-tray）
 fn record_action(action: &'static str) {
@@ -65,10 +67,8 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                     }
                 }
                 let tray_rect = TrayRect::new(rect.position, rect.size);
-                // 埋点取证：panel::toggle_panel（panel.rs）内含 window.show/set_focus，此处记调用方
-                tracing::info!(
-                    "[埋点] 托盘左键点击 → panel::toggle_panel（内含 window.show/set_focus）"
-                );
+                // 取证留痕：panel::toggle_panel（panel.rs）内含 window.show/set_focus，此处记调用方
+                tracing::info!("托盘左键点击 → panel::toggle_panel（内含 window.show/set_focus）");
                 panel::toggle_panel(app, tray_rect);
             }
         })
@@ -81,9 +81,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
             }
             "settings" => {
                 if let Some(window) = app.get_webview_window("settings") {
-                    tracing::info!(
-                        "[埋点] window.show+set_focus 调用，caller=tray::menu(settings)"
-                    );
+                    tracing::info!("window.show+set_focus 调用，caller=tray::menu(settings)");
                     let _ = window.show();
                     let _ = window.set_focus();
                 }
@@ -111,11 +109,15 @@ pub fn update_tray_state(app: &AppHandle, low_warning: bool, tooltip_extra: Opti
     };
     if kimicodebar::fullscreen::fullscreen_app_active() {
         record_action("skipped-fullscreen");
-        tracing::info!(
-            "[埋点] 全屏守卫命中：本轮托盘更新整次跳过（零 Shell_NotifyIcon，不落差分缓存）"
-        );
+        // 守卫命中只在上升沿打一行（全屏静默期不每轮刷屏），解除后由下方正常路径重置
+        let mut logged = GUARD_HIT_LOGGED.lock().unwrap();
+        if !*logged {
+            *logged = true;
+            tracing::info!("全屏守卫命中：托盘更新静默（零 Shell_NotifyIcon），直至退出全屏");
+        }
         return;
     }
+    *GUARD_HIT_LOGGED.lock().unwrap() = false;
     let tooltip = format!("KimiCodeBar{}", tooltip_extra.unwrap_or_default());
     if already_sent(low_warning, &tooltip) {
         record_action("skipped-diff");
@@ -126,7 +128,7 @@ pub fn update_tray_state(app: &AppHandle, low_warning: bool, tooltip_extra: Opti
         let _ = tray.set_icon(Some(icon));
     }
     let _ = tray.set_tooltip(Some(&tooltip));
-    tracing::info!("[埋点] tray set_icon+set_tooltip 实际发送（low_warning={low_warning}），caller=tray::update_tray_state");
+    tracing::info!("tray set_icon+set_tooltip 实际发送（low_warning={low_warning}），caller=tray::update_tray_state");
     mark_sent(low_warning, tooltip);
     record_action("sent");
 }

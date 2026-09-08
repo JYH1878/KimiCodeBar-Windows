@@ -38,7 +38,9 @@ pub fn start(app: AppHandle) {
         timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         if crate::commands::total_silence() {
-            tracing::info!("[埋点] KCB_TOTAL_SILENCE=1：轮询全静默模式（只做网络+落盘，tray/notify/emit 全跳过）");
+            tracing::info!(
+                "KCB_TOTAL_SILENCE=1：轮询全静默模式（只做网络+落盘，tray/notify/emit 全跳过）"
+            );
         }
 
         // 告警基线取启动时的内存态（各账号 cache-<id>.json 预热）：已处于低额的账号
@@ -55,7 +57,7 @@ pub fn start(app: AppHandle) {
         // 用循环局部变量即可（进程内记忆，重启后允许重发），无需 Mutex/static
         let mut last_reminded: HashMap<String, DateTime<Utc>> = HashMap::new();
 
-        // 埋点取证：轮询轮次序号（每轮探针行带号，便于与踢人钟表时刻对齐）
+        // 取证：轮询轮次序号（探针行带号，便于与踢人钟表时刻对齐）
         let mut round: u64 = 0;
 
         loop {
@@ -103,25 +105,30 @@ pub fn start(app: AppHandle) {
             // 收敛已删除账号的去重条目
             last_reminded.retain(|id, _| panel.accounts.iter().any(|a| &a.account.id == id));
 
-            // 埋点取证（临时代码，验收后降级为只在实际发送时打）：每轮一行，
-            // 汇总本轮 tray/notify/emit 动作 + 全屏守卫判定过程（QUNS 原始值 + 前台窗口几何），
-            // 与被踢钟表时刻对照即可定位「踢人瞬间谁在碰系统」
-            let probe = kimicodebar::fullscreen::probe();
+            // 取证日志（2026-09-08 验收后按拍板降级：只在动作实际发送或全静默模式下打，
+            // 不再每轮一行）：汇总本轮 tray/notify/emit 动作 + 全屏守卫判定过程
+            //（QUNS 原始值 + 前台窗口几何），与被踢钟表时刻对照即可定位「踢人瞬间谁在碰系统」
             let tray_action = crate::tray::take_last_tray_action().unwrap_or(if silence {
                 "skipped-silence"
             } else {
                 "not-run"
             });
-            tracing::info!(
-                "[埋点] 轮询探针 #{round}: tray={tray_action} emit={} notify_low=[{}] notify_reset=[{}] quns={:?} heuristic={} guard={} silence={silence} 前台={:?}",
-                if silence { "skipped-silence" } else { "sent" },
-                low_actions.join(","),
-                reset_actions.join(","),
-                probe.quns,
-                probe.heuristic,
-                probe.guard,
-                probe.foreground,
-            );
+            let any_sent = tray_action == "sent"
+                || low_actions.iter().any(|a| a.ends_with(":sent"))
+                || reset_actions.iter().any(|a| a.ends_with(":sent"));
+            if any_sent || silence {
+                let probe = kimicodebar::fullscreen::probe();
+                tracing::info!(
+                    "轮询探针 #{round}: tray={tray_action} emit={} notify_low=[{}] notify_reset=[{}] quns={:?} heuristic={} guard={} silence={silence} 前台={:?}",
+                    if silence { "skipped-silence" } else { "sent" },
+                    low_actions.join(","),
+                    reset_actions.join(","),
+                    probe.quns,
+                    probe.heuristic,
+                    probe.guard,
+                    probe.foreground,
+                );
+            }
 
             // 设置页改了间隔 / 自适应活跃度翻转：重建 interval
             // （下一次 tick 立即触发，顺带马上刷一次，活跃期加密即时生效）
@@ -168,7 +175,7 @@ fn notify_low_warning(
     }
     let body = with_account_name(multi, &account.account.name, &summary);
     tracing::info!(
-        "[埋点] notification.show 调用，caller=polling::notify_low_warning 账号={}",
+        "notification.show 调用，caller=polling::notify_low_warning 账号={}",
         account.account.name
     );
     let _ = app
@@ -296,7 +303,7 @@ fn notify_reset_reminder(
     );
     let body = with_account_name(multi, &account.account.name, &body);
     tracing::info!(
-        "[埋点] notification.show 调用，caller=polling::notify_reset_reminder 账号={}",
+        "notification.show 调用，caller=polling::notify_reset_reminder 账号={}",
         account.account.name
     );
     let _ = app
