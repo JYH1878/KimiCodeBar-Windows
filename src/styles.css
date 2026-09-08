@@ -182,6 +182,12 @@ body,
   content-visibility: visible;
 }
 
+/* 闲时预热（issue #48 第二轮，C 招）：面板空闲时逐页短暂翻 visible 完成首次样式/布局/光栅化
+   并记录实测高（供切页「两页取大」预长），随后还原——离屏页首渲染被移出翻页动画期 */
+.page.preheat {
+  content-visibility: visible;
+}
+
 /* 页头：账号名胶囊 + 提供商徽章，flex 使两者垂直居中对齐（字号/边框不同也能对齐） */
 .page-head {
   display: flex;

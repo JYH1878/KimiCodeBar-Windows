@@ -14,9 +14,12 @@ const MINIMAL_PANEL_HEIGHT: f64 = 350.0;
 const MIN_PANEL_HEIGHT: f64 = 200.0;
 
 /// 内容驱动的高度缓动动画时长 / 帧间隔（开窗前的 fit 不动画，见 fit 的 animate 参数）。
-/// 帧间隔 33ms（30Hz）：缓动观感不劣于 60Hz 的实务下限，比 16ms 少一半系统调用
+/// 帧间隔 4ms（60 次 set_size/250ms，与 240Hz 高分屏刷新率对齐；2026-09-08 领导实机对比
+/// 瞬时/30Hz/68Hz/100 次各档后拍板 60 次档——100 次档无可见增益且排版调用多 67%）：
+/// tokio sleep 在 Windows 被定时器精度（~15.6ms）限到 ~68Hz（实测 13 步/188ms），
+/// 故帧 pacing 用自旋等绝对时刻表——自旋总量 4ms×~60 次/动画、仅沉降/静息收矮触发
 const RESIZE_ANIM_MS: u64 = 250;
-const RESIZE_FRAME_MS: u64 = 33;
+const RESIZE_FRAME_MS: u64 = 4;
 /// 高度动画序号（单调递增）：新动画顶掉进行中的旧动画（可中断，从实时高度起步）
 static RESIZE_ANIM_SEQ: AtomicU64 = AtomicU64::new(0);
 /// 在播动画的目标逻辑高（f64 位模式；0 = 无在播动画），目标防抖用
@@ -188,8 +191,14 @@ fn fit_panel_to_screen(app: &AppHandle, window: &WebviewWindow, tray: TrayRect, 
             return;
         }
     }
-    // animate=false（开窗前校准）一次性到位；animate=true（开窗后内容驱动）走缓动动画
+    // animate=false（开窗前校准 / 切页期高度冻结的瞬时到位）一次性到位；
+    // animate=true（开窗后内容驱动）走缓动动画
     if !animate {
+        // 瞬时到位必须先作废在播的高度动画：否则在播缓动的后续帧会把瞬时结果覆盖回去
+        // （issue #48 第二轮实机取证抓到：上一翻沉降触发的收矮缓动尾帧把下一翻的
+        // 瞬时长高拖回矮值，高页被裁着滑完、沉降后再弹回——窗口高度乱抖的卡顿本体）
+        RESIZE_ANIM_SEQ.fetch_add(1, Ordering::SeqCst);
+        RESIZE_ANIM_TARGET.store(0, Ordering::SeqCst);
         let _ = window.set_size(Size::Logical(LogicalSize::new(conf.width, target_h)));
         return;
     }
@@ -243,6 +252,8 @@ fn animate_height_to(
     let win_w = frame_height_px(width, scale) as i32;
     tauri::async_runtime::spawn(async move {
         let start = std::time::Instant::now();
+        let frame = std::time::Duration::from_millis(RESIZE_FRAME_MS);
+        let mut next_frame = start + frame; // 绝对时刻表（防逐帧漂移）
         loop {
             if RESIZE_ANIM_SEQ.load(Ordering::SeqCst) != seq || !win.is_visible().unwrap_or(false) {
                 clear_anim_target_if_mine(target_h);
@@ -253,13 +264,25 @@ fn animate_height_to(
             let h_px = frame_height_px(h, scale);
             // 底边锚定纯算术：翻转/clamp 用缓存常量每帧重判（翻转可能随高度变化中途触发）
             let (x, y) = anchored_panel_pos(tray, Some(mon), win_w, h_px as i32);
+            // 发帧前再核一次序号：顶部检查到 set_size 之间若被瞬时 set_size（animate=false
+            // 分支会作废旧动画）顶号，这一帧就是覆盖正确结果的「陈帧」（实机抓到：
+            // 收矮动画最后一帧把预长结果拖回矮值，直到下次终审才纠正）
+            if RESIZE_ANIM_SEQ.load(Ordering::SeqCst) != seq {
+                clear_anim_target_if_mine(target_h);
+                return;
+            }
             let _ = win.set_size(Size::Physical(PhysicalSize::new(win_w as u32, h_px)));
             let _ = win.set_position(Position::Physical(PhysicalPosition::new(x, y)));
             if t >= 1.0 {
                 clear_anim_target_if_mine(target_h);
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(RESIZE_FRAME_MS)).await;
+            // 自旋等下一帧时刻（绝对时刻表防漂移）：tokio sleep 被 Windows 定时器精度
+            // （~15.6ms）限到 ~68Hz 拉不满 240Hz；自旋总量 4ms×~60 次/动画，开销可忽略
+            while std::time::Instant::now() < next_frame {
+                std::hint::spin_loop();
+            }
+            next_frame += frame;
         }
     });
 }

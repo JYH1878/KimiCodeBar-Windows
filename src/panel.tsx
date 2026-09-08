@@ -67,15 +67,35 @@ function usePrefersReducedMotion(): boolean {
 /** 面板 chrome 高度：上下 padding 18 + 两条 flex gap 20 - 底栏 margin-top 2（styles.css .panel/.footer） */
 const PANEL_CHROME_PX = 36;
 
+/** 由某页 .page-body 实测高算目标窗口逻辑高（内容 + 翻页圆点 + 底栏 + chrome）。
+ *  用 getBoundingClientRect 取小数值、向上取整后 +5 逻辑像素兜底：
+ *  逻辑高 × DPI 缩放比存在半像素舍入竞争（614.3 × 1.75 = 1075.5 物理像素，向下舍入
+ *  会让 .page 冒出亚像素溢出滚动条），+5 逻辑像素（肉眼不可见）保证恒不溢出 */
+function pageDesiredHeight(pageBody: HTMLElement): number {
+  const dots = document.querySelector(".pager-dots");
+  const footer = document.querySelector(".footer");
+  const dotsH = dots instanceof HTMLElement ? dots.getBoundingClientRect().height : 0;
+  const footerH = footer instanceof HTMLElement ? footer.getBoundingClientRect().height : 0;
+  return Math.ceil(pageBody.getBoundingClientRect().height + dotsH + footerH + PANEL_CHROME_PX) + 5;
+}
+
 /** 内容高度自适应：观测当前页的 .page-body，内容/页码变化时把目标窗口高（内容+圆点+底栏+chrome）
  *  推给后端；后端据此重算窗口尺寸并重定位（隐藏时记忆，show 时校准）。
- *  时序分离（issue #48）：长高瞬时一步到位（animate=false，滑动途中不再播后端高度缓动的
- *  30Hz set_size 整页重排）；压矮不按固定时长定时，挂到翻页弹簧沉降后补发（settleCbsRef，
- *  收矮动画本身仍走 250ms 缓动），减少动态路径由 jumpWithFade 淡入结束冲刷——两条路都不漏。 */
+ *  切页期高度冻结（issue #48 第二轮，B 招）：切页起步时已按「两页取大」瞬时预长
+ *  （preGrowFor 读 pageHeightsRef 实测记忆），冻结期（freezeRef）内 measure 只记录实测高、
+ *  不上报——滑动全程零 set_size；弹簧沉降 / jumpWithFade 淡入结束时冲刷一次终审
+ *  （measure(true)）。收矮/补高走后端 250ms/240Hz 缓动（animate=true，领导实机对比
+ *  瞬时版后拍板；瞬时 set_size 会作废旧动画序号，与下一翻预长不踩踏）。
+ *  非冻结期（面板开着的日常数据到达）：长高瞬时、压矮立即发（不等沉降——静息态
+ *  没有弹簧会来沉降，fresh 打开会停在配置高不收矮，be15f90 遗留的开口，本轮修）。 */
 function usePanelContentHeight(
   page: number,
   ready: boolean,
   settleCbsRef: React.MutableRefObject<Array<() => void>>,
+  freezeRef: React.MutableRefObject<boolean>,
+  pageHeightsRef: React.MutableRefObject<Map<number, number>>,
+  rafRef: React.MutableRefObject<number | null>,
+  settleGuardRef: React.MutableRefObject<(page: number) => boolean>,
 ) {
   useEffect(() => {
     if (!ready || !isTauri) return;
@@ -83,34 +103,45 @@ function usePanelContentHeight(
     settleCbsRef.current = [];
     const track = document.querySelector(".pager-track");
     const pageBody = track?.children[page]?.querySelector(".page-body");
-    const dots = document.querySelector(".pager-dots");
-    const footer = document.querySelector(".footer");
-    if (!(pageBody instanceof HTMLElement) || !(dots instanceof HTMLElement) || !(footer instanceof HTMLElement)) {
+    if (!(pageBody instanceof HTMLElement)) {
       return;
     }
     let raf = 0;
-    // final=false：常规测高（压矮挂到沉降时刻）；final=true：沉降终审（压矮立即发，不再挂起）
+    let recheckTimer = 0; // 终审「内容未齐」跳收后的 +400ms 补测定时器（effect 清理时取消）
+    // final=false：常规测高（冻结期/压矮挂到沉降时刻）；final=true：沉降终审（立即发，不再挂起）
     const measure = (final = false) => {
-      // 用 getBoundingClientRect 取小数值、向上取整后 +5 逻辑像素兜底：
-      // 逻辑高 × DPI 缩放比存在半像素舍入竞争（614.3 × 1.75 = 1075.5 物理像素，向下舍入
-      // 会让 .page 冒出亚像素溢出滚动条），+5 逻辑像素（肉眼不可见）保证恒不溢出
-      const contentH = pageBody.getBoundingClientRect().height;
-      const desired =
-        Math.ceil(
-          contentH + dots.getBoundingClientRect().height + footer.getBoundingClientRect().height + PANEL_CHROME_PX,
-        ) + 5;
+      const desired = pageDesiredHeight(pageBody);
+      // 实测高记忆：B 招「两页取大」预长与 C 招闲时预热共用（每次测到都刷新，内容变高记忆跟随）
+      pageHeightsRef.current.set(page, desired);
       const cur = window.innerHeight;
+      if (freezeRef.current && !final) {
+        // 切页冻结期：滑动全程零 set_size，一律挂到沉降终审统一瞬时到位
+        settleCbsRef.current = [() => measure(true)];
+        return;
+      }
       if (desired > cur + 0.5) {
         // 长高立即瞬时发（animate=false）：一步到位既防高页内容在旧矮窗口溢出，
         // 又不在滑动途中播后端高度缓动；同时作废挂起的压矮补发（防沉降后按旧值压矮）
         settleCbsRef.current = [];
         setPanelContentHeight(desired, false);
       } else if (desired < cur - 2) {
-        // 压矮延迟到翻页弹簧沉降后发：动画途中压矮会让正在滑出的高页瞬间溢出
-        // （滚动条一闪而过 + 内容被裁切）；滑动期间滚动条另由 .sliding 屏蔽
-        const animate = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-        if (final) {
-          setPanelContentHeight(desired, animate);
+        // 压矮分两态：过渡在播（弹簧在跑/冻结期，已由上面冻结分支拦下或在此判定）挂沉降终审——
+        // 动画途中压矮会让正在滑出的高页瞬间溢出（滚动条一闪而过 + 内容被裁切）；
+        // 静息态（rafRef 空且未冻结，如 fresh 打开/数据到达）没有高页在滑，立即发
+        // （等沉降会永远不到：没翻页就没有弹簧，be15f90 遗留的开口）。
+        // 发送走 animate=true：后端 250ms/240Hz 缓动收矮（领导实机对比瞬时版后拍板）；
+        // 后端瞬时 set_size 会作废旧动画序号，与下一翻预长不踩踏
+        if (final || rafRef.current === null) {
+          // 内容未齐守卫（收矮步进实验实机抓到的冷启动竞态，与 pacing 无关）：
+          // 终审时该页数据卡片还在路上（历史/本地统计首拉未完成或加载动画在播），
+          // 实测高是半成品——本次不收矮（宁可窗口暂大），+400ms 补测兜底；
+          // 数据到达撑高内容另有 RO 补测接管（长高恒即时）
+          if (final && settleGuardRef.current(page)) {
+            window.clearTimeout(recheckTimer);
+            recheckTimer = window.setTimeout(() => measure(true), 400);
+          } else {
+            setPanelContentHeight(desired, true);
+          }
         } else {
           settleCbsRef.current = [() => measure(true)];
         }
@@ -124,9 +155,10 @@ function usePanelContentHeight(
     ro.observe(pageBody);
     return () => {
       cancelAnimationFrame(raf);
+      window.clearTimeout(recheckTimer);
       ro.disconnect();
     };
-  }, [page, ready, settleCbsRef]);
+  }, [page, ready, settleCbsRef, freezeRef, pageHeightsRef, rafRef, settleGuardRef]);
 }
 
 /** 单账号页：页头账号名 + 该账号的卡片组（复用现有卡片，数据全部按账号取）。
@@ -569,6 +601,16 @@ function PanelApp() {
   );
   /** 翻页弹簧沉降回调队列：压矮窗口的补发挂在此刻发（usePanelContentHeight 挂入、沉降时冲刷） */
   const settleCbsRef = useRef<Array<() => void>>([]);
+  /** 切页期高度冻结标记（issue #48 第二轮 B 招）：true 期间 measure 只记录实测高不上报
+   *  （滑动全程零 set_size），沉降/淡入结束时冲刷一次终审 */
+  const freezeRef = useRef(false);
+  /** 各页实测内容高记忆（页码 → 目标窗口逻辑高）：B 招「两页取大」预长与 C 招闲时预热共用 */
+  const pageHeightsRef = useRef(new Map<number, number>());
+  /** 各账号历史/本地统计首拉在途集合（账号 id）：沉降终审「内容未齐守卫」用 */
+  const pendingFetchRef = useRef(new Set<string>());
+  /** 沉降终审守卫（渲染期赋值，同 pageRef 模式）：目标页内容未齐（首拉在途/加载动画在播）
+   *  时本次不收矮——实测高是半成品，收了会裁内容（冷启动首翻数据晚到实机抓到） */
+  const settleGuardRef = useRef<(page: number) => boolean>(() => false);
   /** 当前位移（px，0 = 第一页；恒等于屏幕上看到的实时 transform） */
   const posRef = useRef(0);
   /** 当前速度（px/s） */
@@ -595,8 +637,24 @@ function PanelApp() {
   const pageCountRef = useRef(0);
   pageCountRef.current = pageCount;
 
+  // 沉降终审守卫实现（渲染期赋值，读最新 accounts/DOM）：数据首拉在途或加载动画在播 = 内容未齐
+  settleGuardRef.current = (p: number) => {
+    const acc = p > 0 ? accounts[p - 1] : undefined;
+    if (acc !== undefined && pendingFetchRef.current.has(acc.account.id)) return true;
+    const el = trackRef.current?.children[p];
+    return el?.querySelector(".page-loading") != null;
+  };
+
   // 内容高度自适应：当前页内容驱动窗口高度（翻页/数据到达/极简切换都会重测）
-  usePanelContentHeight(page, state !== null && accounts.length > 0, settleCbsRef);
+  usePanelContentHeight(
+    page,
+    state !== null && accounts.length > 0,
+    settleCbsRef,
+    freezeRef,
+    pageHeightsRef,
+    rafRef,
+    settleGuardRef,
+  );
 
   /** 页宽 = 翻页视口宽（.page 宽 100% 与视口一致） */
   const pageWidth = useCallback(() => pagerRef.current?.clientWidth ?? 336, []);
@@ -605,6 +663,19 @@ function PanelApp() {
   const applyPos = useCallback((x: number) => {
     posRef.current = x;
     if (trackRef.current) trackRef.current.style.transform = `translateX(${-x}px)`;
+  }, []);
+
+  /** B 招「两页取大」预长（issue #48 第二轮）：切页起步、动画第一帧前，把窗口瞬时长到
+   *  max(当前高, 目标页实测记忆高)——这是整个滑动期唯一一次 set_size（之后冻结到沉降）。
+   *  只长不缩（收矮一律留到沉降终审）；目标页高度未知（首翻、预热未及）则不预长，
+   *  退化为旧行为：冻结期测得后由沉降终审一次瞬时到位。 */
+  const preGrowFor = useCallback((next: number) => {
+    if (!isTauri) return;
+    const known = pageHeightsRef.current.get(next) ?? 0;
+    const growTo = Math.max(window.innerHeight, known);
+    if (growTo > window.innerHeight + 0.5) {
+      setPanelContentHeight(growTo, false);
+    }
   }, []);
 
   /** 手写弹簧（§4，damping ratio + response 参数化，rAF 半隐式欧拉积分）：
@@ -627,13 +698,14 @@ function PanelApp() {
         const t = targetRef.current;
         const nv = velRef.current + (-k * (posRef.current - t) - c * velRef.current) * dt;
         let nx = posRef.current + nv * dt;
-        // 沉降：位置与速度都足够小 → 吸附停稳，解除滚动条屏蔽并冲刷挂起的收矮补发
+        // 沉降：位置与速度都足够小 → 吸附停稳，解除滚动条屏蔽与高度冻结，并冲刷挂起的收矮补发
         if (Math.abs(nx - t) < 0.05 && Math.abs(nv) < 5) {
           nx = t;
           velRef.current = 0;
           applyPos(nx);
           rafRef.current = null;
           setTrackSliding(false);
+          freezeRef.current = false; // 先解冻：冲刷出的沉降终审（measure(true)）要真正能发
           const cbs = settleCbsRef.current;
           settleCbsRef.current = [];
           cbs.forEach((cb) => cb());
@@ -651,6 +723,9 @@ function PanelApp() {
   /** 减少动态：瞬时切页 + 200ms 淡入（切页在 opacity 0 的不可见帧完成） */
   const jumpWithFade = useCallback(
     (next: number) => {
+      // B 招这条路径同样不漏：高度冻结起步 + 「两页取大」瞬时预长
+      freezeRef.current = true;
+      preGrowFor(next);
       setPage(next);
       const x = next * pageWidth();
       velRef.current = 0;
@@ -666,16 +741,17 @@ function PanelApp() {
         track.style.opacity = "1";
       }
       setTrackSliding(true);
-      // 减少动态没有弹簧沉降：淡入结束（200ms）即视作沉降，冲刷挂起的收矮补发——
+      // 减少动态没有弹簧沉降：淡入结束（200ms）即视作沉降，解冻并冲刷挂起的收矮补发——
       // 这条路径不许漏，否则 reduced-motion 用户切到矮页后窗口永不收矮
       setTimeout(() => {
         setTrackSliding(false);
+        freezeRef.current = false; // 先解冻：冲刷出的沉降终审（measure(true)）要真正能发
         const cbs = settleCbsRef.current;
         settleCbsRef.current = [];
         cbs.forEach((cb) => cb());
       }, 200);
     },
-    [pageWidth, setTrackSliding],
+    [pageWidth, preGrowFor, setTrackSliding],
   );
 
   /** 翻到指定页（越界钳制：到头停不循环）；弹簧起步即当前实时位移与速度 */
@@ -687,10 +763,13 @@ function PanelApp() {
         return;
       }
       if (next === pageRef.current && rafRef.current === null) return; // 原地不动且弹簧空闲：无事发生
+      // B 招：高度冻结起步 + 「两页取大」瞬时预长——动画第一帧前完成切页期唯一一次长高
+      freezeRef.current = true;
+      preGrowFor(next);
       setPage(next);
       animateTo(next * pageWidth(), undefined, SPRING_DAMPING_DEFAULT);
     },
-    [animateTo, jumpWithFade, pageWidth, reducedMotion],
+    [animateTo, jumpWithFade, pageWidth, preGrowFor, reducedMotion],
   );
 
   // 卸载时停掉弹簧帧循环
@@ -763,6 +842,9 @@ function PanelApp() {
         drag.capturing = true;
         e.currentTarget.setPointerCapture(e.pointerId);
         setTrackSliding(true);
+        // 拖拽跟手期同样冻结高度（滑动中收矮会裁切高页）；单页不冻——
+        // 单页 endDrag 提前返回形不成翻页，冻了没人解
+        if (pageCountRef.current > 1) freezeRef.current = true;
       }
       // 速度历史：只留最近 100ms 窗口（松手时的初速度从这里来）
       const now = performance.now();
@@ -783,7 +865,12 @@ function PanelApp() {
   const endDrag = useCallback(() => {
     const drag = dragRef.current;
     dragRef.current = null;
-    if (drag === null || !drag.capturing || pageCountRef.current <= 1) return;
+    if (drag === null || !drag.capturing || pageCountRef.current <= 1) {
+      // 未形成翻页（未越过捕获阈值/单页/纯点击）：摘下捕获时可能上的冻结
+      // （点击路径：pointerdown 打断了弹簧却没翻页，冻结若挂着会让静息态收矮永远等沉降）
+      freezeRef.current = false;
+      return;
+    }
     const width = pageWidth();
     // 释放速度 = 最近 100ms 位移/时间；指针方向与内容位移相反（内容跟手 = -dx）
     const h = drag.history;
@@ -795,14 +882,17 @@ function PanelApp() {
     // §6 动量投影预测落点，吸附到最近页（橡皮筋越界时投影自然落回边界页）
     const projected = posRef.current + project(v);
     const targetPage = Math.max(0, Math.min(pageCountRef.current - 1, Math.round(projected / width)));
-    setPage(targetPage);
     if (reducedMotion) {
       jumpWithFade(targetPage);
       return;
     }
+    // B 招（goTo 同路径）：高度冻结起步 + 「两页取大」瞬时预长，滑动全程零 set_size
+    freezeRef.current = true;
+    preGrowFor(targetPage);
+    setPage(targetPage);
     // §5 初速度交接（无接缝）+ §4：仅甩动释放用 0.8 阻尼允许轻微回弹，其余临界阻尼
     animateTo(targetPage * width, v, Math.abs(v) > FLICK_VELOCITY ? SPRING_DAMPING_FLICK : SPRING_DAMPING_DEFAULT);
-  }, [animateTo, jumpWithFade, pageWidth, reducedMotion]);
+  }, [animateTo, jumpWithFade, pageWidth, preGrowFor, reducedMotion]);
 
   /** 按设置同步背景：预设（白名单校验，纯 CSS class）+ 自定义图（协议 URL，加版本 query 强制重拉） */
   const syncBackground = useCallback((preset: string | null | undefined, filename: string | null | undefined) => {
@@ -837,16 +927,16 @@ function PanelApp() {
     });
   }, [syncBackground]);
 
-  /** 拉取某账号的历史采样（失败静默，保留旧曲线） */
-  const fetchHistory = useCallback((accountId: string) => {
-    getUsageHistory(accountId)
+  /** 拉取某账号的历史采样（失败静默，保留旧曲线）；返回 Promise 供首屏预热等待齐套 */
+  const fetchHistory = useCallback((accountId: string): Promise<void> => {
+    return getUsageHistory(accountId)
       .then((h) => setHistoryMap((m) => ({ ...m, [accountId]: h })))
       .catch(() => {});
   }, []);
 
-  /** 拉取某账号的本地 token 统计（失败静默，保留旧数据） */
-  const fetchLocalUsage = useCallback((accountId: string) => {
-    getLocalUsage(accountId)
+  /** 拉取某账号的本地 token 统计（失败静默，保留旧数据）；返回 Promise 供首屏预热等待齐套 */
+  const fetchLocalUsage = useCallback((accountId: string): Promise<void> => {
+    return getLocalUsage(accountId)
       .then((u) => setLocalUsageMap((m) => ({ ...m, [accountId]: u })))
       .catch(() => {});
   }, []);
@@ -857,6 +947,72 @@ function PanelApp() {
       if (localUsageMap[a.account.id] === undefined) fetchLocalUsage(a.account.id);
     });
   }, [accounts, localUsageMap, fetchLocalUsage]);
+
+  /** C 招：离屏页闲时预热（issue #48 第二轮），首屏状态到达后跑一次。
+   *  先预取全部账号的趋势/本地统计（首翻时数据已在手，消灭「数据到达挤进动画第一帧」的
+   *  冷启动长帧）；齐套后逐个离屏详情页短暂翻 .preheat visible，完成首次样式/布局/光栅化
+   *  并把实测高写进 pageHeightsRef——B 招「两页取大」预长因此恒有数据，离屏页首渲染
+   *  整体移出翻页动画期。弹簧在跑/正是当前页则让路重排；测高主路径不受影响
+   *  （RO 仍只观测 .active 页，这里直接量离屏页 .page-body 写记忆）。返回取消函数。 */
+  const preheatPages = useCallback(
+    (accList: AccountPanel[]): (() => void) => {
+      let cancelled = false;
+      const ric = (cb: () => void) => {
+        if ("requestIdleCallback" in window) {
+          window.requestIdleCallback(cb, { timeout: 800 });
+        } else {
+          setTimeout(cb, 64);
+        }
+      };
+      if (!isTauri) {
+        // mock 环境无需测高，只预取数据即可（预热渲染在浏览器 mock 里无意义——窗口高度不自适应）
+        accList.forEach((a) => {
+          void fetchHistory(a.account.id);
+          void fetchLocalUsage(a.account.id);
+        });
+        return () => {
+          cancelled = true;
+        };
+      }
+      void Promise.allSettled(
+        accList.flatMap((a) => [fetchHistory(a.account.id), fetchLocalUsage(a.account.id)]),
+      ).then(() => {
+        if (cancelled) return;
+        const queue = accList.map((_, i) => i + 1); // 详情页 1..N（总览页 0 首屏恒已渲染测过）
+        const step = () => {
+          if (cancelled) return;
+          const next = queue.shift();
+          if (next === undefined) return;
+          if (rafRef.current !== null || pageRef.current === next) {
+            queue.push(next); // 动画期/正是当前页：让路，排回队尾
+            ric(step);
+            return;
+          }
+          const el = trackRef.current?.children[next];
+          if (!(el instanceof HTMLElement)) {
+            ric(step);
+            return;
+          }
+          el.classList.add("preheat"); // 短暂翻 visible 完成首次渲染（含 SVG 趋势图）
+          requestAnimationFrame(() => {
+            if (!cancelled && el.isConnected) {
+              const body = el.querySelector(".page-body");
+              if (body instanceof HTMLElement) {
+                pageHeightsRef.current.set(next, pageDesiredHeight(body));
+              }
+              el.classList.remove("preheat");
+            }
+            ric(step);
+          });
+        };
+        ric(step);
+      });
+      return () => {
+        cancelled = true;
+      };
+    },
+    [fetchHistory, fetchLocalUsage],
+  );
 
   // 手动刷新：成功用返回值整体替换；失败把错误写进当前页横幅，保留已有缓存
   const doRefresh = useCallback(async () => {
@@ -881,11 +1037,14 @@ function PanelApp() {
 
   useEffect(() => {
     let alive = true;
+    let cancelPreheat: (() => void) | undefined;
     // 先取缓存状态立即渲染，保证断网也能秒开
     getPanelState()
       .then((s) => {
         if (!alive) return;
         setState(s);
+        // C 招：首屏状态到达后闲时预热全部离屏页（含数据预取，一次性）
+        cancelPreheat = preheatPages(s.accounts);
         // 有任一账号已配置凭证则紧接着后台刷新一次最新数据
         if (s.accounts.some((a) => a.credential)) void doRefresh();
       })
@@ -920,17 +1079,20 @@ function PanelApp() {
     const timer = setInterval(() => setTick((t) => t + 1), 60_000);
     return () => {
       alive = false;
+      cancelPreheat?.();
       unlisten();
       unlistenUpdate();
       clearInterval(timer);
     };
-  }, [doRefresh, fetchHistory, fetchLocalUsage]);
+  }, [doRefresh, fetchHistory, fetchLocalUsage, preheatPages]);
 
   // 翻页后按需补拉该账号的历史采样（还没拉过的话）；页码 0 是总览页没有当前账号，accounts[-1] 为 undefined 自然跳过
   useEffect(() => {
     const cur = accounts[page - 1];
     if (cur !== undefined && historyMap[cur.account.id] === undefined) {
-      fetchHistory(cur.account.id);
+      const id = cur.account.id;
+      pendingFetchRef.current.add(id); // 在途标记：沉降终审「内容未齐守卫」读它
+      void fetchHistory(id).finally(() => pendingFetchRef.current.delete(id));
     }
   }, [page, accounts, historyMap, fetchHistory]);
 
@@ -938,7 +1100,9 @@ function PanelApp() {
   useEffect(() => {
     const cur = accounts[page - 1];
     if (cur !== undefined && localUsageMap[cur.account.id] === undefined) {
-      fetchLocalUsage(cur.account.id);
+      const id = cur.account.id;
+      pendingFetchRef.current.add(id); // 在途标记：沉降终审「内容未齐守卫」读它
+      void fetchLocalUsage(id).finally(() => pendingFetchRef.current.delete(id));
     }
   }, [page, accounts, localUsageMap, fetchLocalUsage]);
 
