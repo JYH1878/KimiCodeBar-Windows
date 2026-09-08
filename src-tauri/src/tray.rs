@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -12,6 +14,13 @@ pub const TRAY_ID: &str = "main-tray";
 /// 常规 / 低额度预警 两套托盘图标（编译期嵌入）
 const ICON_NORMAL: &[u8] = include_bytes!("../icons/tray-normal.png");
 const ICON_WARN: &[u8] = include_bytes!("../icons/tray-warn.png");
+
+/// 差分闸门：上次**实际发送**到系统 shell 的 (低额告警, tooltip 全文)；None = 启动后尚未发过。
+/// 轮询每轮都调 update_tray_state，tooltip 含百分比几乎每轮都变，是唯一每轮必碰
+/// Shell_NotifyIcon 的动作（任务栏闪烁/全屏踢出元凶）——无差分就零系统调用。
+/// 全屏守卫跳过时**不落缓存**：退出全屏后的下一轮必不匹配，自然补发一次。
+/// 反向保证：low_warning 翻转必改元组首元素，闸门吞不掉换红。
+static LAST_SENT: Mutex<Option<(bool, String)>> = Mutex::new(None);
 
 /// 创建系统托盘图标：左键切换主面板，右键弹出菜单（刷新 / 设置 / 退出）。
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
@@ -68,14 +77,38 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
 /// 按告警状态切换托盘图标，并更新 tooltip（"KimiCodeBar" + 可选的额度摘要行）。
 /// tooltip_extra 形如 "\n7天剩余 87% · 5h剩余 36%"（英文 "\n7D left 87% · 5H left 36%"，
 /// 由 do_refresh 按语言设置组装）。
+///
+/// 两道静默闸门（全屏不闪任务栏）：
+/// ① 全屏守卫——全屏应用（游戏/演示）活跃时整次跳过，连 Shell_NotifyIcon 都不碰，
+///    且不同步差分缓存（退出全屏后下一轮自然补发）；
+/// ② 差分闸门——与上次实际发送一致时零系统调用（见 LAST_SENT）。
 pub fn update_tray_state(app: &AppHandle, low_warning: bool, tooltip_extra: Option<String>) {
     let Some(tray) = app.tray_by_id(TRAY_ID) else {
         return;
     };
+    if kimicodebar::fullscreen::fullscreen_app_active() {
+        return;
+    }
+    let tooltip = format!("KimiCodeBar{}", tooltip_extra.unwrap_or_default());
+    if already_sent(low_warning, &tooltip) {
+        return;
+    }
     let bytes: &[u8] = if low_warning { ICON_WARN } else { ICON_NORMAL };
     if let Ok(icon) = tauri::image::Image::from_bytes(bytes) {
         let _ = tray.set_icon(Some(icon));
     }
-    let tooltip = format!("KimiCodeBar{}", tooltip_extra.unwrap_or_default());
     let _ = tray.set_tooltip(Some(&tooltip));
+    mark_sent(low_warning, tooltip);
+}
+
+/// 差分比对：与上次实际发送完全一致 → true（本次可整段跳过）
+fn already_sent(low_warning: bool, tooltip: &str) -> bool {
+    let last = LAST_SENT.lock().unwrap();
+    matches!(&*last, Some((lw, tt)) if *lw == low_warning && tt == tooltip)
+}
+
+/// 记录本次已实际发送的状态（set_icon/set_tooltip 失败也记：托盘操作本就 best-effort，
+/// 记了失败态下轮不再重发，不记则 shell 异常时每轮空转重试）
+fn mark_sent(low_warning: bool, tooltip: String) {
+    *LAST_SENT.lock().unwrap() = Some((low_warning, tooltip));
 }

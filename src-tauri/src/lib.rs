@@ -5,6 +5,7 @@ pub mod accounts;
 pub mod background;
 pub mod creds;
 pub mod deepseek;
+pub mod fullscreen;
 pub mod glm;
 pub mod history;
 pub mod i18n;

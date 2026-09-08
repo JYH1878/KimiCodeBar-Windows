@@ -101,6 +101,11 @@ pub fn start(app: AppHandle) {
 /// low_warn_enabled 且该账号配额存在时发系统通知，正文为各窗口剩余百分比（语言随设置）；
 /// 多账号时正文前缀账号名（"工作号 · 7天剩余 8%"），单账号只给摘要
 fn notify_low_warning(app: &AppHandle, account: &AccountPanel, multi: bool) {
+    // 全屏守卫：游戏/演示全屏时静默（错过不补发——调用方随后的 prev_low 基线重建照常，
+    // 本轮低额不会在退出全屏后重发）
+    if kimicodebar::fullscreen::fullscreen_app_active() {
+        return;
+    }
     let settings = storage::load_settings().unwrap_or_default();
     if !settings.low_warn_enabled {
         return;
@@ -194,6 +199,11 @@ fn notify_reset_reminder(
     // 与低额度预警共用同一个通知总开关，不新增设置项
     let settings = storage::load_settings().unwrap_or_default();
     if !settings.low_warn_enabled {
+        return None;
+    }
+    // 全屏守卫：游戏/演示全屏时静默。返回 None 不记去重（不挂账）：
+    // 退出全屏时若仍在 15 分钟窗口内，下一轮自然提醒；错过窗口则不补发
+    if kimicodebar::fullscreen::fullscreen_app_active() {
         return None;
     }
     // 仅 5 小时窗口：7 天窗口周期太长，"用完"语义弱，不提醒
