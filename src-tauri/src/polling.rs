@@ -37,6 +37,10 @@ pub fn start(app: AppHandle) {
         // 单次刷新可能超过间隔时，错过的 tick 顺延而非补发，避免连续重刷
         timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
+        if crate::commands::total_silence() {
+            tracing::info!("[埋点] KCB_TOTAL_SILENCE=1：轮询全静默模式（只做网络+落盘，tray/notify/emit 全跳过）");
+        }
+
         // 告警基线取启动时的内存态（各账号 cache-<id>.json 预热）：已处于低额的账号
         // 不重复提醒，只在某账号"由正常变低额"的跳变瞬间通知一次（按账号 id 跟踪）
         let mut prev_low: HashMap<String, bool> = app
@@ -51,18 +55,25 @@ pub fn start(app: AppHandle) {
         // 用循环局部变量即可（进程内记忆，重启后允许重发），无需 Mutex/static
         let mut last_reminded: HashMap<String, DateTime<Utc>> = HashMap::new();
 
+        // 埋点取证：轮询轮次序号（每轮探针行带号，便于与踢人钟表时刻对齐）
+        let mut round: u64 = 0;
+
         loop {
             // tokio interval 首个 tick 立即完成：启动即刷一次
             timer.tick().await;
+            round += 1;
+            let silence = crate::commands::total_silence();
 
             let panel = do_refresh(&app).await;
             let multi = panel.accounts.len() > 1;
 
             // 低额跳变通知：逐账号比较（拉取失败的账号 low_warning 恒为 false，不会触发）
+            let mut low_actions: Vec<String> = Vec::new();
             for account in &panel.accounts {
                 let was_low = prev_low.get(&account.account.id).copied().unwrap_or(false);
                 if account.low_warning && !was_low {
-                    notify_low_warning(&app, account, multi);
+                    let action = notify_low_warning(&app, account, multi, silence);
+                    low_actions.push(format!("{}:{action}", account.account.name));
                 }
             }
             // 重建基线：收敛掉已删除账号的条目，不留残留
@@ -74,17 +85,43 @@ pub fn start(app: AppHandle) {
 
             // 5h 窗口重置前提醒：逐账号检查，且只在该账号刷新成功（error 为空）后，
             // 避免拿陈旧缓存误报
+            let mut reset_actions: Vec<String> = Vec::new();
             for account in &panel.accounts {
                 if account.error.is_some() {
                     continue;
                 }
                 let last = last_reminded.get(&account.account.id).copied();
-                if let Some(reset_time) = notify_reset_reminder(&app, account, last, multi) {
+                let (reminded, action) = notify_reset_reminder(&app, account, last, multi, silence);
+                if let Some(reset_time) = reminded {
                     last_reminded.insert(account.account.id.clone(), reset_time);
+                }
+                // 常态动作（每轮都 not-due / DeepSeek 无配额）不进探针行，只留有意义事件
+                if action != "not-due" && action != "no-quota" {
+                    reset_actions.push(format!("{}:{action}", account.account.name));
                 }
             }
             // 收敛已删除账号的去重条目
             last_reminded.retain(|id, _| panel.accounts.iter().any(|a| &a.account.id == id));
+
+            // 埋点取证（临时代码，验收后降级为只在实际发送时打）：每轮一行，
+            // 汇总本轮 tray/notify/emit 动作 + 全屏守卫判定过程（QUNS 原始值 + 前台窗口几何），
+            // 与被踢钟表时刻对照即可定位「踢人瞬间谁在碰系统」
+            let probe = kimicodebar::fullscreen::probe();
+            let tray_action = crate::tray::take_last_tray_action().unwrap_or(if silence {
+                "skipped-silence"
+            } else {
+                "not-run"
+            });
+            tracing::info!(
+                "[埋点] 轮询探针 #{round}: tray={tray_action} emit={} notify_low=[{}] notify_reset=[{}] quns={:?} heuristic={} guard={} silence={silence} 前台={:?}",
+                if silence { "skipped-silence" } else { "sent" },
+                low_actions.join(","),
+                reset_actions.join(","),
+                probe.quns,
+                probe.heuristic,
+                probe.guard,
+                probe.foreground,
+            );
 
             // 设置页改了间隔 / 自适应活跃度翻转：重建 interval
             // （下一次 tick 立即触发，顺带马上刷一次，活跃期加密即时生效）
@@ -99,32 +136,48 @@ pub fn start(app: AppHandle) {
 }
 
 /// low_warn_enabled 且该账号配额存在时发系统通知，正文为各窗口剩余百分比（语言随设置）；
-/// 多账号时正文前缀账号名（"工作号 · 7天剩余 8%"），单账号只给摘要
-fn notify_low_warning(app: &AppHandle, account: &AccountPanel, multi: bool) {
+/// 多账号时正文前缀账号名（"工作号 · 7天剩余 8%"），单账号只给摘要。
+/// 返回本轮动作（埋点探针行用）：sent / skipped-silence / skipped-fullscreen /
+/// disabled / no-quota / empty-summary
+fn notify_low_warning(
+    app: &AppHandle,
+    account: &AccountPanel,
+    multi: bool,
+    silence: bool,
+) -> &'static str {
+    // 全静默取证开关：整次跳过，连系统通知 API 都不碰
+    if silence {
+        return "skipped-silence";
+    }
     // 全屏守卫：游戏/演示全屏时静默（错过不补发——调用方随后的 prev_low 基线重建照常，
     // 本轮低额不会在退出全屏后重发）
     if kimicodebar::fullscreen::fullscreen_app_active() {
-        return;
+        return "skipped-fullscreen";
     }
     let settings = storage::load_settings().unwrap_or_default();
     if !settings.low_warn_enabled {
-        return;
+        return "disabled";
     }
     let Some(quota) = &account.quota else {
-        return;
+        return "no-quota";
     };
     let lang = i18n::resolve(settings.language.as_deref());
     let summary = i18n::quota_summary(lang, quota);
     if summary.is_empty() {
-        return;
+        return "empty-summary";
     }
     let body = with_account_name(multi, &account.account.name, &summary);
+    tracing::info!(
+        "[埋点] notification.show 调用，caller=polling::notify_low_warning 账号={}",
+        account.account.name
+    );
     let _ = app
         .notification()
         .builder()
         .title(i18n::low_warning_title(lang))
         .body(i18n::low_warning_body(lang, &body))
         .show();
+    "sent"
 }
 
 /// 多账号时给通知正文加账号名前缀（"·" 分隔，语言中立）；单账号原样返回
@@ -189,32 +242,44 @@ fn reset_remind_due(
 
 /// 该账号 5h 窗口重置前提醒：low_warn_enabled 开着、5h 窗口剩余量 > 0（已烧完没必要提醒）
 /// 且进入重置前 15 分钟窗口时，发系统通知；多账号时正文前缀账号名。
-/// 返回本次提醒针对的重置时刻（调用方用于去重）；未提醒返回 None。
+/// 返回（本次提醒针对的重置时刻，调用方用于去重；未提醒为 None）+
+/// （本轮动作，埋点探针行用）：sent / skipped-silence / skipped-fullscreen /
+/// disabled / no-quota / drained / no-reset / not-due
 fn notify_reset_reminder(
     app: &AppHandle,
     account: &AccountPanel,
     last_reminded: Option<DateTime<Utc>>,
     multi: bool,
-) -> Option<DateTime<Utc>> {
+    silence: bool,
+) -> (Option<DateTime<Utc>>, &'static str) {
     // 与低额度预警共用同一个通知总开关，不新增设置项
     let settings = storage::load_settings().unwrap_or_default();
     if !settings.low_warn_enabled {
-        return None;
+        return (None, "disabled");
+    }
+    // 全静默取证开关：整次跳过，连系统通知 API 都不碰
+    if silence {
+        return (None, "skipped-silence");
     }
     // 全屏守卫：游戏/演示全屏时静默。返回 None 不记去重（不挂账）：
     // 退出全屏时若仍在 15 分钟窗口内，下一轮自然提醒；错过窗口则不补发
     if kimicodebar::fullscreen::fullscreen_app_active() {
-        return None;
+        return (None, "skipped-fullscreen");
     }
     // 仅 5 小时窗口：7 天窗口周期太长，"用完"语义弱，不提醒
-    let five_hour: &QuotaDetail = account.quota.as_ref()?.five_hour.as_ref()?;
+    let five_hour: &QuotaDetail = match account.quota.as_ref().and_then(|q| q.five_hour.as_ref()) {
+        Some(detail) => detail,
+        None => return (None, "no-quota"),
+    };
     if five_hour.remaining <= 0.0 {
-        return None;
+        return (None, "drained");
     }
-    let reset_time = five_hour.reset_time?;
+    let Some(reset_time) = five_hour.reset_time else {
+        return (None, "no-reset");
+    };
     let now = Utc::now();
     if !reset_remind_due(now, reset_time, last_reminded) {
-        return None;
+        return (None, "not-due");
     }
 
     // 剩余分钟数四舍五入，至少显示 1（如 14.9 分钟 → 15，30 秒 → 1 而非 0）
@@ -230,6 +295,10 @@ fn notify_reset_reminder(
         &five_hour.reset_time_text(),
     );
     let body = with_account_name(multi, &account.account.name, &body);
+    tracing::info!(
+        "[埋点] notification.show 调用，caller=polling::notify_reset_reminder 账号={}",
+        account.account.name
+    );
     let _ = app
         .notification()
         .builder()
@@ -237,7 +306,7 @@ fn notify_reset_reminder(
         .body(body)
         .show();
     // 无论系统通知是否真正弹出都记为已提醒：通知服务异常时不应每个 tick 重试
-    Some(reset_time)
+    (Some(reset_time), "sent")
 }
 
 #[cfg(test)]

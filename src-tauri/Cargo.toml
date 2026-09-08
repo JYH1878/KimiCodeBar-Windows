@@ -40,15 +40,21 @@ rusqlite = { version = "0.40.2", features = ["bundled"] }
 # credentials.json 的 DPAPI 加密（CryptProtectData / CryptUnprotectData，CurrentUser 作用域），
 # CLI 模式的 AttachConsole / FreeConsole（Win32_System_Console，见 cli.rs），
 # 以及系统区域探测 GetUserDefaultLocaleName（Win32_Globalization，见 i18n.rs），
-# 全屏应用探测 SHQueryUserNotificationState（Win32_UI_Shell，见 fullscreen.rs）。
+# 全屏应用探测 SHQueryUserNotificationState（Win32_UI_Shell，见 fullscreen.rs）
+# 与前台窗口几何启发式（GetForegroundWindow/GetWindowRect/GetClassNameW →
+# Win32_UI_WindowsAndMessaging，MonitorFromWindow/GetMonitorInfoW → Win32_Graphics_Gdi，
+# OpenProcess/QueryFullProcessImageNameW 取 exe 名 → Win32_System_Threading，均见 fullscreen.rs）。
 # 复用依赖树中已有的 windows-sys，仅启用所需 feature。
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Globalization",
+    "Win32_Graphics_Gdi",
     "Win32_Security_Cryptography",
     "Win32_System_Console",
+    "Win32_System_Threading",
     "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 # 读注册表 Lxss 键拿 WSL 发行版名单（\\wsl.localhost 根目录无法枚举，
 # 见 local_usage.rs wsl_distro_names）；锁文件已有 0.55.0（传递依赖），不引入新版本

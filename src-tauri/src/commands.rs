@@ -31,6 +31,13 @@ use kimicodebar::i18n;
 /// 面板距上次成功刷新超过该秒数，再次显示时触发后台刷新
 const STALE_SECS: i64 = 60;
 
+/// 全静默取证开关（KCB_TOTAL_SILENCE=1，A/B 实验用，不设设置项不入 README）：
+/// 轮询只做网络+落盘，跳过 tray 更新 / 系统通知 / quota-updated emit。
+/// 若此开关开着游戏仍被踢，即证明轮询链路零系统调用、真凶另有其人。
+pub fn total_silence() -> bool {
+    std::env::var("KCB_TOTAL_SILENCE").is_ok_and(|v| v == "1")
+}
+
 /// 应用设置（与 src/types.ts 的 AppSettings 一一对应，snake_case；Deserialize 用于收参）。
 /// 注意：账号列表与登录方式不在此（属 Account / settings.json 的 accounts 数组，
 /// 由 list_accounts / add_account 等账号命令管理）
@@ -524,20 +531,26 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
 
     // 更新托盘（图标 + tooltip 摘要）：任一账号低额即变红，tooltip 取最差账号摘要。
     // tooltip 文案语言随设置现读现解析，与 assemble_panel_state 的"设置现读"语义一致
-    let lang = i18n::resolve(
-        storage::load_settings()
-            .unwrap_or_default()
-            .language
-            .as_deref(),
-    );
-    tray::update_tray_state(
-        app,
-        any_low_warning(&panel),
-        worst_account_tooltip(&panel, lang),
-    );
+    if total_silence() {
+        tracing::info!(
+            "[埋点] KCB_TOTAL_SILENCE=1：本轮跳过 tray 更新与 quota-updated emit（网络与落盘照常）"
+        );
+    } else {
+        let lang = i18n::resolve(
+            storage::load_settings()
+                .unwrap_or_default()
+                .language
+                .as_deref(),
+        );
+        tray::update_tray_state(
+            app,
+            any_low_warning(&panel),
+            worst_account_tooltip(&panel, lang),
+        );
 
-    // 通知前端状态已变化
-    let _ = app.emit("quota-updated", &panel);
+        // 通知前端状态已变化
+        let _ = app.emit("quota-updated", &panel);
+    }
 
     panel
 }
@@ -713,6 +726,7 @@ async fn fetch_update_info() -> UpdateInfo {
 #[tauri::command]
 pub fn open_settings(app: AppHandle, section: Option<String>) {
     if let Some(window) = app.get_webview_window("settings") {
+        tracing::info!("[埋点] window.show+set_focus 调用，caller=commands::open_settings");
         let _ = window.show();
         let _ = window.set_focus();
     }
