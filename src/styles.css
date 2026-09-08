@@ -699,6 +699,19 @@ body,
   min-width: 0;
 }
 
+/* 团子外包的按钮壳：视觉零变化（去 button 默认边框/底色/padding），布局尺寸全由内层 .mascot 决定；
+   总览页保持默认游标，仅非总览页（.clickable 由 JS 置位）为手型 */
+.footer .mascot-btn {
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: default;
+}
+
+.footer .mascot-btn.clickable {
+  cursor: pointer;
+}
+
 /* 团子撑满底栏整行高度：行高约 49px（右列 43 + 行上下 padding 5/1），
    负 margin 吃掉 padding 部分；团子上距卡片约 10px、下距窗口底约 8px */
 .footer .mascot {

@@ -1014,8 +1014,20 @@ function PanelApp() {
       </nav>
 
       <div className="footer">
-        {/* 底栏团子（矢量 SVG，复刻上游 AnimatedKimiCodeLogo，纯装饰） */}
-        <Tuanzi className="mascot" />
+        {/* 底栏团子（矢量 SVG，复刻上游 AnimatedKimiCodeLogo）：外包 button 承载「点按回总览」，
+            视觉零变化（壳样式去默认边框/底色）；总览页不可点（处理器直接 return，不置灰、无 pointer） */}
+        <button
+          type="button"
+          className={`mascot-btn${page !== 0 ? " clickable" : ""}`}
+          title={t("panel.backToOverview")}
+          aria-label={t("panel.backToOverview")}
+          onClick={() => {
+            if (page === 0) return;
+            goTo(0);
+          }}
+        >
+          <Tuanzi className="mascot" />
+        </button>
         <div className="footer-right">
           <div className="footer-actions">
             <button
