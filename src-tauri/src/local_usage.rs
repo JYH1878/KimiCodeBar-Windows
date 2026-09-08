@@ -1347,14 +1347,82 @@ fn wsl_distro_names() -> Vec<String> {
     Vec::new()
 }
 
+/// 正在运行的 WSL 发行版名单：`wsl.exe -l --running -q`（只查询，不拉起任何停止的
+/// 发行版——而访问停止发行版的 \\wsl.localhost\<distro> 路径会把 VM 拉起来，
+/// 轮询每 5 分钟拉起一次 = 全屏游戏被踢/焦点丢失的疑似真凶）。任何失败（无 wsl.exe、
+/// 非零退出）返回 None，调用方据此 fail-closed 本轮停扫（绝不冒拉起 VM 的风险）。
+#[cfg(windows)]
+fn wsl_running_distros() -> Option<Vec<String>> {
+    use std::os::windows::process::CommandExt;
+    // CREATE_NO_WINDOW：本进程是无控制台的 GUI 程序，防派生控制台窗口闪现
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let out = std::process::Command::new("wsl.exe")
+        .args(["-l", "--running", "-q"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(parse_wsl_distro_list(&out.stdout))
+}
+
+/// 非 Windows 无 WSL：恒 None（桩为跨平台编译兜底）
+#[cfg(not(windows))]
+fn wsl_running_distros() -> Option<Vec<String>> {
+    None
+}
+
+/// 解析 `wsl -l -q` 输出（纯函数，可单测）：现代 WSL 输出 UTF-16LE（可带可不带
+/// BOM，特征是近半字节为 NUL），旧版 UTF-8；按行拆分、去空白、丢空行。
+fn parse_wsl_distro_list(raw: &[u8]) -> Vec<String> {
+    let sample = &raw[..raw.len().min(64)];
+    let nul_ratio = sample.iter().filter(|&&b| b == 0).count() as f64 / sample.len().max(1) as f64;
+    let text = if raw.starts_with(&[0xFF, 0xFE]) || nul_ratio > 0.2 {
+        let stripped = raw.strip_prefix(&[0xFF, 0xFE]).unwrap_or(raw);
+        let units: Vec<u16> = stripped
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        String::from_utf16_lossy(&units)
+    } else {
+        String::from_utf8_lossy(raw).into_owned()
+    };
+    text.lines()
+        .map(|l| l.trim_matches('\0').trim())
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// 已注册 ∩ 正在运行的发行版交集（纯函数，可单测）：大小写不敏感
+/// （注册表名与 wsl -l 输出的大小写在不同版本间漂移过）
+fn filter_running_distros(registered: Vec<String>, running: &[String]) -> Vec<String> {
+    registered
+        .into_iter()
+        .filter(|d| running.iter().any(|r| r.eq_ignore_ascii_case(d)))
+        .collect()
+}
+
 /// WSL 侧 CLI home 发现（薄壳）：注册表拿发行版名单 + 以 \\wsl.localhost 为根调纯函数。
-/// 环境变量 KIMICODEBAR_WSL_ROOT 可改写根（测试把扫描指向伪造/不存在目录做环境隔离，
-/// 生产不设）；注册表名单为空（未装 WSL）时纯函数零迭代，不会触碰 \\wsl.localhost
+/// **只扫正在运行的发行版**：访问停止发行版的 UNC 路径会把 WSL 虚拟机拉起来
+/// （2026-09-08 实机确认本机 Ubuntu 常年 Stopped，每次轮询扫描 = 一次 VM 冷启动）。
+/// wsl.exe 查询失败（None）时本轮停扫。环境变量 KIMICODEBAR_WSL_ROOT 可改写根
+/// （测试把扫描指向伪造/不存在目录做环境隔离，生产不设），改写时跳过运行态过滤——
+/// 测试根本来就不碰真实 UNC。
 fn wsl_homes() -> Vec<PathBuf> {
-    let root = std::env::var_os("KIMICODEBAR_WSL_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(r"\\wsl.localhost"));
-    wsl_homes_from(&root, &wsl_distro_names())
+    if let Some(root) = std::env::var_os("KIMICODEBAR_WSL_ROOT").map(PathBuf::from) {
+        return wsl_homes_from(&root, &wsl_distro_names());
+    }
+    let Some(running) = wsl_running_distros() else {
+        return Vec::new();
+    };
+    let registered = wsl_distro_names();
+    let targets = filter_running_distros(registered.clone(), &running);
+    if targets.is_empty() && !registered.is_empty() {
+        tracing::info!("WSL 发行版均未在运行，本轮跳过 WSL home 扫描（不拉起停止的 VM）");
+    }
+    wsl_homes_from(Path::new(r"\\wsl.localhost"), &targets)
 }
 
 /// 扫描状态路径：{config_dir}/scan-state.json（config_dir 规则与 storage.rs 一致）
@@ -4395,6 +4463,51 @@ api_key = "glm-key-nobody"
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    // ---- WSL 运行态过滤（只扫活着的发行版，访问停止的发行版会拉起 VM）----
+
+    /// 造 `wsl -l -q` 的 UTF-16LE 输出字节（可带 BOM）
+    fn utf16le(s: &str, bom: bool) -> Vec<u8> {
+        let mut raw = if bom { vec![0xFF, 0xFE] } else { Vec::new() };
+        for u in s.encode_utf16() {
+            raw.extend_from_slice(&u.to_le_bytes());
+        }
+        raw
+    }
+
+    #[test]
+    fn wsl_list_parses_utf16le_with_and_without_bom() {
+        // 现代 WSL：UTF-16LE 带 BOM
+        let with_bom = utf16le("Ubuntu\r\nUbuntu-22.04\r\n", true);
+        assert_eq!(
+            parse_wsl_distro_list(&with_bom),
+            vec!["Ubuntu", "Ubuntu-22.04"]
+        );
+        // 不带 BOM（NUL 密度判定）：同样解出
+        let no_bom = utf16le("Ubuntu\r\n", false);
+        assert_eq!(parse_wsl_distro_list(&no_bom), vec!["Ubuntu"]);
+    }
+
+    #[test]
+    fn wsl_list_parses_utf8_and_skips_blank_lines() {
+        assert_eq!(
+            parse_wsl_distro_list(b"Ubuntu\n\r\nDebian\r\n"),
+            vec!["Ubuntu", "Debian"]
+        );
+        assert_eq!(parse_wsl_distro_list(b""), Vec::<String>::new());
+        assert_eq!(parse_wsl_distro_list(b"\r\n\r\n"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn wsl_filter_running_is_case_insensitive_intersection() {
+        let registered = vec!["Ubuntu".to_string(), "Debian".to_string()];
+        let running = vec!["ubuntu".to_string()];
+        assert_eq!(filter_running_distros(registered, &running), vec!["Ubuntu"]);
+        // 全部停止 → 空名单（不扫 = 不拉 VM）
+        assert_eq!(
+            filter_running_distros(vec!["Ubuntu".to_string()], &[]),
+            Vec::<String>::new()
+        );
+    }
     /// 端到端：发现的 WSL home 用自己 config.toml 的 api_key 快照归属（scan_fresh 的
     /// WSL 段同款串联：发现 → 各 home 自己的快照 → 扫描）——命中登记的 key 归该账号，
     /// 未登记的落未归属桶，与本地 home 同一规则
