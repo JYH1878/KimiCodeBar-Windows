@@ -30,8 +30,6 @@ function formatFetchedAt(epochSec: number): string {
 /** 预设背景白名单（与后端 background.rs PRESETS / styles.css .bg-<id> 渐变一致；非法 id 按无背景处理） */
 const BG_PRESETS = ["night", "aurora", "violet", "ember"];
 
-/** 翻页滑动的名义时长：弹簧时代翻页无固定时长，此值仅用于「压矮窗口延迟到滑动结束」 */
-const PAGE_ANIM_MS = 380;
 /** 拖拽 commit 阈值（px）：越过才捕获指针并 1:1 跟手，之前放行页内点击 */
 const DRAG_COMMIT_PX = 10;
 /** 滚轮翻页累积阈值（delta 像素，200ms 静默后重新累积）：触摸板轻微滚动不翻页 */
@@ -70,10 +68,19 @@ function usePrefersReducedMotion(): boolean {
 const PANEL_CHROME_PX = 36;
 
 /** 内容高度自适应：观测当前页的 .page-body，内容/页码变化时把目标窗口高（内容+圆点+底栏+chrome）
- *  推给后端；后端据此重算窗口尺寸并重定位（隐藏时记忆，show 时校准）。 */
-function usePanelContentHeight(page: number, ready: boolean) {
+ *  推给后端；后端据此重算窗口尺寸并重定位（隐藏时记忆，show 时校准）。
+ *  时序分离（issue #48）：长高瞬时一步到位（animate=false，滑动途中不再播后端高度缓动的
+ *  30Hz set_size 整页重排）；压矮不按固定时长定时，挂到翻页弹簧沉降后补发（settleCbsRef，
+ *  收矮动画本身仍走 250ms 缓动），减少动态路径由 jumpWithFade 淡入结束冲刷——两条路都不漏。 */
+function usePanelContentHeight(
+  page: number,
+  ready: boolean,
+  settleCbsRef: React.MutableRefObject<Array<() => void>>,
+) {
   useEffect(() => {
     if (!ready || !isTauri) return;
+    // 页码已切换：上一页挂起的「沉降后压矮」作废，由新页的测高重新决策
+    settleCbsRef.current = [];
     const track = document.querySelector(".pager-track");
     const pageBody = track?.children[page]?.querySelector(".page-body");
     const dots = document.querySelector(".pager-dots");
@@ -82,8 +89,8 @@ function usePanelContentHeight(page: number, ready: boolean) {
       return;
     }
     let raf = 0;
-    let shrinkTimer: ReturnType<typeof setTimeout> | null = null;
-    const measure = () => {
+    // final=false：常规测高（压矮挂到沉降时刻）；final=true：沉降终审（压矮立即发，不再挂起）
+    const measure = (final = false) => {
       // 用 getBoundingClientRect 取小数值、向上取整后 +5 逻辑像素兜底：
       // 逻辑高 × DPI 缩放比存在半像素舍入竞争（614.3 × 1.75 = 1075.5 物理像素，向下舍入
       // 会让 .page 冒出亚像素溢出滚动条），+5 逻辑像素（肉眼不可见）保证恒不溢出
@@ -94,29 +101,32 @@ function usePanelContentHeight(page: number, ready: boolean) {
         ) + 5;
       const cur = window.innerHeight;
       if (desired > cur + 0.5) {
-        // 长高立即发：延迟会让高页内容在旧矮窗口里溢出；
-        // 减少动态模式下后端瞬时到位（不播高度缓动）
-        setPanelContentHeight(desired, !window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+        // 长高立即瞬时发（animate=false）：一步到位既防高页内容在旧矮窗口溢出，
+        // 又不在滑动途中播后端高度缓动；同时作废挂起的压矮补发（防沉降后按旧值压矮）
+        settleCbsRef.current = [];
+        setPanelContentHeight(desired, false);
       } else if (desired < cur - 2) {
-        // 压矮延迟到翻页滑动结束后发：动画途中压矮会让正在滑出的高页瞬间溢出
+        // 压矮延迟到翻页弹簧沉降后发：动画途中压矮会让正在滑出的高页瞬间溢出
         // （滚动条一闪而过 + 内容被裁切）；滑动期间滚动条另由 .sliding 屏蔽
-        if (shrinkTimer !== null) clearTimeout(shrinkTimer);
         const animate = !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-        shrinkTimer = setTimeout(() => setPanelContentHeight(desired, animate), PAGE_ANIM_MS);
+        if (final) {
+          setPanelContentHeight(desired, animate);
+        } else {
+          settleCbsRef.current = [() => measure(true)];
+        }
       }
     };
     // rAF 合并同一帧内的多次布局变化；后端另有 2px 阈值防抖
     const ro = new ResizeObserver(() => {
       cancelAnimationFrame(raf);
-      raf = requestAnimationFrame(measure);
+      raf = requestAnimationFrame(() => measure());
     });
     ro.observe(pageBody);
     return () => {
       cancelAnimationFrame(raf);
-      if (shrinkTimer !== null) clearTimeout(shrinkTimer);
       ro.disconnect();
     };
-  }, [page, ready]);
+  }, [page, ready, settleCbsRef]);
 }
 
 /** 单账号页：页头账号名 + 该账号的卡片组（复用现有卡片，数据全部按账号取）。
@@ -126,6 +136,7 @@ function AccountPage({
   history,
   localUsage,
   minimal,
+  active,
   onRetry,
   onOpenSettings,
 }: {
@@ -136,6 +147,8 @@ function AccountPage({
   localUsage: LocalUsageStats | null;
   /** 极简模式：隐藏月度/趋势/本地统计/会员/Booster 等卡片 */
   minimal: boolean;
+  /** 是否当前页：非当前页跳过渲染（content-visibility，styles.css .page.active） */
+  active: boolean;
   onRetry: () => void;
   onOpenSettings: () => void;
 }) {
@@ -147,7 +160,7 @@ function AccountPage({
   const balance = panel.deepseek_balance ?? null;
 
   return (
-    <section className="page">
+    <section className={`page${active ? " active" : ""}`}>
       {/* page-body：内容流容器（fit-content 供窗口自适应测高） */}
       <div className="page-body">
       <header className="page-head">
@@ -437,12 +450,15 @@ function OverviewMiniCard({
 function OverviewPage({
   accounts,
   minimal,
+  active,
   onOpen,
   localUsage,
   onBurnVisible,
 }: {
   accounts: AccountPanel[];
   minimal: boolean;
+  /** 是否当前页：非当前页跳过渲染（content-visibility，styles.css .page.active） */
+  active: boolean;
   /** 打开第 i 个账号的详情页（调用方 goTo(i+1)） */
   onOpen: (index: number) => void;
   /** 各账号本地 token 统计（按账号 id 索引，消耗视图用）；未加载的账号缺 key */
@@ -459,7 +475,7 @@ function OverviewPage({
     if (next === "burn") onBurnVisible();
   };
   return (
-    <section className="page">
+    <section className={`page${active ? " active" : ""}`}>
       {/* page-body：内容流容器（fit-content 供窗口自适应测高） */}
       <div className="page-body">
       <header className="ov-head">
@@ -540,13 +556,19 @@ function PanelApp() {
   // page 的 ref 镜像（事件回调里读最新页码，避免闭包过期）
   const pageRef = useRef(0);
   pageRef.current = page;
-  // 翻页滑动/弹簧期间屏蔽页内滚动条（压矮落在动画途中时防旧页滚动条闪现）
-  const [sliding, setSliding] = useState(false);
   const reducedMotion = usePrefersReducedMotion();
 
   // 轨道位移状态全部在 ref 里：动画帧直写 DOM style，不经 React 重渲染（120Hz 跟手前提）
   const pagerRef = useRef<HTMLDivElement>(null);
   const trackRef = useRef<HTMLDivElement>(null);
+  /** 滑动期滚动条屏蔽：直写轨道 sliding class（不经 React 状态——每次翻页两次全树重渲染、
+   *  含全部 SVG 趋势图，是切页掉帧源之一，issue #48 子项 2） */
+  const setTrackSliding = useCallback(
+    (on: boolean) => trackRef.current?.classList.toggle("sliding", on),
+    [],
+  );
+  /** 翻页弹簧沉降回调队列：压矮窗口的补发挂在此刻发（usePanelContentHeight 挂入、沉降时冲刷） */
+  const settleCbsRef = useRef<Array<() => void>>([]);
   /** 当前位移（px，0 = 第一页；恒等于屏幕上看到的实时 transform） */
   const posRef = useRef(0);
   /** 当前速度（px/s） */
@@ -574,7 +596,7 @@ function PanelApp() {
   pageCountRef.current = pageCount;
 
   // 内容高度自适应：当前页内容驱动窗口高度（翻页/数据到达/极简切换都会重测）
-  usePanelContentHeight(page, state !== null && accounts.length > 0);
+  usePanelContentHeight(page, state !== null && accounts.length > 0, settleCbsRef);
 
   /** 页宽 = 翻页视口宽（.page 宽 100% 与视口一致） */
   const pageWidth = useCallback(() => pagerRef.current?.clientWidth ?? 336, []);
@@ -593,7 +615,7 @@ function PanelApp() {
       targetRef.current = targetPx;
       if (velocity !== undefined) velRef.current = velocity;
       springDampingRef.current = damping;
-      setSliding(true);
+      setTrackSliding(true);
       if (rafRef.current !== null) return; // 弹簧在跑：只换目标，运动保持连续
       const omega = (2 * Math.PI) / SPRING_RESPONSE;
       const k = omega * omega;
@@ -605,13 +627,16 @@ function PanelApp() {
         const t = targetRef.current;
         const nv = velRef.current + (-k * (posRef.current - t) - c * velRef.current) * dt;
         let nx = posRef.current + nv * dt;
-        // 沉降：位置与速度都足够小 → 吸附停稳，解除滚动条屏蔽
+        // 沉降：位置与速度都足够小 → 吸附停稳，解除滚动条屏蔽并冲刷挂起的收矮补发
         if (Math.abs(nx - t) < 0.05 && Math.abs(nv) < 5) {
           nx = t;
           velRef.current = 0;
           applyPos(nx);
           rafRef.current = null;
-          setSliding(false);
+          setTrackSliding(false);
+          const cbs = settleCbsRef.current;
+          settleCbsRef.current = [];
+          cbs.forEach((cb) => cb());
           return;
         }
         velRef.current = nv;
@@ -620,7 +645,7 @@ function PanelApp() {
       };
       rafRef.current = requestAnimationFrame(tick);
     },
-    [applyPos],
+    [applyPos, setTrackSliding],
   );
 
   /** 减少动态：瞬时切页 + 200ms 淡入（切页在 opacity 0 的不可见帧完成） */
@@ -640,10 +665,17 @@ function PanelApp() {
         track.style.transition = "";
         track.style.opacity = "1";
       }
-      setSliding(true);
-      setTimeout(() => setSliding(false), 200);
+      setTrackSliding(true);
+      // 减少动态没有弹簧沉降：淡入结束（200ms）即视作沉降，冲刷挂起的收矮补发——
+      // 这条路径不许漏，否则 reduced-motion 用户切到矮页后窗口永不收矮
+      setTimeout(() => {
+        setTrackSliding(false);
+        const cbs = settleCbsRef.current;
+        settleCbsRef.current = [];
+        cbs.forEach((cb) => cb());
+      }, 200);
     },
-    [pageWidth],
+    [pageWidth, setTrackSliding],
   );
 
   /** 翻到指定页（越界钳制：到头停不循环）；弹簧起步即当前实时位移与速度 */
@@ -730,7 +762,7 @@ function PanelApp() {
         if (Math.abs(dx) < DRAG_COMMIT_PX) return;
         drag.capturing = true;
         e.currentTarget.setPointerCapture(e.pointerId);
-        setSliding(true);
+        setTrackSliding(true);
       }
       // 速度历史：只留最近 100ms 窗口（松手时的初速度从这里来）
       const now = performance.now();
@@ -745,7 +777,7 @@ function PanelApp() {
       else if (pos > maxPos) pos = maxPos + rubberband(pos - maxPos, width);
       applyPos(pos);
     },
-    [applyPos, pageWidth, reducedMotion],
+    [applyPos, pageWidth, reducedMotion, setTrackSliding],
   );
 
   const endDrag = useCallback(() => {
@@ -960,22 +992,25 @@ function PanelApp() {
         onPointerUp={endDrag}
         onPointerCancel={endDrag}
       >
-        {/* 轨道位移完全由 JS 弹簧直写 style.transform（无 style prop，React 不接管 transform） */}
-        <div ref={trackRef} className={`pager-track${sliding ? " sliding" : ""}${reducedMotion ? " rm" : ""}`}>
+        {/* 轨道位移完全由 JS 弹簧直写 style.transform（无 style prop，React 不接管 transform）；
+            sliding class 由 setTrackSliding 直写（非 React 状态） */}
+        <div ref={trackRef} className={`pager-track${reducedMotion ? " rm" : ""}`}>
           <OverviewPage
             accounts={accounts}
             minimal={minimal}
+            active={page === 0}
             onOpen={(i) => goTo(i + 1)}
             localUsage={localUsageMap}
             onBurnVisible={fetchAllLocalUsage}
           />
-          {accounts.map((a) => (
+          {accounts.map((a, i) => (
             <AccountPage
               key={a.account.id}
               panel={a}
               history={historyMap[a.account.id] ?? null}
               localUsage={localUsageMap[a.account.id] ?? null}
               minimal={minimal}
+              active={i + 1 === page}
               onRetry={() => void doRefresh()}
               onOpenSettings={() => void openSettings()}
             />

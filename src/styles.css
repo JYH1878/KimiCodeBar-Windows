@@ -141,7 +141,11 @@ body,
   transition: opacity 200ms ease;
 }
 
-/* 单账号页：整宽一页，内容超高时页内纵向滚动（窗口自适应后极少触发，矮屏/多账号兜底） */
+/* 单账号页：整宽一页，内容超高时页内纵向滚动（窗口自适应后极少触发，矮屏/多账号兜底）。
+   离屏页跳过渲染（issue #48 子项 3，web.dev content-visibility）：静止期只有当前页
+   （.active）真实渲染，其余页的内容不参与样式/布局/绘制——数据到达的全树重渲染里
+   离屏页（含趋势图 SVG）不再产生布局/绘制开销。滑动期由 .sliding 全页可见，杜绝
+   「滑出/滑入途中才渲染」的占位高抖动（这也保证可见页 .page-body 测高恒为真实值） */
 .page {
   width: 100%;
   flex: 0 0 100%;
@@ -151,6 +155,10 @@ body,
   overflow-x: hidden;
   display: flex;
   flex-direction: column;
+  content-visibility: hidden;
+  /* auto 500px：跳过期内容占位高记 500px，并记住该页上次渲染过的实际高度（auto），
+     防轨道内在尺寸塌陷；页高恒 100% 不受占位影响，只作用于被跳过的内容盒 */
+  contain-intrinsic-size: auto 500px;
 }
 
 /* 页内容器：承载内容流（gap 从 .page 移入）；fit-content 高度供窗口自适应测量；
@@ -162,9 +170,16 @@ body,
   margin: auto 0;
 }
 
-/* 翻页滑动期间藏起页内滚动条：窗口压矮若落在动画途中，正在滑出的高页会短暂溢出（滚动条一闪而过） */
+/* 翻页滑动期间藏起页内滚动条：窗口压矮若落在动画途中，正在滑出的高页会短暂溢出（滚动条一闪而过）；
+   同时全页可见（关闭 content-visibility 跳过）：滑动/淡入途中两端页都真实渲染，防占位高抖动 */
 .pager-track.sliding .page {
   overflow: hidden;
+  content-visibility: visible;
+}
+
+/* 当前页恒真实渲染（静止期唯一不做内容跳过的页，测高/交互都发生在它身上） */
+.page.active {
+  content-visibility: visible;
 }
 
 /* 页头：账号名胶囊 + 提供商徽章，flex 使两者垂直居中对齐（字号/边框不同也能对齐） */
