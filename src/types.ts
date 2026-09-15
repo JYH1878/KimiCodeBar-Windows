@@ -31,7 +31,8 @@ export interface KimiQuota {
   weekly?: QuotaDetail;
   five_hour?: QuotaDetail;
   total?: TotalQuotaInfo;
-  /** LEVEL_FREE / LEVEL_BASIC / LEVEL_INTERMEDIATE / LEVEL_ADVANCED */
+  /** LEVEL_FREE / LEVEL_BASIC / LEVEL_INTERMEDIATE / LEVEL_ADVANCED；
+   *  2026-09 起 usages 接口不再下发，Kimi 账号由网页端 GetSubscription 补 */
   membership_level?: string;
   booster?: BoosterInfo;
 }

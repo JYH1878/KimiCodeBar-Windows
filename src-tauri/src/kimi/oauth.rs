@@ -407,12 +407,13 @@ fn http_client() -> Result<reqwest::Client, OAuthError> {
 }
 
 /// 验证地址白名单校验（纯函数）：必须 https scheme 且 host 为 kimi.com 或其子域。
-/// 先剥 userinfo（防 https://kimi.com@evil.com 伪装）再去端口，按小写 host 比较
+/// 先剥 userinfo（防 https://kimi.com@evil.com 伪装）再去端口，按小写 host 比较；
+/// 反斜杠同样算 authority 分隔符（浏览器把 \ 当 / 解析，https://evil.com\@kimi.com 实际打开 evil.com）
 fn is_trusted_verification_uri(uri: &str) -> bool {
     let Some(rest) = uri.strip_prefix("https://") else {
         return false;
     };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    let authority = rest.split(['/', '\\', '?', '#']).next().unwrap_or_default();
     let host_port = authority.rsplit('@').next().unwrap_or_default();
     let host = host_port
         .split(':')
@@ -813,6 +814,7 @@ mod tests {
             "https://kimi.com.evil.com",
             "https://evil-kimi.com",
             "https://kimi.com@evil.com/",
+            "https://evil.com\\@kimi.com",
             "javascript:alert(1)",
             "file:///C:/Windows/System32/cmd.exe",
         ] {

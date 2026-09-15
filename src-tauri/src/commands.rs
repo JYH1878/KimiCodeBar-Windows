@@ -387,8 +387,8 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
         inner.loading = true;
     }
 
-    // 逐账号拉取（配额 + 月度）：任何环节挂起都不能把 loading 永久置位
-    let mut outcomes: Vec<(String, FetchOutcome, MonthlyOutcome)> = Vec::new();
+    // 逐账号拉取（配额 + 月度 + 会员等级）：任何环节挂起都不能把 loading 永久置位
+    let mut outcomes: Vec<(String, FetchOutcome, MonthlyOutcome, Option<String>)> = Vec::new();
     for account in &accounts {
         // 任何环节挂起（网络 / 系统凭证服务）都不能把 loading 永久置位
         let outcome = match tokio::time::timeout(
@@ -407,7 +407,21 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
         } else {
             fetch_monthly(&account.id).await
         };
-        outcomes.push((account.id.clone(), outcome, monthly_outcome));
+        // 会员等级：2026-09 上游 usages 响应不再携带 user.membership，等级改由
+        // 网页端 GetSubscription 补；仅 Kimi 账号且本次配额未带回等级时才多发一请求
+        let quota_has_level =
+            matches!(&outcome, FetchOutcome::Success(p) if p.0.membership_level.is_some());
+        let membership_level = if account.provider != "kimi" || quota_has_level {
+            None
+        } else {
+            fetch_web_membership_level(&account.id).await
+        };
+        outcomes.push((
+            account.id.clone(),
+            outcome,
+            monthly_outcome,
+            membership_level,
+        ));
     }
 
     let mut any_quota_success = false;
@@ -415,7 +429,7 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
         let mut inner = state.inner.lock().unwrap();
         // 所有分支必须先复位 loading（NoCredential 曾漏掉这行导致永久卡死）
         inner.loading = false;
-        for (account_id, outcome, monthly_outcome) in outcomes {
+        for (account_id, outcome, monthly_outcome, membership_level) in outcomes {
             let runtime = inner.accounts.entry(account_id.clone()).or_default();
             let quota_success = matches!(outcome, FetchOutcome::Success(..));
             let balance_success = matches!(outcome, FetchOutcome::DeepSeekSuccess(..));
@@ -444,6 +458,14 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
                 }
                 // 失败：保留旧缓存数据，仅记错误（错误类型与文案已在 fetch_with_credential 记 warn）
                 FetchOutcome::Failed(message) => runtime.error = Some(message),
+            }
+
+            // 会员等级回填：usages 已不下发，以网页端 GetSubscription 结果为准
+            // （Some 才覆盖；配额失败时写到沿用的旧配额上，等级是账号级语义）
+            if let Some(level) = membership_level {
+                if let Some((q, _)) = runtime.last_quota.as_mut() {
+                    q.membership_level = Some(level);
+                }
             }
 
             // 月度结果：成功才覆盖数据；失败一律保留旧数据，仅记原因
@@ -740,16 +762,23 @@ pub fn get_settings() -> AppSettings {
     storage::load_settings().unwrap_or_default().into()
 }
 
+/// save_settings 的「先读后写」合并：webview 传来的 AppSettings 不含账号列表，
+/// 且 background_image/background_preset 不可信（任意路径可借 join 穿越删/读文件）——
+/// accounts 与两个背景字段一律保留磁盘现值，背景今后只许专用命令
+/// （set_background_image / clear_background_image / set_background_preset）改
+fn merge_settings_with_disk(settings: AppSettings) -> storage::Settings {
+    let current = storage::load_settings().unwrap_or_default();
+    storage::Settings {
+        accounts: current.accounts,
+        background_image: current.background_image,
+        background_preset: current.background_preset,
+        ..settings.into()
+    }
+}
+
 #[tauri::command]
 pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
-    // 先读后写：AppSettings 不含账号列表，必须保留磁盘上的 accounts
-    let mut settings: storage::Settings = {
-        let current = storage::load_settings().unwrap_or_default();
-        storage::Settings {
-            accounts: current.accounts,
-            ..settings.into()
-        }
-    };
+    let mut settings: storage::Settings = merge_settings_with_disk(settings);
     // 钳制非法值（与 load_settings 的加载钳制语义一致）
     settings.refresh_interval_min = settings.refresh_interval_min.clamp(
         storage::MIN_REFRESH_INTERVAL_MIN,
@@ -1548,6 +1577,23 @@ async fn fetch_monthly_with_refresh(account_id: &str, refresh_token: &str) -> Mo
             }
         }
         Err(_) => MonthlyOutcome::Failed,
+    }
+}
+
+/// 取该账号的会员等级（网页端 GetSubscription）：复用月度同一套网页会话
+/// （refresh_token 优先、access_token 进程内缓存、轮换落盘都在 web_access_token 里）。
+/// 无网页凭证或任何失败 → None：等级缺失不影响配额/月度主流程。
+async fn fetch_web_membership_level(account_id: &str) -> Option<String> {
+    if let Ok(Some(refresh_token)) = creds::load_web_refresh_token(account_id) {
+        return match web_access_token(account_id, &refresh_token, now_unix()).await {
+            Ok(token) => web::fetch_membership_level(&token).await,
+            Err(_) => None,
+        };
+    }
+    // 旧体系 kimi-auth token（未过期仍可作 Bearer 用）兼容路径
+    match creds::load_web_token(account_id) {
+        Ok(Some(token)) => web::fetch_membership_level(&token).await,
+        _ => None,
     }
 }
 
@@ -2814,5 +2860,31 @@ mod tests {
         );
 
         cleanup_extra_key_env(&dir, &service, &["acc-g"]);
+    }
+
+    // ---- save_settings 背景字段防篡改 ----
+
+    #[test]
+    fn save_settings_merge_keeps_malicious_background_off_disk() {
+        let _guard = EXTRA_KEY_ENV_LOCK.lock().unwrap();
+        let (dir, service) = setup_extra_key_env(vec![]);
+
+        // 磁盘现状：合法背景图 + 预设
+        storage::save_settings(&storage::Settings {
+            background_image: Some("background.png".to_string()),
+            background_preset: Some("night".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        // webview 传来篡改值（绝对路径 / ../ 穿越）：合并后磁盘现值原样保留
+        let mut incoming = AppSettings::from(storage::Settings::default());
+        incoming.background_image = Some("C:\\Windows\\System32\\drivers\\etc\\hosts".to_string());
+        incoming.background_preset = Some("../evil".to_string());
+        let merged = merge_settings_with_disk(incoming);
+        assert_eq!(merged.background_image.as_deref(), Some("background.png"));
+        assert_eq!(merged.background_preset.as_deref(), Some("night"));
+
+        cleanup_extra_key_env(&dir, &service, &[]);
     }
 }

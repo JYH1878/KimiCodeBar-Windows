@@ -11,16 +11,16 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
           cache: npm
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           workspaces: src-tauri
 
@@ -31,7 +31,7 @@ jobs:
       # tauri.conf.json 的 beforeBuildCommand 会自动执行 npm run build
       # 显式传 tagName/releaseName：不依赖 action 从 git ref 推断（曾出现跳过上传的问题）
       - name: 构建并发布
-        uses: tauri-apps/tauri-action@v1
+        uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -51,7 +51,7 @@ jobs:
       # 显式 draft: true——softprops 默认 draft:false 会把 tauri-action 建的草稿直接发布，
       # 「核对草稿再 Publish」闸门会名存实亡（v1.2.1 踩过，2026-08-19）
       - name: 上传便携版到 Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           files: src-tauri/target/release/KimiCodeBar_*_x64-portable.zip
           draft: true

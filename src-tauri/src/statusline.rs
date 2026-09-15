@@ -89,14 +89,15 @@ fn render_kimi(cache: &CachedQuota, lang: Lang, warn_threshold_pct: f64) -> Stri
     format!("{prefix}Kimi {}", parts.join(" · "))
 }
 
-/// 会员等级枚举 → 官方档位名（与面板 MembershipCard 同款映射；未知等级原样显示）
-fn membership_display(level: &str) -> &str {
+/// 会员等级枚举 → 官方档位名（与面板 MembershipCard 同款映射；未知等级剥控制字符后显示，
+/// 防恶意响应借 ANSI 转义序列污染终端状态栏）
+fn membership_display(level: &str) -> std::borrow::Cow<'_, str> {
     match level {
-        "LEVEL_FREE" => "Andante",
-        "LEVEL_BASIC" => "Moderato",
-        "LEVEL_INTERMEDIATE" => "Allegretto",
-        "LEVEL_ADVANCED" => "Allegro",
-        other => other,
+        "LEVEL_FREE" => std::borrow::Cow::Borrowed("Andante"),
+        "LEVEL_BASIC" => std::borrow::Cow::Borrowed("Moderato"),
+        "LEVEL_INTERMEDIATE" => std::borrow::Cow::Borrowed("Allegretto"),
+        "LEVEL_ADVANCED" => std::borrow::Cow::Borrowed("Allegro"),
+        other => std::borrow::Cow::Owned(other.chars().filter(|c| !char::is_control(*c)).collect()),
     }
 }
 
@@ -474,7 +475,7 @@ mod tests {
             ),
             "Kimi 5小时 42% · Allegretto"
         );
-        // 未知等级原样显示
+        // 未知等级剥控制字符后显示（无控制字符时内容不变）
         let mut q2 = kimi_quota(Some(42.0), None);
         q2.membership_level = Some("LEVEL_FUTURE".to_string());
         assert_eq!(
@@ -487,6 +488,17 @@ mod tests {
             ),
             "Kimi 5小时 42% · LEVEL_FUTURE"
         );
+    }
+
+    #[test]
+    fn membership_display_strips_control_chars_from_unknown_level() {
+        // 恶意 provider 响应注入 ANSI 转义/响铃：输出不得含任何控制字符
+        let shown = membership_display("EVIL\u{1b}[31m\u{7}TIER");
+        assert_eq!(shown, "EVIL[31mTIER");
+        assert!(!shown.chars().any(char::is_control));
+        // 已知档位与无控制字符的未知等级内容不变
+        assert_eq!(membership_display("LEVEL_ADVANCED"), "Allegro");
+        assert_eq!(membership_display("LEVEL_FUTURE"), "LEVEL_FUTURE");
     }
 
     #[test]

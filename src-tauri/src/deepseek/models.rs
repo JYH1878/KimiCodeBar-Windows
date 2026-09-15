@@ -81,9 +81,14 @@ fn pick_balance(is_available: bool, infos: &[BalanceInfoWire]) -> DeepSeekBalanc
     }
 }
 
-/// 金额字符串 → f64；空白/非法按 0（与 quota::parse_num 的容忍语义一致）
+/// 金额字符串 → f64；空白/非法按 0（与 quota::parse_num 的容忍语义一致），NaN/inf 按 0
+/// （f64 parse 接受 "NaN"/"inf"，而 NaN 比较恒 false 会永久关掉低余额告警）
 fn parse_amount(s: &str) -> f64 {
-    s.trim().parse::<f64>().unwrap_or(0.0)
+    s.trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite())
+        .unwrap_or(0.0)
 }
 
 #[cfg(test)]
@@ -118,6 +123,20 @@ mod tests {
         assert_eq!(b.currency, "USD");
         assert!((b.total_balance - 8.50).abs() < 1e-9);
         assert!((b.granted_balance - 8.50).abs() < 1e-9);
+    }
+
+    #[test]
+    fn nan_and_inf_amounts_fall_back_to_zero() {
+        // Rust 的 f64 parse 接受 "NaN"/"inf"：NaN 比较恒 false 会永久关掉低余额告警，
+        // 非有限值一律按 0 处理
+        for bad in ["NaN", "inf", "-inf", "Infinity"] {
+            let json = format!(
+                r#"{{"is_available":true,"balance_infos":[{{"currency":"CNY","total_balance":"{bad}","granted_balance":"0.00","topped_up_balance":"0.00"}}]}}"#
+            );
+            let b = parse_balance(&json).unwrap();
+            assert_eq!(b.total_balance, 0.0, "{bad} 应按 0 处理");
+            assert!(b.total_balance.is_finite());
+        }
     }
 
     #[test]

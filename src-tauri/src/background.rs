@@ -42,6 +42,15 @@ impl ImageKind {
     }
 }
 
+/// 背景文件名精确白名单：产出方只有 set_base64（`background.<ext>`），
+/// settings 里的值若被篡改（任意路径/../ 穿越），删读文件前必须拦下
+fn is_valid_background_filename(name: &str) -> bool {
+    matches!(
+        name,
+        "background.png" | "background.jpg" | "background.webp"
+    )
+}
+
 /// 嗅探图片格式：魔数匹配 PNG / JPG / WebP 返回对应类型；
 /// GIF 明确拒绝（动图不做）；其余/过短数据报错。错误均为中文，直接透传前端展示
 pub fn sniff(data: &[u8]) -> Result<ImageKind, String> {
@@ -80,7 +89,7 @@ pub fn set_base64(data_base64: &str) -> Result<String, String> {
     crate::storage::save_settings(&settings)?;
     // 新格式与旧文件不同（如 png → jpg）时删掉旧文件；同文件名刚被覆盖，无需处理
     if let Some(old_name) = old {
-        if old_name != filename {
+        if old_name != filename && is_valid_background_filename(&old_name) {
             let _ = std::fs::remove_file(crate::storage::config_dir().join(old_name));
         }
     }
@@ -94,7 +103,10 @@ pub fn clear() -> Result<(), String> {
     settings.background_preset = None;
     crate::storage::save_settings(&settings)?;
     if let Some(old_name) = old_name {
-        let _ = std::fs::remove_file(crate::storage::config_dir().join(old_name));
+        // 文件名不合法（被篡改的路径）时照常清空字段但不删文件
+        if is_valid_background_filename(&old_name) {
+            let _ = std::fs::remove_file(crate::storage::config_dir().join(old_name));
+        }
     }
     Ok(())
 }
@@ -117,6 +129,10 @@ pub fn set_preset(preset: Option<&str>) -> Result<(), String> {
 pub fn load() -> Option<(Vec<u8>, &'static str)> {
     let settings = crate::storage::load_settings().ok()?;
     let filename = settings.background_image?;
+    // 文件名不合法（被篡改的路径）时不读盘，直接当无背景
+    if !is_valid_background_filename(&filename) {
+        return None;
+    }
     let data = std::fs::read(crate::storage::config_dir().join(filename)).ok()?;
     let kind = sniff(&data).ok()?;
     Some((data, kind.mime()))
@@ -284,6 +300,80 @@ mod tests {
         assert!(!dir.join("background.png").exists());
 
         cleanup(&dir);
+    }
+
+    /// 受害文件：配置目录外的「任意文件」，三个入口都不许碰它。
+    /// 内容是合法 PNG 魔数——否则旧代码 load 会因 sniff 失败碰巧也返回 None，验不出穿越
+    fn make_victim() -> (std::path::PathBuf, std::path::PathBuf, String) {
+        let victim_dir =
+            std::env::temp_dir().join(format!("kimicodebar-bg-victim-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&victim_dir).unwrap();
+        let victim = victim_dir.join("evil.txt");
+        std::fs::write(&victim, PNG).unwrap();
+        let path = victim.to_string_lossy().to_string();
+        (victim_dir, victim, path)
+    }
+
+    /// 把 settings.background_image 篡改为给定值落盘
+    fn seed_tampered_background(dir: &std::path::Path, value: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        crate::storage::save_settings(&crate::storage::Settings {
+            background_image: Some(value.to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn clear_with_malicious_filename_clears_field_but_never_deletes() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = use_temp_config_dir();
+        let (victim_dir, victim, victim_path) = make_victim();
+
+        // clear：字段照常清空，但绝对路径指向的文件仍在
+        seed_tampered_background(&dir, &victim_path);
+        clear().unwrap();
+        assert!(victim.exists(), "clear 不得删除绝对路径指向的文件");
+        assert!(crate::storage::load_settings()
+            .unwrap()
+            .background_image
+            .is_none());
+
+        cleanup(&dir);
+        let _ = std::fs::remove_dir_all(&victim_dir);
+    }
+
+    #[test]
+    fn set_base64_with_malicious_old_filename_never_deletes_it() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = use_temp_config_dir();
+        let enc = base64::engine::general_purpose::STANDARD;
+        let (victim_dir, victim, victim_path) = make_victim();
+
+        // set_base64：被篡改的旧文件名不删，新图照常落盘
+        seed_tampered_background(&dir, &victim_path);
+        set_base64(&enc.encode(PNG)).unwrap();
+        assert!(victim.exists(), "set_base64 不得删除被篡改的旧文件名");
+        assert!(dir.join("background.png").exists());
+
+        cleanup(&dir);
+        let _ = std::fs::remove_dir_all(&victim_dir);
+    }
+
+    #[test]
+    fn load_with_malicious_filename_returns_none() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = use_temp_config_dir();
+        let (victim_dir, _victim, victim_path) = make_victim();
+
+        // load：绝对路径 / ../ 穿越一律 None（不读配置目录外）
+        seed_tampered_background(&dir, &victim_path);
+        assert!(load().is_none(), "load 不得读绝对路径");
+        seed_tampered_background(&dir, "../evil.txt");
+        assert!(load().is_none(), "load 不得跟随 ../ 穿越");
+
+        cleanup(&dir);
+        let _ = std::fs::remove_dir_all(&victim_dir);
     }
 
     #[test]

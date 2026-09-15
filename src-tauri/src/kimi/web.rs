@@ -25,6 +25,11 @@ use crate::kimi::USER_AGENT;
 /// 月度总量查询接口（Connect-RPC JSON：POST + `{}` body）
 const SUBSCRIPTION_STATS_URL: &str =
     "https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscriptionStats";
+/// 订阅信息查询接口（Connect-RPC JSON：POST + `{}` body）：
+/// 2026-09 上游 usages 响应不再携带 user.membership，会员等级改由该接口的
+/// subscription.goods.membershipLevel 提供
+const GET_SUBSCRIPTION_URL: &str =
+    "https://www.kimi.com/apiv2/kimi.gateway.membership.v2.MembershipService/GetSubscription";
 /// 网页端 refresh_token 续期端点（Connect-RPC JSON：POST + `{"refresh_token":...}` body）
 const REFRESH_TOKEN_URL: &str =
     "https://auth.kimi.com/api/account.gateway.v1.AuthService/RefreshToken";
@@ -108,6 +113,59 @@ pub fn normalize_web_token(input: &str) -> Result<String, String> {
 /// 调用 GetSubscriptionStats 并解析为 MonthlyInfo。
 /// 401/403 → Unauthorized；其他非 2xx / 网络失败 → Http；响应不合预期 → Parse。
 pub async fn fetch_subscription_stats(token: &str) -> Result<MonthlyInfo, WebError> {
+    let body = post_web_rpc(SUBSCRIPTION_STATS_URL, token, "月度总量").await?;
+    parse_subscription_stats(&body).map_err(|e| {
+        if matches!(e, WebError::Parse(_)) {
+            tracing::warn!("月度总量响应解析失败: body_len={}", body.len());
+        }
+        e
+    })
+}
+
+/// 拉取会员等级：usages 接口不再下发 user.membership 后（2026-09 上游改版），
+/// 等级由 GetSubscription 的 subscription.goods.membershipLevel 提供。
+/// 任何失败（网络/鉴权/缺字段）都只记日志并返回 None：
+/// 会员等级是锦上添花，绝不能影响配额/月度主流程。
+pub async fn fetch_membership_level(token: &str) -> Option<String> {
+    match post_web_rpc(GET_SUBSCRIPTION_URL, token, "会员等级").await {
+        Ok(body) => {
+            let level = parse_membership_level(&body);
+            if level.is_none() {
+                tracing::warn!(
+                    "会员等级响应缺少 subscription.goods 等级字段: body_len={}",
+                    body.len()
+                );
+            }
+            level
+        }
+        Err(e) => {
+            tracing::warn!("会员等级获取失败: {e}");
+            None
+        }
+    }
+}
+
+/// 解析 GetSubscription 响应为会员等级字符串（纯函数，便于单测）。
+/// 优先 subscription.goods.membershipLevel（LEVEL_* 枚举，与旧 usages 口径一致），
+/// 缺失时回退 goods.title（官方档位名）；容忍 data 包裹层与 snake_case 别名；
+/// subscription 整体缺失（免费/未订阅或接口再改版）返回 None。
+pub fn parse_membership_level(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    // 容忍 data 包裹
+    let root = value
+        .get("data")
+        .filter(|d| d.is_object())
+        .unwrap_or(&value);
+    let goods = root.get("subscription")?.get("goods")?.as_object()?;
+    pick_str(goods, &["membershipLevel", "membership_level"])
+        .or_else(|| pick_str(goods, &["title"]))
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// 网页端 Connect-RPC POST 公共骨架：建 client、带齐鉴权头、发 `{}` body、
+/// 状态码分类为 WebError，成功返回响应原文。label 为日志前缀（区分调用方）。
+async fn post_web_rpc(url: &str, token: &str, label: &str) -> Result<String, WebError> {
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(WEB_TIMEOUT_SECS))
         .user_agent(USER_AGENT)
@@ -117,7 +175,7 @@ pub async fn fetch_subscription_stats(token: &str) -> Result<MonthlyInfo, WebErr
         .map_err(|e| WebError::Http(e.to_string()))?;
 
     let mut req = http
-        .post(SUBSCRIPTION_STATS_URL)
+        .post(url)
         .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
         .header(reqwest::header::COOKIE, format!("kimi-auth={token}"))
         .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -136,19 +194,19 @@ pub async fn fetch_subscription_stats(token: &str) -> Result<MonthlyInfo, WebErr
     }
 
     let resp = req.send().await.map_err(|e| {
-        tracing::warn!("月度总量请求发送失败: {e}");
+        tracing::warn!("{label}请求发送失败: {e}");
         WebError::Http(e.to_string())
     })?;
     let status = resp.status();
     let body = resp.text().await.map_err(|e| {
-        tracing::warn!("月度总量响应读取失败: {e}");
+        tracing::warn!("{label}响应读取失败: {e}");
         WebError::Http(e.to_string())
     })?;
 
     // 错误分支只记状态码与响应体长度，严禁记录 token / 响应原文
     if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
         tracing::warn!(
-            "月度总量接口鉴权失败: status={}, body_len={}",
+            "{label}接口鉴权失败: status={}, body_len={}",
             status.as_u16(),
             body.len()
         );
@@ -156,18 +214,13 @@ pub async fn fetch_subscription_stats(token: &str) -> Result<MonthlyInfo, WebErr
     }
     if !status.is_success() {
         tracing::warn!(
-            "月度总量接口返回非 2xx: status={}, body_len={}",
+            "{label}接口返回非 2xx: status={}, body_len={}",
             status.as_u16(),
             body.len()
         );
         return Err(WebError::Http(format!("HTTP {}", status.as_u16())));
     }
-    parse_subscription_stats(&body).map_err(|e| {
-        if matches!(e, WebError::Parse(_)) {
-            tracing::warn!("月度总量响应解析失败: body_len={}", body.len());
-        }
-        e
-    })
+    Ok(body)
 }
 
 /// 解析 GetSubscriptionStats 响应为 MonthlyInfo（纯函数，便于单测）。
@@ -739,6 +792,59 @@ mod tests {
             parse_refresh_response("not json").unwrap_err(),
             WebError::Refresh(_)
         ));
+    }
+
+    // ---- parse_membership_level ----
+
+    /// GetSubscription 真实形态样例（参考 kimi-island 的 GetSubscriptionResponse：
+    /// subscription.goods.membershipLevel / title / durationDays 等）
+    #[test]
+    fn membership_level_from_goods() {
+        let body = r#"{"subscription":{"subscriptionId":"***","goods":{"id":"g1","title":"Allegretto","durationDays":30,"membershipLevel":"LEVEL_INTERMEDIATE"},"currentEndTime":"2026-10-01T00:00:00Z","status":"STATUS_ACTIVE","active":true},"balances":[],"subscribed":true,"capabilities":[]}"#;
+        assert_eq!(
+            parse_membership_level(body).as_deref(),
+            Some("LEVEL_INTERMEDIATE")
+        );
+    }
+
+    #[test]
+    fn membership_level_data_wrapped() {
+        let body = r#"{"data":{"subscription":{"goods":{"membershipLevel":"LEVEL_ADVANCED"}}}}"#;
+        assert_eq!(
+            parse_membership_level(body).as_deref(),
+            Some("LEVEL_ADVANCED")
+        );
+    }
+
+    #[test]
+    fn membership_level_falls_back_to_goods_title() {
+        // membershipLevel 缺失时回退官方档位名 title
+        let body = r#"{"subscription":{"goods":{"title":"Allegro"}}}"#;
+        assert_eq!(parse_membership_level(body).as_deref(), Some("Allegro"));
+    }
+
+    #[test]
+    fn membership_level_snake_case_alias() {
+        let body = r#"{"subscription":{"goods":{"membership_level":"LEVEL_BASIC"}}}"#;
+        assert_eq!(parse_membership_level(body).as_deref(), Some("LEVEL_BASIC"));
+    }
+
+    #[test]
+    fn membership_level_none_when_no_subscription_or_empty() {
+        // 免费/未订阅：subscription 缺失 → None（不猜档位）
+        assert_eq!(parse_membership_level(r#"{"subscribed":false}"#), None);
+        assert_eq!(parse_membership_level(r#"{"subscription":null}"#), None);
+        // 空字符串等级视为缺失
+        assert_eq!(
+            parse_membership_level(r#"{"subscription":{"goods":{"membershipLevel":""}}}"#),
+            None
+        );
+        // 非 JSON / 形状不符 → None
+        assert_eq!(parse_membership_level("not json"), None);
+        assert_eq!(
+            parse_membership_level(r#"{"subscription":{"goods":42}}"#),
+            None
+        );
     }
 
     // ---- parse_subscription_stats ----

@@ -20,6 +20,8 @@ pub struct UsageResponse {
     pub limits: Option<Vec<LimitsEntry>>,
     /// 总额度（无 resetTime）
     pub total_quota: Option<TotalQuotaWire>,
+    /// 2026-09 上游改版后响应已不再携带 user 段（会员等级改由网页端
+    /// GetSubscription 提供，见 kimi::web）；保留解析以兼容旧形态/兼容代理
     pub user: Option<UserWire>,
     /// 加油包钱包；未开通时整个字段缺失
     pub booster_wallet: Option<BoosterWalletWire>,
