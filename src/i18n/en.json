@@ -62,7 +62,8 @@
     "today": "today",
     "yesterday": "Yesterday {{tokens}}",
     "ariaLabel": "Bar chart of daily token usage over the last 7 days",
-    "todayQuotaPct": "({{pct}}% of weekly quota)"
+    "todayQuotaPct": "({{pct}}% of weekly quota)",
+    "recentOutputRate": "Output rate (10 min): {{rate}} tok/s"
   },
   "membership": {
     "title": "Membership",
@@ -149,6 +150,9 @@
       "backgroundHint": "Preset gradients follow the light/dark theme; or click + to upload a static image (PNG / JPG / WebP, ≤10MB). Select None to clear",
       "backgroundTooBig": "Image exceeds the 10MB limit",
       "backgroundReadFailed": "Failed to read the image file",
+      "extraScanDirs": "Extra scan directories (experimental)",
+      "extraScanDirsPlaceholder": "One path per line, e.g. \\\\server\\share\\home\\u\\.kimi-code",
+      "extraScanDirsHint": "Local token usage also scans the Kimi Code sessions under these directories (max 10; each must be an absolute drive path or a UNC path starting with \\\\; takes effect when you save settings)",
       "saved": "Saved",
       "save": "Save settings"
     },
@@ -193,6 +197,16 @@
     "extraRemove": "Remove",
     "extraAdded": "Extra key added",
     "extraRemoved": "Extra key removed"
+  },
+  "glmTeam": {
+    "toggle": "Team plan",
+    "hint": "A team-plan key requires the organization ID and project ID (see the team management page on bigmodel.cn); when enabled, quota is queried as the team plan.",
+    "org": "Organization ID",
+    "project": "Project ID",
+    "orgPlaceholder": "bigmodel-organization",
+    "projectPlaceholder": "bigmodel-project",
+    "save": "Save team settings",
+    "saved": "Team plan settings saved"
   },
   "deviceLogin": {
     "title": "Method B: Sign in with account",

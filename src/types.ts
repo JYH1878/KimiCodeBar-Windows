@@ -50,6 +50,12 @@ export interface Account {
   login_method?: LoginMethod | null;
   /** 提供商；旧版设置文件无此字段，后端按 "kimi" 读回 */
   provider: AccountProvider;
+  /** GLM 团队套餐开关（仅 provider="glm" 有意义）：开时额度查询走 ?type=2 + 组织/项目头 */
+  glm_team?: boolean;
+  /** GLM 团队组织 ID（bigmodel-organization 头）；开关开时必填 */
+  glm_org?: string | null;
+  /** GLM 团队项目 ID（bigmodel-project 头）；开关开时必填 */
+  glm_project?: string | null;
 }
 
 /** DeepSeek 余额（GET /user/balance；金额单位元） */
@@ -130,6 +136,9 @@ export interface AppSettings {
   background_image?: string | null;
   /** 预设背景 id（night / aurora / violet / ember），null = 未选；生效时优先于 background_image */
   background_preset?: string | null;
+  /** 额外扫描目录（实验性，最多 10 条）：远程 Kimi Code home（盘符绝对路径或 \\ 开头的 UNC），
+   *  本地消耗统计纳入扫描；保存时后端校验（相对路径拒绝、去重） */
+  extra_scan_dirs: string[];
 }
 
 /** 凭证配置状态：get_credential_status(account_id) 的返回 */
@@ -189,6 +198,8 @@ export interface LocalUsageStats {
   last_scan_at: number | null;
   /** 该账号最近一次 usage.record 事件时间（epoch 毫秒），从未扫到为 null */
   last_event_at: number | null;
+  /** 近 10 分钟输出速率（tok/s，嵌套 step.end 聚合）；窗口内无有效采样为 null */
+  recent_output_tok_per_sec?: number | null;
 }
 
 // ============ 主题 ============

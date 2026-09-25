@@ -43,7 +43,7 @@ const MOCK_ACCOUNTS: Account[] = [
   { id: "mock-acc-1", name: "账号 1", login_method: "api_key", provider: "kimi" },
   { id: "mock-acc-2", name: "演示号", login_method: "oauth", provider: "kimi" },
   { id: "mock-acc-3", name: "DeepSeek 演示", login_method: "api_key", provider: "deepseek" },
-  { id: "mock-acc-4", name: "GLM 演示", login_method: "api_key", provider: "glm" },
+  { id: "mock-acc-4", name: "GLM 演示", login_method: "api_key", provider: "glm", glm_team: true, glm_org: "org-demo", glm_project: "proj-demo" },
 ];
 
 /** 浏览器 mock 的 DeepSeek 余额假数据（标注：仅浏览器 dev 用，真实数据来自接口/缓存） */
@@ -268,7 +268,7 @@ const MOCK_LOCAL_USAGE: Record<string, { today: number; yesterday: number; amoun
     today: 128400,
     yesterday: 96200,
     amounts: [42300, 58700, 31200, 88900, 76400, 96200, 128400],
-    // kimi-code/kimi-for-coding 演示 K2.7 展示名映射
+    // kimi-code/kimi-for-coding 演示 K2.8 展示名映射
     byModel: [
       { model: "kimi-code/k3", tokens: 406000 },
       { model: "kimi-code/kimi-for-coding", tokens: 128000 },
@@ -306,6 +306,8 @@ function mockLocalUsage(accountId: string): LocalUsageStats {
     by_model: mock.byModel,
     last_scan_at: Math.floor(Date.now() / 1000),
     last_event_at: Date.now(),
+    // 演示：账号 1 给非空速率，其余账号无 step.end 数据为 null
+    recent_output_tok_per_sec: accountId === "mock-acc-1" ? 12.5 : null,
   };
 }
 
@@ -344,6 +346,7 @@ const mockDb = {
     theme: "system",
     background_image: null,
     background_preset: null,
+    extra_scan_dirs: [],
   } as AppSettings,
   // 账号列表（顺序 = 面板页顺序）；初始与面板 mock 一致
   accounts: MOCK_ACCOUNTS.map((a) => ({ ...a })),
@@ -571,6 +574,36 @@ export async function setAccountLoginMethod(
     return;
   }
   return invoke<void>("set_account_login_method", { accountId, method });
+}
+
+/** 设置 GLM 账号的团队套餐参数（issue #61）：开关 + 组织 ID + 项目 ID；
+ *  开关开时两 ID 必填，ID 只允许字母数字与 - _；后端校验失败抛中文错误原样透传 */
+export async function setAccountGlmTeam(
+  accountId: string,
+  team: boolean,
+  org: string,
+  project: string,
+): Promise<void> {
+  if (!isTauri) {
+    const account = mockDb.accounts.find((a) => a.id === accountId);
+    if (!account) throw new Error("账号不存在");
+    if (account.provider !== "glm") throw new Error("团队套餐仅 GLM 账号支持");
+    // mock 复刻后端校验：开时两 ID 必填；ID 只允许字母数字与 - _
+    const o = org.trim();
+    const p = project.trim();
+    if (team && (o === "" || p === "")) {
+      throw new Error("开启团队套餐需同时填写组织 ID 与项目 ID");
+    }
+    const idOk = (s: string) => /^[A-Za-z0-9_-]+$/.test(s);
+    if ((o !== "" && !idOk(o)) || (p !== "" && !idOk(p))) {
+      throw new Error("组织/项目 ID 只允许字母、数字与 - _");
+    }
+    account.glm_team = team;
+    account.glm_org = o === "" ? null : o;
+    account.glm_project = p === "" ? null : p;
+    return;
+  }
+  return invoke<void>("set_account_glm_team", { accountId, team, org, project });
 }
 
 /** 保存该账号的 API Key（写入系统凭据管理器）；后端校验失败会抛中文错误，原样透传 */

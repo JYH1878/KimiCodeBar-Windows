@@ -76,6 +76,14 @@ pub fn parse_quota(json: &str) -> Result<KimiQuota, QuotaError> {
     let resp: QuotaResponseWire =
         serde_json::from_str(json).map_err(|e| QuotaError::Parse(e.to_string()))?;
     if !resp.success {
+        // 团队 key 走个人接口的真实形态（issue #61）：HTTP 200 + success:false +
+        // code=500「当前用户不存在coding plan」——给可操作的引导文案而非原始报错
+        let msg = resp.msg.as_deref().unwrap_or("");
+        if resp.code == Some(500) && msg.to_lowercase().contains("coding plan") {
+            return Err(QuotaError::Parse(
+                "该 Key 疑似团队套餐：请在设置里开启团队套餐并填组织/项目 ID".to_string(),
+            ));
+        }
         return Err(QuotaError::Parse(format!(
             "接口返回失败: code={}, msg={}",
             resp.code.map(|c| c.to_string()).unwrap_or_default(),
@@ -85,7 +93,15 @@ pub fn parse_quota(json: &str) -> Result<KimiQuota, QuotaError> {
     let data = resp
         .data
         .ok_or_else(|| QuotaError::Parse("响应缺少 data 段".to_string()))?;
-    Ok(map_quota(&data))
+    let quota = map_quota(&data);
+    // 整份响应无任何可认领行（TOKENS_LIMIT/CREDIT_LIMIT）→ 报错而非静默缺卡：
+    // 团队套餐错走个人路径 / 上游形态漂移都表现为这个形态（TIME_LIMIT 行维持不认领）
+    if quota.five_hour.is_none() && quota.weekly.is_none() {
+        return Err(QuotaError::Parse(
+            "团队套餐响应形态未识别：未发现 TOKENS_LIMIT/CREDIT_LIMIT 额度行".to_string(),
+        ));
+    }
+    Ok(quota)
 }
 
 /// data 段 → KimiQuota：先按 unit/number 精确认领窗口，认剩下的额度行
@@ -302,16 +318,21 @@ mod tests {
     }
 
     #[test]
-    fn missing_limits_yields_empty_windows() {
-        let q = parse_quota(r#"{"success":true,"data":{"level":"max"}}"#).unwrap();
-        assert!(q.five_hour.is_none());
-        assert!(q.weekly.is_none());
-        assert_eq!(q.membership_level.as_deref(), Some("max"));
+    fn missing_limits_is_unrecognized_shape_error() {
+        // 整份响应无任何可认领行 → 报「团队套餐响应形态未识别」，禁止静默缺卡
+        // （2026-09-25 行为变更：旧版返回空窗口 Ok，面板静默缺卡无从排查）
+        let err = parse_quota(r#"{"success":true,"data":{"level":"max"}}"#).unwrap_err();
+        match err {
+            QuotaError::Parse(msg) => {
+                assert!(msg.contains("团队套餐响应形态未识别"), "错误文案: {msg}")
+            }
+            other => panic!("应为 Parse 错误，实际: {other}"),
+        }
     }
 
     #[test]
     fn missing_level_is_none() {
-        let q = parse_quota(r#"{"success":true,"data":{"limits":[]}}"#).unwrap();
+        let q = parse_quota(r#"{"success":true,"data":{"limits":[{"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":10}]}}"#).unwrap();
         assert!(q.membership_level.is_none());
     }
 
@@ -350,10 +371,70 @@ mod tests {
     #[test]
     fn time_limit_row_ignored() {
         // TIME_LIMIT（工具月额度）本版不解析：不参与窗口认领，也不报错
-        let json = r#"{"success":true,"data":{"limits":[{"type":"TIME_LIMIT","usage":1000,"currentValue":120,"remaining":880}]}}"#;
+        let json = r#"{"success":true,"data":{"limits":[{"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":42.5},{"type":"TIME_LIMIT","usage":1000,"currentValue":120,"remaining":880}]}}"#;
         let q = parse_quota(json).unwrap();
-        assert!(q.five_hour.is_none());
-        assert!(q.weekly.is_none());
+        assert!((q.five_hour.unwrap().percent_remaining - 57.5).abs() < 1e-9);
+        assert!(q.weekly.is_none(), "TIME_LIMIT 行不参与周窗认领");
+    }
+
+    #[test]
+    fn time_limit_only_is_unrecognized_shape_error() {
+        // 整份响应只有 TIME_LIMIT 行 = 无可认领额度行 → 「团队套餐响应形态未识别」
+        // （2026-09-25 行为变更：旧版静默返回空窗口）
+        let json = r#"{"success":true,"data":{"limits":[{"type":"TIME_LIMIT","usage":1000,"currentValue":120,"remaining":880}]}}"#;
+        let err = parse_quota(json).unwrap_err();
+        match err {
+            QuotaError::Parse(msg) => {
+                assert!(msg.contains("团队套餐响应形态未识别"), "错误文案: {msg}")
+            }
+            other => panic!("应为 Parse 错误，实际: {other}"),
+        }
+    }
+
+    #[test]
+    fn coding_plan_500_guides_to_team_settings() {
+        // 团队 key 走个人接口的真实形态（issue #61）：HTTP 200 + success:false +
+        // code=500 + msg 含「coding plan」→ 可操作的引导文案（msg 大小写不敏感）
+        let json = r#"{"success":false,"code":500,"msg":"当前用户不存在coding plan","data":null}"#;
+        let err = parse_quota(json).unwrap_err();
+        match err {
+            QuotaError::Parse(msg) => {
+                assert!(
+                    msg.contains("该 Key 疑似团队套餐"),
+                    "应为团队套餐引导文案: {msg}"
+                );
+            }
+            other => panic!("应为 Parse 错误，实际: {other}"),
+        }
+        // 英文形态（大写）同样命中
+        let json_en = r#"{"success":false,"code":500,"msg":"user has no Coding Plan","data":null}"#;
+        assert!(parse_quota(json_en)
+            .unwrap_err()
+            .to_string()
+            .contains("该 Key 疑似团队套餐"));
+        // 其他 code=500 不误伤：维持原始报错文案
+        let other = r#"{"success":false,"code":500,"msg":"internal error","data":null}"#;
+        let msg = parse_quota(other).unwrap_err().to_string();
+        assert!(
+            msg.contains("接口返回失败"),
+            "其他 500 不应被引导文案覆盖: {msg}"
+        );
+    }
+
+    #[test]
+    fn parses_team_plan_fixture() {
+        // 团队套餐（?type=2）响应样例（参考 token-monitor tests/shared/zaiTeamLimits.test.js
+        // 第 60-75 行）：TIME_LIMIT 在前 + 两条 TOKENS_LIMIT；level=max
+        let json = r#"{"success":true,"code":200,"msg":"success","data":{"level":"max","limits":[{"type":"TIME_LIMIT","unit":5,"number":1,"usage":4000,"currentValue":2,"remaining":3998,"percentage":1},{"type":"TOKENS_LIMIT","unit":3,"number":5,"percentage":26},{"type":"TOKENS_LIMIT","unit":6,"number":1,"percentage":5}]}}"#;
+        let q = parse_quota(json).unwrap();
+        assert_eq!(q.membership_level.as_deref(), Some("max"));
+        // 5 小时窗：已用 26% → 剩余 74%
+        let five_hour = q.five_hour.expect("5 小时窗应存在");
+        assert!((five_hour.percent_remaining - 74.0).abs() < 1e-9);
+        // 周窗：已用 5% → 剩余 95%
+        let weekly = q.weekly.expect("周窗应存在");
+        assert!((weekly.percent_remaining - 95.0).abs() < 1e-9);
+        // TIME_LIMIT 行维持不认领：两窗都来自 TOKENS_LIMIT，无第三个窗口概念
     }
 
     #[test]

@@ -191,7 +191,10 @@ async fn fetch_status() -> Result<String, (i32, String)> {
 
     let quota = if use_glm {
         kimicodebar::glm::client::GlmClient::new()
-            .fetch_quota(&token)
+            .fetch_quota(
+                &token,
+                first_account.as_ref().and_then(|a| a.glm_team_params()),
+            )
             .await
             .map_err(|e| (EXIT_FETCH_FAILED, error_json(&format!("获取配额失败: {e}"))))?
     } else {

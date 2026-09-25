@@ -31,6 +31,9 @@ use kimicodebar::i18n;
 /// 面板距上次成功刷新超过该秒数，再次显示时触发后台刷新
 const STALE_SECS: i64 = 60;
 
+/// 额外扫描目录条数上限（issue #57 上半；远程 UNC 扫描是阻塞 IO，防填一堆拖慢每轮扫描）
+pub const MAX_EXTRA_SCAN_DIRS: usize = 10;
+
 /// 全静默取证开关（KCB_TOTAL_SILENCE=1，A/B 实验用，不设设置项不入 README）：
 /// 轮询只做网络+落盘，跳过 tray 更新 / 系统通知 / quota-updated emit。
 /// 若此开关开着游戏仍被踢，即证明轮询链路零系统调用、真凶另有其人。
@@ -73,6 +76,11 @@ pub struct AppSettings {
     /// 预设背景 id（night / aurora / violet / ember），None 表示未选；生效时优先于 image
     #[serde(default)]
     pub background_preset: Option<String>,
+    /// 额外扫描目录（实验性，issue #57 上半）：远程 Kimi Code home 列表
+    /// （绝对路径或 \\ 开头的 UNC），本地消耗统计纳入扫描；
+    /// 保存时逐条校验/归一（见 sanitize_extra_scan_dirs）
+    #[serde(default)]
+    pub extra_scan_dirs: Vec<String>,
 }
 
 impl From<storage::Settings> for AppSettings {
@@ -91,6 +99,7 @@ impl From<storage::Settings> for AppSettings {
             theme: s.theme,
             background_image: s.background_image,
             background_preset: s.background_preset,
+            extra_scan_dirs: s.extra_scan_dirs,
         }
     }
 }
@@ -114,6 +123,7 @@ impl From<AppSettings> for storage::Settings {
             theme: s.theme,
             background_image: s.background_image,
             background_preset: s.background_preset,
+            extra_scan_dirs: s.extra_scan_dirs,
         }
     }
 }
@@ -539,17 +549,17 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
             }
         }
 
-        if any_quota_success {
-            tracing::info!("配额已更新");
-            // 顺手增量扫一次本地 token 统计（扫描自带 180s 节流与增量续读，
-            // 开销可忽略；派生数据，失败不影响刷新主流程）
-            tauri::async_runtime::spawn(async move {
-                let _ = tokio::task::spawn_blocking(kimicodebar::local_usage::scan).await;
-            });
-        }
-
         assemble_panel_state(&inner)
     };
+
+    // 本地扫描在 quota-updated 广播前 await 完成：fire-and-forget 时前端收到广播
+    // 立刻补拉会撞 180s 节流拿到上一轮缓存（自动刷新慢一整拍）。
+    // 扫描自带节流与增量续读，开销可忽略；派生数据，失败不影响刷新主流程。
+    // 必须在锁块外：inner 的 MutexGuard 不能跨 await
+    if any_quota_success {
+        tracing::info!("配额已更新");
+        let _ = tokio::task::spawn_blocking(kimicodebar::local_usage::scan).await;
+    }
 
     // 更新托盘（图标 + tooltip 摘要）：任一账号低额即变红，tooltip 取最差账号摘要。
     // tooltip 文案语言随设置现读现解析，与 assemble_panel_state 的"设置现读"语义一致
@@ -776,9 +786,38 @@ fn merge_settings_with_disk(settings: AppSettings) -> storage::Settings {
     }
 }
 
+/// 额外扫描目录的校验/归一（纯函数便于单测）：trim 去空白、滤空行、逐条要求
+/// 绝对路径（盘符如 C:\…）或 \\ 开头的 UNC 路径、去重（保序）、上限 MAX_EXTRA_SCAN_DIRS 条；
+/// 相对路径返回中文错误（设置页原样展示）。只做字符串层校验，不探活——
+/// 不可达目录由扫描侧每轮 std::fs::exists 跳过（见 local_usage::scan_fresh）
+fn sanitize_extra_scan_dirs(dirs: &[String]) -> Result<Vec<String>, String> {
+    let mut out: Vec<String> = Vec::new();
+    for dir in dirs {
+        let dir = dir.trim();
+        if dir.is_empty() {
+            continue;
+        }
+        let is_unc = dir.starts_with(r"\\");
+        if !is_unc && !std::path::Path::new(dir).is_absolute() {
+            return Err(format!(
+                "额外扫描目录「{dir}」不是合法路径：须为盘符绝对路径（如 C:\\Users\\me\\.kimi-code）或 \\\\ 开头的 UNC 路径"
+            ));
+        }
+        if !out.iter().any(|d| d == dir) {
+            out.push(dir.to_string());
+        }
+    }
+    if out.len() > MAX_EXTRA_SCAN_DIRS {
+        return Err(format!("额外扫描目录最多 {MAX_EXTRA_SCAN_DIRS} 条"));
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String> {
     let mut settings: storage::Settings = merge_settings_with_disk(settings);
+    // 额外扫描目录校验/归一（相对路径拒绝、去重、上限）：失败中文错误直接抛给设置页
+    settings.extra_scan_dirs = sanitize_extra_scan_dirs(&settings.extra_scan_dirs)?;
     // 钳制非法值（与 load_settings 的加载钳制语义一致）
     settings.refresh_interval_min = settings.refresh_interval_min.clamp(
         storage::MIN_REFRESH_INTERVAL_MIN,
@@ -985,6 +1024,60 @@ pub fn set_account_login_method(
         return Err("账号不存在".to_string());
     };
     account.login_method = method;
+    storage::save_settings(&settings)?;
+    emit_snapshot(&app);
+    Ok(())
+}
+
+/// GLM 团队套餐参数的归一化与校验（set_account_glm_team 的纯函数核）：
+/// trim + 空串归 None；开关开时两 ID 必填；ID 只允许字母数字与 - _（拒绝空白/换行）
+fn normalize_glm_team_params(
+    team: bool,
+    org: Option<String>,
+    project: Option<String>,
+) -> Result<(Option<String>, Option<String>), String> {
+    fn valid_id(id: &str) -> bool {
+        !id.is_empty()
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    }
+    let org = org.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let project = project
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if team && (org.is_none() || project.is_none()) {
+        return Err("开启团队套餐需同时填写组织 ID 与项目 ID".to_string());
+    }
+    for id in [&org, &project].into_iter().flatten() {
+        if !valid_id(id) {
+            return Err("组织/项目 ID 只允许字母、数字与 - _".to_string());
+        }
+    }
+    Ok((org, project))
+}
+
+/// 设置 GLM 账号的团队套餐参数（issue #61）：开关 + 组织 ID + 项目 ID。
+/// 仅 GLM 账号可调；开关关闭时保留已填 ID（再开不用重填）
+#[tauri::command]
+pub fn set_account_glm_team(
+    app: AppHandle,
+    account_id: String,
+    team: bool,
+    org: Option<String>,
+    project: Option<String>,
+) -> Result<(), String> {
+    let (org, project) = normalize_glm_team_params(team, org, project)?;
+    let mut settings = storage::load_settings().unwrap_or_default();
+    let Some(account) = settings.accounts.iter_mut().find(|a| a.id == account_id) else {
+        return Err("账号不存在".to_string());
+    };
+    if !account.is_glm() {
+        return Err("团队套餐仅 GLM 账号支持".to_string());
+    }
+    account.glm_team = team;
+    account.glm_org = org;
+    account.glm_project = project;
     storage::save_settings(&settings)?;
     emit_snapshot(&app);
     Ok(())
@@ -1682,7 +1775,10 @@ async fn fetch_with_credential(account: &Account) -> FetchOutcome {
     // 成功结局复用 FetchOutcome::Success：下游与 Kimi 配额全链同构
     // （写缓存、写历史采样、低额判定、5h 重置提醒），只跳过月度拉取（无此接口）
     if account.is_glm() {
-        return match GlmClient::new().fetch_quota_with_raw(&token).await {
+        return match GlmClient::new()
+            .fetch_quota_with_raw(&token, account.glm_team_params())
+            .await
+        {
             Ok((quota, raw)) => FetchOutcome::Success(Box::new((quota, now_unix(), raw))),
             Err(QuotaError::Unauthorized) => {
                 tracing::warn!(
@@ -1991,6 +2087,7 @@ mod tests {
             name: name.to_string(),
             login_method: None,
             provider: "kimi".to_string(),
+            ..Default::default()
         }
     }
 
@@ -2549,6 +2646,65 @@ mod tests {
         assert!(validate_glm_api_key("   \n ").is_err());
     }
 
+    // ---- GLM 团队套餐参数校验（issue #61）----
+
+    #[test]
+    fn glm_team_params_ok_when_team_on_with_both_ids() {
+        let (org, project) =
+            normalize_glm_team_params(true, Some("org-1".into()), Some("proj_2".into())).unwrap();
+        assert_eq!(org.as_deref(), Some("org-1"));
+        assert_eq!(project.as_deref(), Some("proj_2"));
+    }
+
+    #[test]
+    fn glm_team_params_team_on_requires_both_ids() {
+        // 开但缺一 → 保存校验报错（空白 trim 后等同未填）
+        assert!(normalize_glm_team_params(true, None, Some("p".into())).is_err());
+        assert!(normalize_glm_team_params(true, Some("o".into()), None).is_err());
+        assert!(normalize_glm_team_params(true, Some("  ".into()), Some("p".into())).is_err());
+        assert!(normalize_glm_team_params(true, None, None).is_err());
+    }
+
+    #[test]
+    fn glm_team_params_reject_bad_chars_whitespace_newline() {
+        // 只允许字母数字与 - _：空格 / 换行 / 中文 / 点号一律拒
+        for bad in ["org 1", "org\n1", "组织", "org.1", "org/1", "o\trg"] {
+            assert!(
+                normalize_glm_team_params(true, Some(bad.into()), Some("p".into())).is_err(),
+                "应拒绝: {bad:?}"
+            );
+        }
+        // 合法字符全集合
+        assert!(normalize_glm_team_params(true, Some("aZ09-_".into()), Some("p".into())).is_ok());
+    }
+
+    #[test]
+    fn glm_team_params_team_off_allows_empty_and_trims() {
+        // 关 → 原个人路径：两 ID 可空（归一为 None），填了也校验格式并 trim 保留
+        let (org, project) = normalize_glm_team_params(false, None, None).unwrap();
+        assert!(org.is_none() && project.is_none());
+        let (org, project) =
+            normalize_glm_team_params(false, Some(" org-1 ".into()), Some("".into())).unwrap();
+        assert_eq!(org.as_deref(), Some("org-1"));
+        assert!(project.is_none());
+        // 关时填了非法 ID 照样拒（格式校验与开关无关）
+        assert!(normalize_glm_team_params(false, Some("org 1".into()), None).is_err());
+    }
+
+    #[test]
+    fn account_glm_team_params_helper() {
+        // Account::glm_team_params：开关开且两 ID 非空才返回 Some；trim 后为空等同未填
+        let mut acc = glm_account("glm-1", "G");
+        assert_eq!(acc.glm_team_params(), None, "默认关 → 个人路径");
+        acc.glm_team = true;
+        assert_eq!(acc.glm_team_params(), None, "开但未填 → 个人路径");
+        acc.glm_org = Some(" org-1 ".to_string());
+        acc.glm_project = Some("proj_2".to_string());
+        assert_eq!(acc.glm_team_params(), Some(("org-1", "proj_2")));
+        acc.glm_project = Some("   ".to_string());
+        assert_eq!(acc.glm_team_params(), None, "project 全空白 → 个人路径");
+    }
+
     #[test]
     fn glm_panel_low_when_below_threshold() {
         // GLM 走 Kimi 同款配额判定：任一窗口剩余 < warn_threshold_pct 即低额
@@ -2886,5 +3042,60 @@ mod tests {
         assert_eq!(merged.background_preset.as_deref(), Some("night"));
 
         cleanup_extra_key_env(&dir, &service, &[]);
+    }
+
+    // ---- save_settings 额外扫描目录校验（issue #57 上半）----
+
+    #[test]
+    fn sanitize_extra_scan_dirs_accepts_absolute_and_unc() {
+        // 盘符绝对路径与 UNC 都合法；前后空白 trim 掉、纯空白行滤掉
+        let dirs = vec![
+            "  C:\\Users\\me\\.kimi-code  ".to_string(),
+            "   ".to_string(),
+            r"\\server\share\home\u\.kimi-code".to_string(),
+        ];
+        assert_eq!(
+            sanitize_extra_scan_dirs(&dirs).unwrap(),
+            vec![
+                r"C:\Users\me\.kimi-code".to_string(),
+                r"\\server\share\home\u\.kimi-code".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn sanitize_extra_scan_dirs_rejects_relative_paths() {
+        // 纯相对路径与 ..\ 穿越形态都拒绝
+        assert!(sanitize_extra_scan_dirs(&["relative\\path".to_string()]).is_err());
+        assert!(sanitize_extra_scan_dirs(&["..\\evil".to_string()]).is_err());
+        // 失败不改输入的语义由调用方保证（save_settings 里 ? 提前返回，不落盘）
+    }
+
+    #[test]
+    fn sanitize_extra_scan_dirs_dedupes_and_caps_at_ten() {
+        // 空白行滤掉、重复条目保序去重
+        let dirs = vec![
+            "  ".to_string(),
+            r"\\srv\a".to_string(),
+            r"\\srv\a".to_string(),
+            r"\\srv\b".to_string(),
+        ];
+        assert_eq!(
+            sanitize_extra_scan_dirs(&dirs).unwrap(),
+            vec![r"\\srv\a".to_string(), r"\\srv\b".to_string()]
+        );
+
+        // 上限：恰好 10 条通过，第 11 条拒绝
+        let ten: Vec<String> = (0..MAX_EXTRA_SCAN_DIRS)
+            .map(|i| format!(r"\\srv\share{i}"))
+            .collect();
+        assert_eq!(
+            sanitize_extra_scan_dirs(&ten).unwrap().len(),
+            MAX_EXTRA_SCAN_DIRS
+        );
+        let eleven: Vec<String> = (0..=MAX_EXTRA_SCAN_DIRS)
+            .map(|i| format!(r"\\srv\share{i}"))
+            .collect();
+        assert!(sanitize_extra_scan_dirs(&eleven).is_err());
     }
 }

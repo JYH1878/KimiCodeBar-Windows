@@ -948,6 +948,17 @@ function PanelApp() {
     });
   }, [accounts, localUsageMap, fetchLocalUsage]);
 
+  /** 刷新链路（quota-updated / 手动刷新）专用：重拉全部账号的趋势与本地统计。
+   *  不带「已拉过就跳过」守卫——那是首屏预热/翻页的一次性守卫，刷新后历史采样会
+   *  增长、本地扫描可能有新结果，冻结旧值就是本 bug 本体；后端扫描有 180s 节流，
+   *  多账号重复调便宜 */
+  const refetchAllUsageData = useCallback((accList: AccountPanel[]) => {
+    accList.forEach((a) => {
+      void fetchHistory(a.account.id);
+      void fetchLocalUsage(a.account.id);
+    });
+  }, [fetchHistory, fetchLocalUsage]);
+
   /** C 招：离屏页闲时预热（issue #48 第二轮），首屏状态到达后跑一次。
    *  先预取全部账号的趋势/本地统计（首翻时数据已在手，消灭「数据到达挤进动画第一帧」的
    *  冷启动长帧）；齐套后逐个离屏详情页短暂翻 .preheat visible，完成首次样式/布局/光栅化
@@ -1018,7 +1029,10 @@ function PanelApp() {
   const doRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      setState(await refreshNow());
+      const s = await refreshNow();
+      setState(s);
+      // 刷新成功后历史采样与本地统计可能有新结果：补拉全部账号（无一次性守卫）
+      refetchAllUsageData(s.accounts);
     } catch (e) {
       setState((prev) => {
         if (prev === null) return prev;
@@ -1033,7 +1047,7 @@ function PanelApp() {
     } finally {
       setRefreshing(false);
     }
-  }, []);
+  }, [refetchAllUsageData]);
 
   useEffect(() => {
     let alive = true;
@@ -1058,13 +1072,8 @@ function PanelApp() {
     const unlisten = onQuotaUpdated((s) => {
       setState(s);
       // 每次刷新成功后历史采样会增长、本地统计可能有新扫描结果：
-      // 同步重拉当前页账号的趋势与本地统计（失败静默，保留旧数据）；页码 0 是总览页，跳过
-      const idx = pageRef.current - 1;
-      const cur = idx >= 0 ? s.accounts[idx] : undefined;
-      if (cur !== undefined) {
-        fetchHistory(cur.account.id);
-        fetchLocalUsage(cur.account.id);
-      }
+      // 补拉全部账号（不再只拉当前页——总览页/其他详情页也要跟着新），失败静默保留旧数据
+      refetchAllUsageData(s.accounts);
     });
     // 与首屏状态并行检查一次更新；失败（含 error 字段）静默，不打扰用户
     checkUpdate()
@@ -1084,7 +1093,7 @@ function PanelApp() {
       unlistenUpdate();
       clearInterval(timer);
     };
-  }, [doRefresh, fetchHistory, fetchLocalUsage, preheatPages]);
+  }, [doRefresh, preheatPages, refetchAllUsageData]);
 
   // 翻页后按需补拉该账号的历史采样（还没拉过的话）；页码 0 是总览页没有当前账号，accounts[-1] 为 undefined 自然跳过
   useEffect(() => {

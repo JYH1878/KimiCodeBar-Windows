@@ -38,6 +38,7 @@ pub fn migrate_legacy_to_accounts() -> Result<bool, String> {
         name: "账号 1".to_string(),
         login_method: legacy.login_method.clone(),
         provider: "kimi".to_string(),
+        ..Default::default()
     };
     tracing::info!("检测到旧单账号数据，迁移为「账号 1」（id={}）", account.id);
 
