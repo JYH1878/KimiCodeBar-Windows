@@ -95,6 +95,7 @@ fn main() {
             commands::move_account,
             commands::delete_account,
             commands::set_account_login_method,
+            commands::set_account_glm_team,
             commands::set_api_key,
             commands::clear_api_key,
             commands::get_credential_status,

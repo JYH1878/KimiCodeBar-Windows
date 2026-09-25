@@ -3,12 +3,19 @@
 //!
 //! 数据源：枚举全部 CLI home（默认 `{userprofile}/.kimi-code` + glob `.kimi-code-*`，
 //! 见 cli_homes；另含 WSL 侧 home——发行版名单读注册表 Lxss 键，经 `\\wsl.localhost`
-//! 枚举各发行版 home/ 下用户目录与 root/ 的 .kimi-code，见 wsl_homes），递归遍历
-//! 各 home 的 `sessions/**/wire.jsonl`，逐行 JSON，
+//! 枚举各发行版 home/ 下用户目录与 root/ 的 .kimi-code，见 wsl_homes；再加设置里
+//! 手填的远程额外目录 extra_scan_dirs，UNC/Samba 路径，只认 Kimi Code，见 scan_fresh），
+//! 递归遍历各 home 的 `sessions/**/wire.jsonl`，逐行 JSON，
 //! 只认 `{"type":"usage.record",...}` 事件，实测样例：
 //! `{"type":"usage.record","model":"kimi-code/k3","usage":{"inputOther":11592,"output":504,"inputCacheRead":11264,"inputCacheCreation":0},"usageScope":"turn","time":1784973672311}`
 //! （time 为 epoch 毫秒；tokens = inputOther + output + inputCacheRead + inputCacheCreation；
 //! usageScope 实测恒为 "turn"，不作过滤）
+//!
+//! 另认嵌套的 `{"type":"context.append_loop_event","event":{"type":"step.end",...,
+//! "usage":{...与 usage.record 同形...},"llmStreamDurationMs":2000},"time":...}` 行
+//! （实测样例见 parse_step_end_line）：只取 output 与流式时长存为窗口内采样，
+//! 聚合「近 10 分钟输出速率 tok/s」（滑动窗口，每次扫描按扫描时刻裁剪；
+//! 不进 by_date/by_model 逐日累计，活跃判定 last_event_at 语义也不变）
 //!
 //! `__secondary__` 哨兵：开启 Kimi Code 的 secondary_model 实验后，子 agent 的用量事件
 //! model 落为字面量 `"__secondary__"`（实测：
@@ -94,6 +101,8 @@ const TOP_MODELS: usize = 5;
 const SECONDARY_SENTINEL: &str = "__secondary__";
 /// 跨 Harness 去重集（Claude message.id / OpenCode 消息 id）的保留窗口（毫秒）
 const HARNESS_DEDUP_MS: i64 = 48 * 3600 * 1000;
+/// 输出速率滑动窗口：只统计扫描时刻近该窗口内的 step.end 采样
+const RECENT_RATE_WINDOW_MS: i64 = 10 * 60 * 1000;
 /// CSV 表头（与导出约定一致）：时间为本地 ISO（YYYY-MM-DDTHH:mm:ss）
 const CSV_HEADER: &str = "time,weekly,five_hour,monthly";
 
@@ -128,6 +137,8 @@ pub struct LocalUsageStats {
     /// 该账号最近一次 usage.record 事件时间（epoch 毫秒），从未扫到为 null；
     /// 机器级活跃判定位在 ScanView.machine_last_event_at
     pub last_event_at: Option<i64>,
+    /// 近 10 分钟输出速率（tok/s，嵌套 step.end 采样聚合）；窗口内无有效采样为 null
+    pub recent_output_tok_per_sec: Option<f64>,
 }
 
 /// 扫描结果视图（scan 的返回）：机器级最近事件时间 + 各桶统计。
@@ -204,6 +215,26 @@ where
     for wsl_home in wsl_homes() {
         let attribution = snapshot_attribution(&wsl_home);
         targets.push((wsl_home.join("sessions"), attribution));
+    }
+    // 远程额外扫描目录（设置里手填的 UNC/Samba 路径，issue #57 上半）：只覆盖 Kimi Code
+    // 的 sessions/**/wire.jsonl，ZCode/Claude 等 harness 目录仍只认本机、不做远程。
+    // 铁规：走独立通道，绝不并进 cli_homes——那函数被 statusline 复用，混进远程目录
+    // 会往远程 home 写 tui.toml。
+    // 已知风险：UNC 是阻塞 IO 无超时，服务器睡眠/断网会卡住本轮后台扫描
+    // （扫描本就跑在 spawn_blocking，不卡 UI，只是本轮结果晚到）。
+    for dir in crate::storage::load_settings()
+        .unwrap_or_default()
+        .extra_scan_dirs
+    {
+        let home = PathBuf::from(&dir);
+        // 先探活：不可达（服务器关机/路径拼错）本轮跳过，warn 不报错（扫描永不失败哲学）；
+        // 用 Path::exists（std::fs::exists 要 1.81，本 crate MSRV 1.77），失败同样按 false 跳过
+        if !home.exists() {
+            tracing::warn!("额外扫描目录不可达，本轮跳过: {dir}");
+            continue;
+        }
+        let attribution = snapshot_attribution(&home);
+        targets.push((home.join("sessions"), attribution));
     }
     let harness = harness_input(home.as_deref());
     let mut view = scan_full(&targets, &harness, &state_file_path(), now_ms, tz);
@@ -357,6 +388,26 @@ struct UsageEvent {
     tokens: u64,
 }
 
+/// usage 字段（usage.record 与嵌套 step.end 的 usage 同形）：camelCase 原文映射
+#[derive(Default, Deserialize)]
+struct UsageFields {
+    #[serde(rename = "inputOther", default)]
+    input_other: u64,
+    #[serde(default)]
+    output: u64,
+    #[serde(rename = "inputCacheRead", default)]
+    input_cache_read: u64,
+    #[serde(rename = "inputCacheCreation", default)]
+    input_cache_creation: u64,
+}
+
+impl UsageFields {
+    /// 全字段求和（usage.record 的 tokens 口径）
+    fn total(&self) -> u64 {
+        self.input_other + self.output + self.input_cache_read + self.input_cache_creation
+    }
+}
+
 /// 解析单行 wire.jsonl：合法 usage.record 返回事件；其他类型 / 坏 JSON / 缺 time 返回 None。
 /// 缺 model 计入 "unknown" 桶（token 是真实烧掉的，不该因缺标签丢弃）；
 /// usage 字段缺失按 0 计。纯函数，可直接单测。
@@ -373,18 +424,6 @@ fn parse_usage_line(line: &str) -> Option<UsageEvent> {
         time: Option<i64>,
     }
 
-    #[derive(Default, Deserialize)]
-    struct UsageFields {
-        #[serde(rename = "inputOther", default)]
-        input_other: u64,
-        #[serde(default)]
-        output: u64,
-        #[serde(rename = "inputCacheRead", default)]
-        input_cache_read: u64,
-        #[serde(rename = "inputCacheCreation", default)]
-        input_cache_creation: u64,
-    }
-
     let line: WireLine = serde_json::from_str(line).ok()?;
     if line.kind != "usage.record" {
         return None;
@@ -395,10 +434,71 @@ fn parse_usage_line(line: &str) -> Option<UsageEvent> {
     Some(UsageEvent {
         ts_ms,
         model: line.model.unwrap_or_else(|| "unknown".to_string()),
-        tokens: usage.input_other
-            + usage.output
-            + usage.input_cache_read
-            + usage.input_cache_creation,
+        tokens: usage.total(),
+    })
+}
+
+/// 一条嵌套 step.end 事件的解析结果（输出速率的原料）
+#[derive(Debug, PartialEq)]
+struct StepEndEvent {
+    /// epoch 毫秒（行顶层 time）
+    ts_ms: i64,
+    /// 嵌套事件可带 model（实测常缺）：带则走模型路由归属，缺则 CLI 级兜底归属
+    model: Option<String>,
+    output_tokens: u64,
+    /// 流式时长（毫秒；解析层已滤 0）
+    duration_ms: u64,
+}
+
+/// 解析单行 wire.jsonl 里的嵌套 step.end（context.append_loop_event 行 event 键内）：
+/// 实测样例 `{"type":"context.append_loop_event","event":{"type":"step.end","turnId":"0",
+/// "step":1,"finishReason":"tool_use","usage":{"inputOther":100,"output":10,
+/// "inputCacheRead":0,"inputCacheCreation":0},"llmStreamDurationMs":2000},"time":1786600148000}`。
+/// llmStreamDurationMs 为 0/缺失的丢弃（速率分母防除零）；usage 缺失按 0 计。
+/// 纯函数，可直接单测。
+fn parse_step_end_line(line: &str) -> Option<StepEndEvent> {
+    #[derive(Deserialize)]
+    struct WireLine {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(default)]
+        time: Option<i64>,
+        #[serde(default)]
+        event: Option<LoopEvent>,
+    }
+
+    #[derive(Deserialize)]
+    struct LoopEvent {
+        #[serde(rename = "type")]
+        kind: String,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        time: Option<i64>,
+        #[serde(default)]
+        usage: Option<UsageFields>,
+        #[serde(rename = "llmStreamDurationMs", default)]
+        duration_ms: u64,
+    }
+
+    let line: WireLine = serde_json::from_str(line).ok()?;
+    if line.kind != "context.append_loop_event" {
+        return None;
+    }
+    let event = line.event?;
+    if event.kind != "step.end" {
+        return None;
+    }
+    // 窗口时间取行顶层 time（实测在此层）；个别形态带在嵌套事件里时兜底
+    let ts_ms = line.time.or(event.time)?;
+    if event.duration_ms == 0 {
+        return None;
+    }
+    Some(StepEndEvent {
+        ts_ms,
+        model: event.model,
+        output_tokens: event.usage.map_or(0, |u| u.output),
+        duration_ms: event.duration_ms,
     })
 }
 
@@ -409,6 +509,17 @@ where
 {
     let dt = tz.timestamp_millis_opt(ts_ms).single()?;
     Some(dt.format("%Y-%m-%d").to_string())
+}
+
+/// step.end 采样（近 10 分钟输出速率的原料，随聚合器落盘、每次扫描按窗口裁剪）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct StepSample {
+    /// epoch 毫秒
+    ts_ms: i64,
+    /// 该步 output tokens
+    output: u64,
+    /// 流式时长（毫秒，恒 > 0：解析层已滤 0）
+    duration_ms: u64,
 }
 
 /// 按日累计聚合器：扫描产出的事件逐条喂入，最后按"今天"出统计视图。
@@ -425,6 +536,9 @@ struct UsageAggregator {
     /// 不受按日窗口裁剪影响，自适应刷新靠它判"近 10 分钟有无新消耗"
     #[serde(default)]
     last_event_at: Option<i64>,
+    /// 近 10 分钟滑动窗口内的 step.end 采样（输出速率原料；每次扫描裁剪防膨胀）
+    #[serde(default)]
+    step_samples: Vec<StepSample>,
 }
 
 impl UsageAggregator {
@@ -446,6 +560,32 @@ impl UsageAggregator {
         }
     }
 
+    /// 喂入一条 step.end 采样（零时长已在解析层滤除，不进 here）
+    fn add_step(&mut self, sample: StepSample) {
+        self.step_samples.push(sample);
+    }
+
+    /// 裁剪 10 分钟窗口外的采样（滑动窗口：每次扫描以当前时刻为锚，控制状态体积）
+    fn prune_steps(&mut self, now_ms: i64) {
+        let cutoff = now_ms.saturating_sub(RECENT_RATE_WINDOW_MS);
+        self.step_samples.retain(|s| s.ts_ms >= cutoff);
+    }
+
+    /// 近 10 分钟输出速率（tok/s）：窗口内采样 output 总和 ÷ duration 总和 × 1000。
+    /// 窗口内无有效采样（零时长事件解析层即丢弃）或总时长为 0 → None
+    fn recent_output_rate(&self, now_ms: i64) -> Option<f64> {
+        let cutoff = now_ms.saturating_sub(RECENT_RATE_WINDOW_MS);
+        let (tokens, duration) = self
+            .step_samples
+            .iter()
+            .filter(|s| s.ts_ms >= cutoff)
+            .fold((0u64, 0u64), |(t, d), s| (t + s.output, d + s.duration_ms));
+        if duration == 0 {
+            return None;
+        }
+        Some(tokens as f64 / duration as f64 * 1000.0)
+    }
+
     /// 丢弃 30 天前的按日聚合（两个映射同一窗口），控制状态文件体积
     fn prune(&mut self, today: NaiveDate) {
         let cutoff = (today - chrono::Duration::days(BY_DATE_RETENTION_DAYS))
@@ -456,9 +596,9 @@ impl UsageAggregator {
         self.by_date_model.retain(|date, _| date >= &cutoff);
     }
 
-    /// 由累计聚合出统计视图：today 为本地今天；
+    /// 由累计聚合出统计视图：today 为本地今天；now_ms 为扫描时刻（输出速率窗口锚点）；
     /// daily 为最近 7 个自然日（升序、缺日补 0）；by_model 为今日分模型降序 top 5
-    fn finish(&self, today: NaiveDate, last_scan_at: Option<i64>) -> LocalUsageStats {
+    fn finish(&self, today: NaiveDate, last_scan_at: Option<i64>, now_ms: i64) -> LocalUsageStats {
         let day_tokens = |date: NaiveDate| {
             self.by_date
                 .get(&date.format("%Y-%m-%d").to_string())
@@ -498,6 +638,7 @@ impl UsageAggregator {
             by_model,
             last_scan_at,
             last_event_at: self.last_event_at,
+            recent_output_tok_per_sec: self.recent_output_rate(now_ms),
         }
     }
 }
@@ -522,8 +663,9 @@ fn fold_secondary_model(by_model: &mut Vec<ModelUsage>, target: &str) {
 
 /// scan-state.json 的格式版本：归属/聚合规则发生变化即 +1，load_state 发现不一致
 /// 整体丢弃全量重扫（老用户的历史消耗按新规则重新归属）。
-/// 1 = 分账号 buckets 时代（无 version 字段的隐式版本）；2 = 新增 GLM 归属路由
-const STATE_VERSION: u32 = 2;
+/// 1 = 分账号 buckets 时代（无 version 字段的隐式版本）；2 = 新增 GLM 归属路由；
+/// 3 = 新增近 10 分钟 step.end 输出速率聚合（UsageAggregator 新增 step_samples）
+const STATE_VERSION: u32 = 3;
 
 /// 扫描状态（scan-state.json）：格式版本 + 文件偏移 + 分桶累计聚合。损坏/不存在容忍为空状态重新全扫
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -972,6 +1114,7 @@ where
     let mut state = load_state(state_path);
     for aggregator in state.buckets.values_mut() {
         aggregator.prune(today);
+        aggregator.prune_steps(now_ms);
     }
 
     // 逐 home 收集 wire 文件，文件带着所属 home 的归属快照走（该 home 的事件按它归属）
@@ -1049,6 +1192,22 @@ where
                     if let Some(event) = parse_usage_line(line) {
                         let bucket = attribute(&event.model, attribution);
                         state.buckets.entry(bucket).or_default().add(&event, tz);
+                    } else if let Some(step) = parse_step_end_line(line) {
+                        // 带 model 走与 usage.record 相同的模型路由归属；
+                        // 不带走该 home 的 CLI 级兜底归属（attribute_cli）
+                        let bucket = match step.model.as_deref() {
+                            Some(model) => attribute(model, attribution),
+                            None => attribute_cli(attribution),
+                        };
+                        state
+                            .buckets
+                            .entry(bucket)
+                            .or_default()
+                            .add_step(StepSample {
+                                ts_ms: step.ts_ms,
+                                output: step.output_tokens,
+                                duration_ms: step.duration_ms,
+                            });
                     }
                 }
                 state.files.insert(key, new_offset);
@@ -1175,14 +1334,14 @@ where
     let by_account = state
         .buckets
         .iter()
-        .map(|(key, agg)| (key.clone(), agg.finish(today, state.last_scan_at)))
+        .map(|(key, agg)| (key.clone(), agg.finish(today, state.last_scan_at, now_ms)))
         .collect();
     ScanView {
         machine_last_event_at,
         by_account,
         last_scan_at: state.last_scan_at,
         // 空聚合器出 7 天零值模板：无桶账号页显示诚实零（daily 逐日连续契约不破）
-        empty: UsageAggregator::default().finish(today, state.last_scan_at),
+        empty: UsageAggregator::default().finish(today, state.last_scan_at, now_ms),
     }
 }
 
@@ -1533,6 +1692,23 @@ mod tests {
         )
     }
 
+    /// 嵌套 step.end 行（真实格式：event 内 usage 与 usage.record 同形 + llmStreamDurationMs，
+    /// time 在行顶层；model 实测常缺，给 None 时不写该字段）
+    fn step_end_line(model: Option<&str>, rfc3339: &str, output: u64, duration_ms: u64) -> String {
+        let ts = ms(rfc3339);
+        let model_field = model
+            .map(|m| format!(r#""model":"{m}","#))
+            .unwrap_or_default();
+        format!(
+            r#"{{"type":"context.append_loop_event","event":{{"type":"step.end",{model_field}"usage":{{"inputOther":100,"output":{output},"inputCacheRead":0,"inputCacheCreation":0}},"llmStreamDurationMs":{duration_ms}}},"time":{ts}}}"#
+        )
+    }
+
+    /// f64 近似相等（速率是浮点除法，留 1e-9 容差）
+    fn approx(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9
+    }
+
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kimicodebar-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1578,6 +1754,47 @@ mod tests {
         assert_eq!(event.tokens, 0);
     }
 
+    #[test]
+    fn parse_step_end_nested_event() {
+        // 实测真实样例原文（kimi-usage-stats 同款）
+        let line = r#"{"type":"context.append_loop_event","event":{"type":"step.end","turnId":"0","step":1,"finishReason":"tool_use","usage":{"inputOther":100,"output":10,"inputCacheRead":0,"inputCacheCreation":0},"llmStreamDurationMs":2000},"time":1786600148000}"#;
+        let step = parse_step_end_line(line).expect("嵌套 step.end 应能解析");
+        assert_eq!(step.ts_ms, 1786600148000);
+        assert_eq!(step.output_tokens, 10);
+        assert_eq!(step.duration_ms, 2000);
+        assert_eq!(step.model, None);
+        // 嵌套事件自带 model 时原样取出
+        let with_model = parse_step_end_line(&step_end_line(
+            Some("kimi-code/k3"),
+            "2026-07-27T11:55:00+08:00",
+            5,
+            800,
+        ))
+        .unwrap();
+        assert_eq!(with_model.model.as_deref(), Some("kimi-code/k3"));
+        // 行顶层缺 time 时兜底读嵌套事件的 time
+        let nested_time = parse_step_end_line(
+            r#"{"type":"context.append_loop_event","event":{"type":"step.end","usage":{"output":1},"llmStreamDurationMs":500,"time":42}}"#,
+        )
+        .unwrap();
+        assert_eq!(nested_time.ts_ms, 42);
+
+        // 非 append_loop_event 行 / 非 step.end 子事件 / 缺 time / 零时长 → None（防除零）
+        assert!(parse_step_end_line(r#"{"type":"usage.record","time":1}"#).is_none());
+        assert!(parse_step_end_line(
+            r#"{"type":"context.append_loop_event","event":{"type":"tool.call","name":"Read"},"time":1}"#
+        )
+        .is_none());
+        assert!(parse_step_end_line(
+            r#"{"type":"context.append_loop_event","event":{"type":"step.end","usage":{"output":1},"llmStreamDurationMs":500}}"#
+        )
+        .is_none());
+        assert!(parse_step_end_line(
+            r#"{"type":"context.append_loop_event","event":{"type":"step.end","usage":{"output":1},"llmStreamDurationMs":0},"time":1}"#
+        )
+        .is_none());
+    }
+
     // ---- 状态版本迁移 ----
 
     #[test]
@@ -1599,7 +1816,7 @@ mod tests {
         state.files.insert("a.jsonl".to_string(), 7);
         save_state(&path, &state).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"version\": 2"));
+        assert!(text.contains("\"version\": 3"));
         let kept = load_state(&path);
         assert_eq!(kept.files.get("a.jsonl"), Some(&7));
     }
@@ -1644,7 +1861,7 @@ mod tests {
         );
 
         let today = NaiveDate::from_ymd_opt(2026, 7, 27).unwrap();
-        let stats = agg.finish(today, Some(123));
+        let stats = agg.finish(today, Some(123), ms("2026-07-27T12:00:00+08:00"));
         assert_eq!(stats.today_tokens, 10 + 11264);
         assert_eq!(stats.yesterday_tokens, 20 + 11264);
         assert_eq!(stats.last_scan_at, Some(123));
@@ -1695,8 +1912,13 @@ mod tests {
                 ("2026-07-26".to_string(), other_day_models),
             ]),
             last_event_at: None,
+            step_samples: Vec::new(),
         };
-        let stats = agg.finish(NaiveDate::from_ymd_opt(2026, 7, 27).unwrap(), None);
+        let stats = agg.finish(
+            NaiveDate::from_ymd_opt(2026, 7, 27).unwrap(),
+            None,
+            ms("2026-07-27T12:00:00+08:00"),
+        );
         // 降序 top5：echo 200 > bravo/charlie 100（并列按名升序）> alpha 50；delta/foxtrot 被截掉
         let models: Vec<&str> = stats.by_model.iter().map(|m| m.model.as_str()).collect();
         assert_eq!(models, vec!["echo", "bravo", "charlie", "alpha", "delta"]);
@@ -1929,6 +2151,129 @@ mod tests {
             &tz,
         );
         assert_eq!(empty_stats.last_event_at, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 端到端：嵌套 step.end 采样进速率聚合 —— 窗口边界（恰 10 分钟前计入、更早不计）、
+    /// 零时长事件跳过、step.end 不进逐日 tokens、二次扫描不重复、窗口随扫描时刻滑动
+    #[test]
+    fn scan_step_end_rate_window_and_zero_duration() {
+        let dir = temp_dir("local-usage-rate");
+        let sessions = dir.join("sessions");
+        let state_path = dir.join("config").join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+
+        write_wire(
+            &sessions,
+            "main",
+            &[
+                // 窗口内两条（各 50 tok/s）
+                step_end_line(None, "2026-07-27T11:55:00+08:00", 100, 2000),
+                step_end_line(None, "2026-07-27T11:59:30+08:00", 50, 1000),
+                // 恰在 10 分钟边界（now − 600s）：计入（>= 语义），30 tok/s
+                step_end_line(Some("kimi-code/k3"), "2026-07-27T11:50:00+08:00", 90, 3000),
+                // 窗口外（30 分钟前）不计入；零时长事件跳过防除零
+                step_end_line(None, "2026-07-27T11:30:00+08:00", 999, 5000),
+                step_end_line(None, "2026-07-27T11:58:00+08:00", 70, 0),
+                // 老格式 usage.record 照常进逐日累计（与 step.end 采样互不干扰）
+                usage_line("kimi-code/k3", "2026-07-27T11:56:00+08:00", 100, 10),
+            ],
+        );
+
+        // 速率 = (100+50+90)/(2000+1000+3000)×1000 = 40 tok/s；step.end 不进今日 tokens
+        let stats = scan_unassigned(&sessions, &state_path, now, &tz);
+        assert_eq!(stats.today_tokens, 100 + 10 + 11264);
+        assert!(approx(stats.recent_output_tok_per_sec.unwrap(), 40.0));
+
+        // 二次扫描：偏移续读零新行，采样不重复计数
+        let stats2 = scan_unassigned(&sessions, &state_path, now, &tz);
+        assert!(approx(stats2.recent_output_tok_per_sec.unwrap(), 40.0));
+
+        // 窗口随扫描时刻滑动：11 分钟后全部采样出窗 → None
+        let later = now + 11 * 60 * 1000;
+        let stats3 = scan_unassigned(&sessions, &state_path, later, &tz);
+        assert_eq!(stats3.recent_output_tok_per_sec, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 老格式 wire.jsonl（只有 usage.record、无嵌套 step.end）：速率字段 None 且不炸
+    #[test]
+    fn scan_without_step_end_reports_none_rate() {
+        let dir = temp_dir("local-usage-no-rate");
+        let sessions = dir.join("sessions");
+        let state_path = dir.join("config").join("scan-state.json");
+        let now = ms("2026-07-27T12:00:00+08:00");
+        write_wire(
+            &sessions,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T11:00:00+08:00",
+                100,
+                10,
+            )],
+        );
+        let stats = scan_unassigned(&sessions, &state_path, now, &tz8());
+        assert_eq!(stats.today_tokens, 100 + 10 + 11264);
+        assert_eq!(stats.recent_output_tok_per_sec, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// step.end 归属：不带 model 走 CLI 级兜底归属（attribute_cli 的 Kimi 通道命中 acc-a）；
+    /// 带 model 走与 usage.record 相同的模型路由（kimi/deepseek 模型各归各账号）
+    #[test]
+    fn step_end_attributes_by_model_or_cli_fallback() {
+        let dir = temp_dir("local-usage-rate-attr");
+        let sessions = dir.join("sessions");
+        let state_path = dir.join("config").join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+        let attribution = Attribution {
+            cli: CliCredentials {
+                kimi_api_key: opt("sk-kimi-a"),
+                deepseek_api_key: opt("sk-ds-a"),
+                ..Default::default()
+            },
+            kimi_accounts: vec![("acc-a".to_string(), account_creds(opt("sk-kimi-a"), None))],
+            deepseek_accounts: vec![("acc-d".to_string(), account_creds(opt("sk-ds-a"), None))],
+            ..Default::default()
+        };
+
+        write_wire(
+            &sessions,
+            "main",
+            &[
+                // 无 model：attribute_cli → Kimi 通道 → acc-a
+                step_end_line(None, "2026-07-27T11:59:00+08:00", 100, 2000),
+                // 带 kimi 模型：模型路由 Kimi 通道 → acc-a（与上一条同桶，速率合并）
+                step_end_line(Some("kimi-code/k3"), "2026-07-27T11:58:30+08:00", 50, 1000),
+                // 带 deepseek 模型：模型路由 DeepSeek 通道 → acc-d
+                step_end_line(
+                    Some("deepseek-v4-flash"),
+                    "2026-07-27T11:58:00+08:00",
+                    60,
+                    3000,
+                ),
+            ],
+        );
+
+        let view = scan_with(
+            &[(sessions.to_path_buf(), attribution)],
+            &state_path,
+            now,
+            &tz,
+        );
+        let acc_a = view.for_account("acc-a");
+        assert!(approx(acc_a.recent_output_tok_per_sec.unwrap(), 50.0));
+        let acc_d = view.for_account("acc-d");
+        assert!(approx(acc_d.recent_output_tok_per_sec.unwrap(), 20.0));
+        // step.end 采样不进逐日 tokens 累计（速率与消耗口径分离）
+        assert_eq!(acc_a.today_tokens, 0);
+        assert_eq!(acc_d.today_tokens, 0);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2804,12 +3149,14 @@ mod tests {
                     name: "G".to_string(),
                     login_method: Some("api_key".to_string()),
                     provider: "glm".to_string(),
+                    ..Default::default()
                 },
                 crate::storage::Account {
                     id: "acc-kimi".to_string(),
                     name: "K".to_string(),
                     login_method: Some("api_key".to_string()),
                     provider: "kimi".to_string(),
+                    ..Default::default()
                 },
             ],
             ..Default::default()
@@ -2898,6 +3245,7 @@ api_key = "glm-key-nobody"
                 name: "A".to_string(),
                 login_method: Some("api_key".to_string()),
                 provider: "kimi".to_string(),
+                ..Default::default()
             }],
             ..Default::default()
         };
@@ -3548,12 +3896,14 @@ api_key = "glm-key-nobody"
                     name: "A".to_string(),
                     login_method: Some("oauth".to_string()),
                     provider: "kimi".to_string(),
+                    ..Default::default()
                 },
                 crate::storage::Account {
                     id: "acc-b".to_string(),
                     name: "B".to_string(),
                     login_method: Some("oauth".to_string()),
                     provider: "kimi".to_string(),
+                    ..Default::default()
                 },
             ],
             ..Default::default()
@@ -3587,6 +3937,77 @@ api_key = "glm-key-nobody"
         assert_eq!(view.for_account("acc-a").today_tokens, 110);
         assert_eq!(view.for_account("acc-b").today_tokens, 220);
         assert!(!view.by_account.contains_key(UNASSIGNED_BUCKET));
+
+        std::env::remove_var("USERPROFILE");
+        std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
+        std::env::remove_var("KIMICODEBAR_KEYRING_SERVICE");
+        std::env::remove_var("KIMICODEBAR_WSL_ROOT");
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&config);
+    }
+
+    /// 额外扫描目录（issue #57 上半）：设置里手填的远程 home 并入扫描目标——
+    /// 可达目录的 sessions/wire.jsonl 扫出消耗并按该 home 自己的凭证快照归属；
+    /// 不可达目录本轮跳过、整轮不报错（scan_fresh 无 Result，其余目标照常出数）
+    #[test]
+    fn scan_fresh_covers_extra_scan_dirs_and_skips_unreachable() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let root = temp_dir("extra-scan-root");
+        let config = temp_dir("extra-scan-conf");
+        // 本机 USERPROFILE 指到无任何 .kimi-code 的空目录：消耗只能来自额外目录通道
+        std::env::set_var("USERPROFILE", &root);
+        std::env::set_var("KIMICODEBAR_CONFIG_DIR", &config);
+        // keyring 只读探空：隔离 service 名，绝不碰真实凭据
+        std::env::set_var(
+            "KIMICODEBAR_KEYRING_SERVICE",
+            format!("KimiCodeBar-test-{}", uuid::Uuid::new_v4()),
+        );
+        std::env::remove_var("KIMI_SECONDARY_MODEL");
+        // 本机真实 WSL home 不进本测试：根指到不存在目录
+        std::env::set_var("KIMICODEBAR_WSL_ROOT", root.join("no-wsl"));
+
+        // 「远程」home 故意不带 .kimi-code 前缀（cli_homes 发现不了，只能走额外目录通道）
+        let remote = write_cli_home(&root, "remote-home", "", Some("user-r"));
+        let now_ms = chrono::Local::now().timestamp_millis();
+        let line = format!(
+            r#"{{"type":"usage.record","model":"kimi-code/k3","usage":{{"inputOther":300,"output":30,"inputCacheRead":0,"inputCacheCreation":0}},"usageScope":"turn","time":{now_ms}}}"#
+        );
+        write_wire(&remote.join("sessions"), "main", &[line]);
+
+        // 额外目录两个：一个可达、一个不存在；应用侧账号 acc-r 与远程 home 的 OAuth user_id 对应
+        let settings = crate::storage::Settings {
+            accounts: vec![crate::storage::Account {
+                id: "acc-r".to_string(),
+                name: "R".to_string(),
+                login_method: Some("oauth".to_string()),
+                provider: "kimi".to_string(),
+                ..Default::default()
+            }],
+            extra_scan_dirs: vec![
+                remote.to_string_lossy().into_owned(),
+                root.join("no-such-share").to_string_lossy().into_owned(),
+            ],
+            ..Default::default()
+        };
+        std::fs::write(
+            config.join("settings.json"),
+            serde_json::to_string(&settings).unwrap(),
+        )
+        .unwrap();
+        // 应用侧 OAuth 凭证（明文写入临时配置目录；读取时原地转 DPAPI，无碍）
+        let token = jwt_with_payload(r#"{"user_id":"user-r"}"#);
+        std::fs::write(
+            config.join("credentials-acc-r.json"),
+            format!(r#"{{"access_token":"{token}"}}"#),
+        )
+        .unwrap();
+
+        let view = scan_fresh(now_ms, &chrono::Local);
+        // 可达目录扫出消耗并归属 acc-r（tokens = 300 + 30）
+        assert_eq!(view.for_account("acc-r").today_tokens, 330);
+        // 不可达目录只跳过本轮，不报错不串数：无未归属桶，机器级活跃判定不受影响
+        assert!(!view.by_account.contains_key(UNASSIGNED_BUCKET));
+        assert_eq!(view.machine_last_event_at, Some(now_ms));
 
         std::env::remove_var("USERPROFILE");
         std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
@@ -4159,12 +4580,14 @@ api_key = "glm-key-nobody"
                     name: "K".to_string(),
                     login_method: Some("api_key".to_string()),
                     provider: "kimi".to_string(),
+                    ..Default::default()
                 },
                 crate::storage::Account {
                     id: "acc-ds".to_string(),
                     name: "D".to_string(),
                     login_method: Some("api_key".to_string()),
                     provider: "deepseek".to_string(),
+                    ..Default::default()
                 },
             ],
             ..Default::default()
@@ -4275,6 +4698,7 @@ api_key = "glm-key-nobody"
                 name: "A".to_string(),
                 login_method: Some("api_key".to_string()),
                 provider: "kimi".to_string(),
+                ..Default::default()
             }],
             ..Default::default()
         };
@@ -4567,6 +4991,7 @@ api_key = "glm-key-nobody"
                 name: "A".to_string(),
                 login_method: Some("api_key".to_string()),
                 provider: "kimi".to_string(),
+                ..Default::default()
             }],
             ..Default::default()
         };
@@ -4640,6 +5065,7 @@ api_key = "glm-key-a"
                 name: "G".to_string(),
                 login_method: Some("api_key".to_string()),
                 provider: "glm".to_string(),
+                ..Default::default()
             }],
             ..Default::default()
         };
@@ -4702,6 +5128,7 @@ api_key = "glm-key-a"
                 name: "G".to_string(),
                 login_method: Some("api_key".to_string()),
                 provider: "glm".to_string(),
+                ..Default::default()
             }],
             ..Default::default()
         };

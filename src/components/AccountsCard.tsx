@@ -294,6 +294,8 @@ export function AccountsCard({ open, onToggle, addFocusTick }: AccountsCardProps
                         provider={a.provider}
                         status={status ?? null}
                         onChanged={() => void reloadStatus(a.id)}
+                        account={a}
+                        onAccountChanged={() => void reload()}
                       />
                     ) : (
                       <>

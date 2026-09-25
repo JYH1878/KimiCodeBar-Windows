@@ -47,6 +47,8 @@ interface GeneralForm {
   language: string;
   /** 主题模式（"system"/"dark"/"light"，改动立即本地预览，随保存持久化） */
   theme: string;
+  /** 额外扫描目录文本区原文（一行一条，保存时按行拆分 trim 提交，非法值由后端校验） */
+  extraDirs: string;
 }
 
 /** 设置窗口主界面（settings.html 入口） */
@@ -70,6 +72,7 @@ function SettingsApp() {
     hotkey: "",
     language: "system",
     theme: "system",
+    extraDirs: "",
   });
   const [savingGeneral, setSavingGeneral] = useState(false);
   const [generalSaved, setGeneralSaved] = useState(false);
@@ -150,6 +153,7 @@ function SettingsApp() {
           hotkey: s.hotkey ?? "",
           language: s.language ?? "system",
           theme: s.theme ?? "system",
+          extraDirs: (s.extra_scan_dirs ?? []).join("\n"),
         });
         // 应用持久化的语言（初始渲染用的是系统语言兜底）
         void i18n.changeLanguage(resolveLang(s.language));
@@ -237,6 +241,11 @@ function SettingsApp() {
     const refreshMin = Math.min(60, Math.max(1, Math.floor(Number(form.refreshMin)) || 5));
     const threshold = Math.min(99, Math.max(1, Math.floor(Number(form.threshold)) || 20));
     const deepseekThreshold = Math.min(100000, Math.max(0, Number(form.deepseekThreshold) || 5));
+    // 额外扫描目录：一行一条，按行拆分去空白行后提交；相对路径/超上限由后端校验抛中文错误
+    const extraDirs = form.extraDirs
+      .split("\n")
+      .map((s) => s.trim())
+      .filter((s) => s !== "");
     const next: AppSettings = {
       refresh_interval_min: refreshMin,
       adaptive_refresh: form.adaptiveRefresh,
@@ -256,18 +265,20 @@ function SettingsApp() {
       // 背景（预设/图片）由专属命令直写（BackgroundRow 成功后已 reloadSettings），此处原样透传
       background_image: settings.background_image ?? null,
       background_preset: settings.background_preset ?? null,
+      extra_scan_dirs: extraDirs,
     };
     setSavingGeneral(true);
     setGeneralError(null);
     try {
       await saveSettings(next);
       setSettings(next);
-      // 回显钳制后的实际值
+      // 回显钳制后的实际值（额外目录回显归一后的列表）
       setForm((f) => ({
         ...f,
         refreshMin: String(refreshMin),
         threshold: String(threshold),
         deepseekThreshold: String(deepseekThreshold),
+        extraDirs: extraDirs.join("\n"),
       }));
       setGeneralSaved(true);
       if (savedTimerRef.current !== null) clearTimeout(savedTimerRef.current);
@@ -510,6 +521,18 @@ function SettingsApp() {
                 <option value="light">{t("settings.general.themeLight")}</option>
               </select>
             </div>
+            <div className="form-row">
+              <label htmlFor="extra-scan-dirs">{t("settings.general.extraScanDirs")}</label>
+              <textarea
+                id="extra-scan-dirs"
+                className="input textarea"
+                rows={3}
+                placeholder={t("settings.general.extraScanDirsPlaceholder")}
+                value={form.extraDirs}
+                onChange={(e) => setForm((f) => ({ ...f, extraDirs: e.target.value }))}
+              />
+            </div>
+            <p className="hint-muted">{t("settings.general.extraScanDirsHint")}</p>
             <BackgroundRow
               preset={settings.background_preset ?? null}
               imageSet={settings.background_image != null}

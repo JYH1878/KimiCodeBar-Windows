@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { AccountProvider, CredentialStatus } from "../types";
-import { addAccountExtraKey, clearApiKey, openExternalUrl, removeAccountExtraKey, setApiKey } from "../ipc";
+import type { Account, AccountProvider, CredentialStatus } from "../types";
+import { addAccountExtraKey, clearApiKey, openExternalUrl, removeAccountExtraKey, setAccountGlmTeam, setApiKey } from "../ipc";
 
 /** API Key 控制台地址（kimi.com/code 专用，与开放平台不通用） */
 const CONSOLE_URL = "https://www.kimi.com/code/console";
@@ -59,10 +59,15 @@ interface ApiKeySectionProps {
   status: CredentialStatus | null;
   /** 保存/清除成功后回调，父组件重新拉取凭证状态 */
   onChanged: () => void;
+  /** 账号本体（GLM 团队套餐设置需要读 glm_team/glm_org/glm_project；仅 GLM 账号传入） */
+  account?: Account;
+  /** 账号字段变更后回调（团队套餐保存成功），父组件重拉账号列表 */
+  onAccountChanged?: () => void;
 }
 
-/** 设置页"方式A：API Key"分区（按账号配置）；DeepSeek 账号复用本组件（占位符与链接不同） */
-export function ApiKeySection({ accountId, provider = "kimi", status, onChanged }: ApiKeySectionProps) {
+/** 设置页"方式A：API Key"分区（按账号配置）；DeepSeek 账号复用本组件（占位符与链接不同）；
+ *  GLM 账号额外挂团队套餐设置（issue #61：开关 + 组织/项目 ID） */
+export function ApiKeySection({ accountId, provider = "kimi", status, onChanged, account, onAccountChanged }: ApiKeySectionProps) {
   const { t } = useTranslation();
   const [keyInput, setKeyInput] = useState("");
   const [showKey, setShowKey] = useState(false);
@@ -74,6 +79,18 @@ export function ApiKeySection({ accountId, provider = "kimi", status, onChanged 
   const [extraBusy, setExtraBusy] = useState(false);
   const [extraOk, setExtraOk] = useState<string | null>(null);
   const [extraErr, setExtraErr] = useState<string | null>(null);
+  // GLM 团队套餐（issue #61）：开关 + 组织/项目 ID，本地编辑态跟随 account 同步
+  const [teamOn, setTeamOn] = useState(false);
+  const [orgInput, setOrgInput] = useState("");
+  const [projectInput, setProjectInput] = useState("");
+  const [teamBusy, setTeamBusy] = useState(false);
+  const [teamOk, setTeamOk] = useState<string | null>(null);
+  const [teamErr, setTeamErr] = useState<string | null>(null);
+  useEffect(() => {
+    setTeamOn(account?.glm_team ?? false);
+    setOrgInput(account?.glm_org ?? "");
+    setProjectInput(account?.glm_project ?? "");
+  }, [account?.glm_team, account?.glm_org, account?.glm_project]);
 
   const configured = status?.api_key_configured ?? false;
   const masked = status?.api_key_masked ?? null;
@@ -154,6 +171,22 @@ export function ApiKeySection({ accountId, provider = "kimi", status, onChanged 
       setExtraErr(String(e));
     } finally {
       setExtraBusy(false);
+    }
+  };
+
+  /** 保存 GLM 团队套餐设置：开但两 ID 缺一 / ID 含非法字符时后端报错原样展示 */
+  const saveTeam = async () => {
+    setTeamBusy(true);
+    setTeamErr(null);
+    setTeamOk(null);
+    try {
+      await setAccountGlmTeam(accountId, teamOn, orgInput, projectInput);
+      setTeamOk(t("glmTeam.saved"));
+      onAccountChanged?.();
+    } catch (e) {
+      setTeamErr(String(e));
+    } finally {
+      setTeamBusy(false);
     }
   };
 
@@ -256,6 +289,54 @@ export function ApiKeySection({ accountId, provider = "kimi", status, onChanged 
         {extraErr !== null && <p className="hint-err">{extraErr}</p>}
         {extraOk !== null && <p className="hint-ok">{extraOk}</p>}
       </div>
+      {/* GLM 团队套餐（issue #61）：开关 + 组织/项目 ID，仅 GLM 账号可见 */}
+      {isGlm && account && (
+        <div className="extra-keys">
+          <label className="cred-row">
+            <input type="checkbox" checked={teamOn} onChange={(e) => setTeamOn(e.target.checked)} />
+            <span>{t("glmTeam.toggle")}</span>
+          </label>
+          <label className="form-row">
+            <span>{t("glmTeam.org")}</span>
+            <input
+              className="input grow"
+              type="text"
+              placeholder={t("glmTeam.orgPlaceholder")}
+              value={orgInput}
+              onChange={(e) => setOrgInput(e.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+              disabled={!teamOn}
+            />
+          </label>
+          <label className="form-row">
+            <span>{t("glmTeam.project")}</span>
+            <input
+              className="input grow"
+              type="text"
+              placeholder={t("glmTeam.projectPlaceholder")}
+              value={projectInput}
+              onChange={(e) => setProjectInput(e.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+              disabled={!teamOn}
+            />
+          </label>
+          <p className="hint-muted">{t("glmTeam.hint")}</p>
+          {teamErr !== null && <p className="hint-err">{teamErr}</p>}
+          {teamOk !== null && <p className="hint-ok">{teamOk}</p>}
+          <div className="row-end">
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() => void saveTeam()}
+              disabled={teamBusy}
+            >
+              {t("glmTeam.save")}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

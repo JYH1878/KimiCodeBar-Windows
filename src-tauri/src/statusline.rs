@@ -374,6 +374,7 @@ mod tests {
             name: "账号 1".to_string(),
             login_method: None,
             provider: provider.to_string(),
+            ..Default::default()
         }
     }
 

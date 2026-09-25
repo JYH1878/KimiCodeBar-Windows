@@ -28,7 +28,7 @@ pub const MAX_ACCOUNTS: usize = 10;
 /// 单个账号（settings.json 的 accounts 数组元素，snake_case）。
 /// 凭证本体不落盘到这里：API Key / 网页 token 在 Windows 凭据管理器（槽位名带账号 id，
 /// 见 creds.rs），OAuth 在每账号一个 DPAPI 文件 credentials-<id>.json（见 kimi::oauth）。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Account {
     /// 稳定标识（uuid v4），keyring 槽位 / 文件名 / 内存状态都按它索引
     pub id: String,
@@ -40,11 +40,26 @@ pub struct Account {
     /// 提供商："kimi"（默认）/ "deepseek" / "glm"；旧版设置文件无此字段，serde 默认 "kimi"
     #[serde(default = "default_provider")]
     pub provider: String,
+    /// GLM 团队套餐开关（仅 provider="glm" 有意义）：开时额度查询带 ?type=2
+    /// 与 bigmodel-organization / bigmodel-project 请求头（非机密，随 settings.json 落盘）
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub glm_team: bool,
+    /// GLM 团队组织 ID（bigmodel-organization 头）；开关开时必填
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glm_org: Option<String>,
+    /// GLM 团队项目 ID（bigmodel-project 头）；开关开时必填
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glm_project: Option<String>,
 }
 
 /// Account.provider 缺省值：旧版设置文件无此字段的账号一律按 Kimi 处理
 fn default_provider() -> String {
     "kimi".to_string()
+}
+
+/// serde skip_serializing_if 辅助：false 不写入（glm_team 缺省即关）
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 impl Account {
@@ -56,6 +71,20 @@ impl Account {
     /// 是否 GLM Coding Plan 账号（查套餐额度，无月度/总额/Booster 概念）
     pub fn is_glm(&self) -> bool {
         self.provider == "glm"
+    }
+
+    /// GLM 团队套餐参数：开关开且组织/项目 ID 均非空时返回 Some((org, project))；
+    /// 否则为个人套餐路径（不带 type=2 与团队请求头）
+    pub fn glm_team_params(&self) -> Option<(&str, &str)> {
+        if !self.glm_team {
+            return None;
+        }
+        let org = self.glm_org.as_deref()?.trim();
+        let project = self.glm_project.as_deref()?.trim();
+        if org.is_empty() || project.is_empty() {
+            return None;
+        }
+        Some((org, project))
     }
 }
 
@@ -112,6 +141,12 @@ pub struct Settings {
     /// 生效规则：preset 优先于 image；两者皆 None 为无背景（background.rs 注释有完整互斥说明）
     #[serde(default)]
     pub background_preset: Option<String>,
+    /// 额外扫描目录（实验性，issue #57 上半）：用户手填的远程 Kimi Code home
+    /// （UNC/Samba 路径，如 \\server\share\home\u\.kimi-code），本地消耗统计纳入扫描。
+    /// 只读不改（绝不往里写 tui.toml 等）；校验与上限见 commands.rs 的 save_settings。
+    /// 空列表不落盘；旧版设置文件无此字段读回空
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_scan_dirs: Vec<String>,
 }
 
 const fn default_refresh_interval_min() -> u32 {
@@ -152,6 +187,7 @@ impl Default for Settings {
             theme: None,
             background_image: None,
             background_preset: None,
+            extra_scan_dirs: Vec::new(),
         }
     }
 }
@@ -188,6 +224,9 @@ impl Settings {
                 "glm" => "glm".to_string(),
                 _ => default_provider(),
             },
+            glm_team: false,
+            glm_org: None,
+            glm_project: None,
         };
         self.accounts.push(account.clone());
         Ok(account)
@@ -378,6 +417,7 @@ mod tests {
                 name: "账号 1".to_string(),
                 login_method: Some("oauth".to_string()),
                 provider: "deepseek".to_string(),
+                ..Default::default()
             }],
             login_method: Some("oauth".to_string()),
             refresh_interval_min: 15,
@@ -395,6 +435,8 @@ mod tests {
             theme: Some("light".to_string()),
             background_image: Some("background.png".to_string()),
             background_preset: None,
+            // 顺手覆盖额外扫描目录的落盘/读回（UNC 形态，与真实用法一致）
+            extra_scan_dirs: vec![r"\\server\share\home\u\.kimi-code".to_string()],
         };
         save_settings(&settings).unwrap();
         assert!(dir.join("settings.json").exists());
@@ -425,6 +467,7 @@ mod tests {
         assert!(raw.contains("\"provider\""));
         assert!(raw.contains("\"deepseek\""));
         assert!(raw.contains("\"deepseek_warn_threshold\""));
+        assert!(raw.contains("\"extra_scan_dirs\""));
 
         cleanup(&dir);
     }
@@ -513,6 +556,8 @@ mod tests {
         assert!(settings.background_image.is_none());
         // 旧版设置文件无 background_preset 字段：读回 None（未选预设背景）
         assert!(settings.background_preset.is_none());
+        // 旧版设置文件无 extra_scan_dirs 字段：读回空数组（不扫额外目录）
+        assert!(settings.extra_scan_dirs.is_empty());
 
         cleanup(&dir);
     }

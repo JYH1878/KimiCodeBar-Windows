@@ -24,7 +24,7 @@ export function formatTokens(n: number): string {
  * 只收录与 ID 差异明显的模型；未收录的保持原样，避免对未知模型做错误映射。
  */
 const MODEL_DISPLAY: Record<string, string> = {
-  "kimi-for-coding": "K2.7",
+  "kimi-for-coding": "K2.8 Preview",
   "kimi-for-coding-highspeed": "K2.7 HighSpeed",
 };
 
@@ -75,6 +75,7 @@ export function todayWeeklyQuotaPct(points: HistoryPoint[], now: Date = new Date
  * + 今日分模型占比一行小字（与卡片主体同为今日窗口，非累计）
  * + 「占用周配额」小字内联在「今日」标签后（官方周额度已用%的当日增量，
  *   issue #38；周配额数据全缺失的账号——DeepSeek / 无套餐——不渲染）。
+ * + 近 10 分钟输出速率一行小字（嵌套 step.end 采样聚合；无数据不渲染）。
  * last_scan_at 为空（从未扫描）时整卡不渲染。
  */
 export function LocalUsageCard({ stats, history }: LocalUsageCardProps) {
@@ -152,6 +153,13 @@ export function LocalUsageCard({ stats, history }: LocalUsageCardProps) {
         />
       </svg>
       {modelLine !== null && <p className="local-models">{modelLine}</p>}
+      {stats.recent_output_tok_per_sec !== null && stats.recent_output_tok_per_sec !== undefined && (
+        <p className="local-models">
+          {t("localUsage.recentOutputRate", {
+            rate: stats.recent_output_tok_per_sec.toFixed(1),
+          })}
+        </p>
+      )}
     </div>
   );
 }

@@ -35,32 +35,58 @@ impl GlmClient {
     }
 
     /// GET /api/monitor/usage/quota/limit，解析为配额领域模型（CLI --status 用）。
-    pub async fn fetch_quota(&self, key: &str) -> Result<KimiQuota, QuotaError> {
-        let (quota, _raw) = self.fetch_quota_with_raw(key).await?;
+    /// `team` = (组织 ID, 项目 ID)：Some 时走团队套餐（URL 加 ?type=2，
+    /// 另加 bigmodel-organization / bigmodel-project 请求头，issue #61）
+    pub async fn fetch_quota(
+        &self,
+        key: &str,
+        team: Option<(&str, &str)>,
+    ) -> Result<KimiQuota, QuotaError> {
+        let (quota, _raw) = self.fetch_quota_with_raw(key, team).await?;
         Ok(quota)
     }
 
     /// 同上，但连同响应原文一并返回（诊断导出用，与 KimiClient::fetch_quota_with_raw 对齐）。
-    pub async fn fetch_quota_with_raw(&self, key: &str) -> Result<(KimiQuota, String), QuotaError> {
-        let body = self.get_quota_body(key).await?;
+    pub async fn fetch_quota_with_raw(
+        &self,
+        key: &str,
+        team: Option<(&str, &str)>,
+    ) -> Result<(KimiQuota, String), QuotaError> {
+        let body = self.get_quota_body(key, team).await?;
         let quota = models::parse_quota(&body)?;
         Ok((quota, body))
     }
 
+    /// 构造额度查询请求：团队模式拼 ?type=2 并加两个 bigmodel-* 头，个人模式原样
+    fn quota_request(&self, key: &str, team: Option<(&str, &str)>) -> reqwest::RequestBuilder {
+        let mut url = format!("{}/api/monitor/usage/quota/limit", self.base_url);
+        if team.is_some() {
+            url.push_str("?type=2");
+        }
+        let mut req = self
+            .http
+            .get(url)
+            .bearer_auth(key)
+            .header(reqwest::header::ACCEPT, "application/json");
+        if let Some((org, project)) = team {
+            req = req
+                .header("bigmodel-organization", org)
+                .header("bigmodel-project", project);
+        }
+        req
+    }
+
     /// 实际发起 GET 请求并完成状态码映射，2xx 时返回响应原文。
     /// 401/403 → Unauthorized（key 无效）；其他非 2xx（含 429 限流）→ Api；网络失败 → Http。
-    async fn get_quota_body(&self, key: &str) -> Result<String, QuotaError> {
-        let resp = self
-            .http
-            .get(format!("{}/api/monitor/usage/quota/limit", self.base_url))
-            .bearer_auth(key)
-            .header(reqwest::header::ACCEPT, "application/json")
-            .send()
-            .await
-            .map_err(|e| {
-                tracing::warn!("glm quota 请求发送失败: {e}");
-                QuotaError::Http(e.to_string())
-            })?;
+    async fn get_quota_body(
+        &self,
+        key: &str,
+        team: Option<(&str, &str)>,
+    ) -> Result<String, QuotaError> {
+        let resp = self.quota_request(key, team).send().await.map_err(|e| {
+            tracing::warn!("glm quota 请求发送失败: {e}");
+            QuotaError::Http(e.to_string())
+        })?;
 
         let status = resp.status();
         let body = resp.text().await.map_err(|e| {
@@ -85,5 +111,51 @@ impl GlmClient {
             // 线性截断到 200 字符（按 char 取，避免切断 UTF-8 序列）
             message: body.chars().take(200).collect(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn team_mode_appends_type_2_and_team_headers() {
+        // 团队套餐（issue #61）：同 URL 加 ?type=2 + bigmodel-organization / bigmodel-project
+        let req = GlmClient::new()
+            .quota_request("team-key", Some(("org-xxx", "proj_xxx")))
+            .build()
+            .unwrap();
+        assert_eq!(
+            req.url().as_str(),
+            "https://open.bigmodel.cn/api/monitor/usage/quota/limit?type=2"
+        );
+        let headers = req.headers();
+        assert_eq!(headers.get("bigmodel-organization").unwrap(), "org-xxx");
+        assert_eq!(headers.get("bigmodel-project").unwrap(), "proj_xxx");
+        // Bearer 与 Accept 与个人模式一致
+        assert_eq!(
+            headers.get(reqwest::header::AUTHORIZATION).unwrap(),
+            "Bearer team-key"
+        );
+        assert_eq!(
+            headers.get(reqwest::header::ACCEPT).unwrap(),
+            "application/json"
+        );
+    }
+
+    #[test]
+    fn personal_mode_has_no_type_param_nor_team_headers() {
+        let req = GlmClient::new()
+            .quota_request("personal-key", None)
+            .build()
+            .unwrap();
+        assert_eq!(
+            req.url().as_str(),
+            "https://open.bigmodel.cn/api/monitor/usage/quota/limit"
+        );
+        assert!(req.url().query().is_none());
+        let headers = req.headers();
+        assert!(headers.get("bigmodel-organization").is_none());
+        assert!(headers.get("bigmodel-project").is_none());
     }
 }
