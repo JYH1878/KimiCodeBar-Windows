@@ -70,7 +70,7 @@
     "unknown": "未知"
   },
   "booster": {
-    "title": "Booster",
+    "title": "加油包",
     "notEnabled": "未开通",
     "balanceTitle": "加油包余额",
     "monthly": "月度 {{used}}/{{limit}}"

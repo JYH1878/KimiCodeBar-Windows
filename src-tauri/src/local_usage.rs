@@ -15,7 +15,11 @@
 //! "usage":{...与 usage.record 同形...},"llmStreamDurationMs":2000},"time":...}` 行
 //! （实测样例见 parse_step_end_line）：只取 output 与流式时长存为窗口内采样，
 //! 聚合「近 10 分钟输出速率 tok/s」（滑动窗口，每次扫描按扫描时刻裁剪；
-//! 不进 by_date/by_model 逐日累计，活跃判定 last_event_at 语义也不变）
+//! 不进 by_date/by_model 逐日累计，活跃判定 last_event_at 语义也不变）。
+//! step.end 的 model 实测常缺：归属链 = 自带 model → 会话最近所见模型
+//! （usage.record / 带 model 的 step.end 推进，随 scan-state 的 kimi_models
+//! 跨批次记忆）→ CLI 级兜底（attribute_cli）；v1.10.0 直接退兜底会把
+//! DeepSeek 模型会话的速率采样张冠李戴到 Kimi 桶（CLI 兜底 Kimi 优先）
 //!
 //! `__secondary__` 哨兵：开启 Kimi Code 的 secondary_model 实验后，子 agent 的用量事件
 //! model 落为字面量 `"__secondary__"`（实测：
@@ -443,7 +447,8 @@ fn parse_usage_line(line: &str) -> Option<UsageEvent> {
 struct StepEndEvent {
     /// epoch 毫秒（行顶层 time）
     ts_ms: i64,
-    /// 嵌套事件可带 model（实测常缺）：带则走模型路由归属，缺则 CLI 级兜底归属
+    /// 嵌套事件可带 model（实测常缺）：带则走模型路由归属；缺则跟随会话最近
+    /// 所见模型（扫描循环的 session_model），仍无才退 CLI 级兜底归属
     model: Option<String>,
     output_tokens: u64,
     /// 流式时长（毫秒；解析层已滤 0）
@@ -664,8 +669,10 @@ fn fold_secondary_model(by_model: &mut Vec<ModelUsage>, target: &str) {
 /// scan-state.json 的格式版本：归属/聚合规则发生变化即 +1，load_state 发现不一致
 /// 整体丢弃全量重扫（老用户的历史消耗按新规则重新归属）。
 /// 1 = 分账号 buckets 时代（无 version 字段的隐式版本）；2 = 新增 GLM 归属路由；
-/// 3 = 新增近 10 分钟 step.end 输出速率聚合（UsageAggregator 新增 step_samples）
-const STATE_VERSION: u32 = 3;
+/// 3 = 新增近 10 分钟 step.end 输出速率聚合（UsageAggregator 新增 step_samples）；
+/// 4 = 缺 model 的 step.end 改随会话级模型记忆（kimi_models）归属——修 DeepSeek
+///     模型会话的速率采样被 CLI 兜底（Kimi 优先）张冠李戴到 Kimi 桶
+const STATE_VERSION: u32 = 4;
 
 /// 扫描状态（scan-state.json）：格式版本 + 文件偏移 + 分桶累计聚合。损坏/不存在容忍为空状态重新全扫
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -692,6 +699,10 @@ struct ScanState {
     /// Codex 文件路径 → 上次 total_token_usage 累计（差分基线）
     #[serde(default)]
     codex_totals: HashMap<String, CodexTotals>,
+    /// Kimi wire.jsonl 文件路径 → 会话最近所见模型（usage.record / 带 model 的
+    /// step.end 推进；增量续扫下跨批次记忆，供缺 model 的 step.end 归属用）
+    #[serde(default)]
+    kimi_models: HashMap<String, String>,
     /// OpenCode 数据目录 → 扫描水位与已计消息 id
     #[serde(default)]
     opencode: HashMap<String, OpenCodeDbState>,
@@ -1182,20 +1193,32 @@ where
     state.files.retain(|p, _| disk_paths.contains(p));
     state.codex_models.retain(|p, _| disk_paths.contains(p));
     state.codex_totals.retain(|p, _| disk_paths.contains(p));
+    state.kimi_models.retain(|p, _| disk_paths.contains(p));
 
     for (path, attribution) in &files {
         let key = path.to_string_lossy().into_owned();
         let offset = state.files.get(&key).copied().unwrap_or(0);
         match read_new_lines(path, offset) {
             Ok((lines, new_offset)) => {
+                // 会话级模型记忆（随 scan-state 落盘，增量续扫跨批次保留）：
+                // usage.record / 带 model 的 step.end 推进它，供缺 model 的
+                // step.end 跟随会话实际模型归属（修 v1.10.0 直接退 CLI 兜底把
+                // DeepSeek 会话的速率采样张冠李戴到 Kimi 桶）
+                let mut session_model = state.kimi_models.get(&key).cloned();
                 for line in &lines {
                     if let Some(event) = parse_usage_line(line) {
+                        // "unknown" 是缺 model 的占位桶，不是真实模型，不做记忆
+                        if event.model != "unknown" {
+                            session_model = Some(event.model.clone());
+                        }
                         let bucket = attribute(&event.model, attribution);
                         state.buckets.entry(bucket).or_default().add(&event, tz);
                     } else if let Some(step) = parse_step_end_line(line) {
-                        // 带 model 走与 usage.record 相同的模型路由归属；
-                        // 不带走该 home 的 CLI 级兜底归属（attribute_cli）
-                        let bucket = match step.model.as_deref() {
+                        if let Some(model) = &step.model {
+                            session_model = Some(model.clone());
+                        }
+                        // 归属链：step 自带 model → 会话最近所见模型 → CLI 级兜底
+                        let bucket = match step.model.as_deref().or(session_model.as_deref()) {
                             Some(model) => attribute(model, attribution),
                             None => attribute_cli(attribution),
                         };
@@ -1209,6 +1232,9 @@ where
                                 duration_ms: step.duration_ms,
                             });
                     }
+                }
+                if let Some(model) = session_model {
+                    state.kimi_models.insert(key.clone(), model);
                 }
                 state.files.insert(key, new_offset);
             }
@@ -1816,7 +1842,7 @@ mod tests {
         state.files.insert("a.jsonl".to_string(), 7);
         save_state(&path, &state).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
-        assert!(text.contains("\"version\": 3"));
+        assert!(text.contains(&format!("\"version\": {STATE_VERSION}")));
         let kept = load_state(&path);
         assert_eq!(kept.files.get("a.jsonl"), Some(&7));
     }
@@ -2195,6 +2221,102 @@ mod tests {
         let later = now + 11 * 60 * 1000;
         let stats3 = scan_unassigned(&sessions, &state_path, later, &tz);
         assert_eq!(stats3.recent_output_tok_per_sec, None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 回归（v1.10.0 实机抓到）：缺 model 的 step.end 旧版直接退 CLI 级兜底归属
+    /// （attribute_cli 优先 Kimi 通道），DeepSeek 模型会话的速率采样全落 Kimi 桶
+    /// ——DeepSeek 页无速率、Kimi 页速率猛涨，张冠李戴。修复后跟随会话级模型
+    /// 记忆（同会话 usage.record 推进、随 scan-state 落盘跨批次保留）
+    #[test]
+    fn scan_step_end_without_model_follows_session_model() {
+        let dir = temp_dir("local-usage-rate-attr");
+        let sessions = dir.join("sessions");
+        let state_path = dir.join("config").join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+
+        // Kimi Code home 双 provider：kimi 与 deepseek key 都在 config.toml
+        // （此时 CLI 级兜底必中 Kimi 通道，正是旧版张冠李戴的场景）
+        let attr = || Attribution {
+            cli: CliCredentials {
+                kimi_api_key: opt("sk-kimi-a"),
+                deepseek_api_key: opt("sk-ds-a"),
+                ..Default::default()
+            },
+            kimi_accounts: vec![(
+                "acc-kimi".to_string(),
+                account_creds(opt("sk-kimi-a"), None),
+            )],
+            deepseek_accounts: vec![("acc-ds".to_string(), account_creds(opt("sk-ds-a"), None))],
+            ..Default::default()
+        };
+
+        let file = write_wire(
+            &sessions,
+            "main",
+            &[
+                // 会话跑的是 DeepSeek 模型：usage.record 带 model 正常归 acc-ds
+                usage_line("deepseek-v4-pro", "2026-07-27T11:50:00+08:00", 100, 10),
+                // 缺 model 的 step.end：应跟随会话模型归 acc-ds（旧版退兜底归 acc-kimi）
+                step_end_line(None, "2026-07-27T11:55:00+08:00", 100, 2000),
+            ],
+        );
+
+        let view = scan_with(&[(sessions.clone(), attr())], &state_path, now, &tz);
+        // tokens 与速率采样都归 DeepSeek 账号：100 tok / 2000 ms = 50 tok/s
+        assert_eq!(view.for_account("acc-ds").today_tokens, 100 + 10 + 11264);
+        assert!(approx(
+            view.for_account("acc-ds")
+                .recent_output_tok_per_sec
+                .unwrap(),
+            50.0
+        ));
+        // Kimi 账号桶：无 tokens、无速率采样
+        let kimi = view.for_account("acc-kimi");
+        assert_eq!(kimi.today_tokens, 0);
+        assert_eq!(kimi.recent_output_tok_per_sec, None);
+
+        // 增量续扫：本批只有缺 model 的 step.end（无 usage.record），会话模型
+        // 记忆从 scan-state 恢复，不退 CLI 兜底；（100+50)/(2000+1000) = 50 tok/s
+        let mut content = std::fs::read_to_string(&file).unwrap();
+        content.push_str(&step_end_line(None, "2026-07-27T11:58:00+08:00", 50, 1000));
+        content.push('\n');
+        std::fs::write(&file, content).unwrap();
+        let view2 = scan_with(&[(sessions.clone(), attr())], &state_path, now, &tz);
+        assert!(approx(
+            view2
+                .for_account("acc-ds")
+                .recent_output_tok_per_sec
+                .unwrap(),
+            50.0
+        ));
+        assert_eq!(
+            view2.for_account("acc-kimi").recent_output_tok_per_sec,
+            None
+        );
+
+        // 会话中途切回 Kimi 模型：后续缺 model 采样跟随新模型归 acc-kimi
+        let mut content = std::fs::read_to_string(&file).unwrap();
+        content.push_str(&usage_line(
+            "kimi-code/k3",
+            "2026-07-27T11:59:00+08:00",
+            1,
+            1,
+        ));
+        content.push('\n');
+        content.push_str(&step_end_line(None, "2026-07-27T11:59:30+08:00", 30, 1000));
+        content.push('\n');
+        std::fs::write(&file, content).unwrap();
+        let view3 = scan_with(&[(sessions.clone(), attr())], &state_path, now, &tz);
+        assert!(approx(
+            view3
+                .for_account("acc-kimi")
+                .recent_output_tok_per_sec
+                .unwrap(),
+            30.0
+        ));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

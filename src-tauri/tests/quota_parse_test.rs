@@ -105,6 +105,36 @@ fn status_enabled_alias_treated_as_enabled() {
     assert!(q.booster.unwrap().enabled);
 }
 
+/// 真实线上响应的加油包键是 snake_case `booster_wallet`（2026-09-25 实机抓到，
+/// 9-15 诊断导出同为 snake，内层字段仍 camelCase）——只认 schema 文档的
+/// camelCase `boosterWallet` 会把已开通用户静默判成「未开通」（serde 忽略未知键、
+/// 零报错，面板恒显示未开通）
+#[test]
+fn booster_wallet_snake_case_key_parsed() {
+    let json = r#"{
+      "booster_wallet": {
+        "status": "STATUS_ACTIVE",
+        "balance": { "amount": "2500000000", "amountLeft": "1057786500", "unit": "UNIT_CURRENCY" },
+        "monthlyChargeLimitEnabled": true,
+        "monthlyChargeLimit": { "currency": "CNY", "priceInCents": "2500" },
+        "monthlyUsed": { "currency": "CNY", "priceInCents": "995" },
+        "topupLimit": { "currency": "CNY", "priceInCents": "300000" }
+      }
+    }"#;
+    let q = parse_usage(json).unwrap();
+    let b = q
+        .booster
+        .as_ref()
+        .expect("snake_case booster_wallet 应被解析");
+    assert!(b.enabled);
+    // 1057786500 / 1e8 = 10.577865
+    assert!((b.balance_yuan - 10.577865).abs() < 1e-9);
+    assert!(b.monthly_charge_limit_enabled);
+    assert_eq!(b.monthly_charge_limit_yuan, Some(25.0));
+    assert_eq!(b.monthly_used_yuan, Some(9.95));
+    assert_eq!(b.topup_limit_yuan, Some(3000.0));
+}
+
 #[test]
 fn reset_time_parsed_and_formatted() {
     let q = parse_usage(&fixture("full_response.json")).unwrap();

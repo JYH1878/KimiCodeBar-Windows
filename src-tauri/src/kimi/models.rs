@@ -23,7 +23,11 @@ pub struct UsageResponse {
     /// 2026-09 上游改版后响应已不再携带 user 段（会员等级改由网页端
     /// GetSubscription 提供，见 kimi::web）；保留解析以兼容旧形态/兼容代理
     pub user: Option<UserWire>,
-    /// 加油包钱包；未开通时整个字段缺失
+    /// 加油包钱包；未开通时整个字段缺失。
+    /// 真实响应的键是 snake_case `booster_wallet`（2026-09-25 实机抓到，9-15 诊断
+    /// 导出同为 snake；内层字段仍是 camelCase）——schema 文档/fixture 的 canonical
+    /// proto3 camelCase `boosterWallet` 也认，两种键并容
+    #[serde(alias = "booster_wallet")]
     pub booster_wallet: Option<BoosterWalletWire>,
 }
 
