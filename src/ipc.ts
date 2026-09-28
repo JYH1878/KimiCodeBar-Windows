@@ -263,7 +263,7 @@ export async function getUsageHistory(accountId: string): Promise<HistoryPoint[]
  * 翻两页数字必须不同；DeepSeek 账号页也显示此卡故同样有一份）。
  * daily 日期按本地时区生成（与后端 YYYY-MM-DD 契约一致），末位即今日。
  */
-const MOCK_LOCAL_USAGE: Record<string, { today: number; yesterday: number; amounts: number[]; byModel: { model: string; tokens: number }[] }> = {
+const MOCK_LOCAL_USAGE: Record<string, { today: number; yesterday: number; amounts: number[]; byModel: { model: string; tokens: number }[]; cacheRates?: (number | null)[] }> = {
   "mock-acc-1": {
     today: 128400,
     yesterday: 96200,
@@ -273,6 +273,8 @@ const MOCK_LOCAL_USAGE: Record<string, { today: number; yesterday: number; amoun
       { model: "kimi-code/k3", tokens: 406000 },
       { model: "kimi-code/kimi-for-coding", tokens: 128000 },
     ],
+    // 演示缓存命中率：今日 0.97，部分天有值、零消耗/无输入天为 null
+    cacheRates: [null, 0.94, 0.96, null, 0.95, 0.97, 0.97],
   },
   "mock-acc-2": {
     today: 21500,
@@ -297,6 +299,8 @@ function mockLocalUsage(accountId: string): LocalUsageStats {
     return {
       date: `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`,
       tokens,
+      // 命中率样例：mock-acc-1 部分天有值；其余账号无 cacheRates 恒 null
+      cache_hit_rate: mock.cacheRates?.[i] ?? null,
     };
   });
   return {
@@ -308,6 +312,7 @@ function mockLocalUsage(accountId: string): LocalUsageStats {
     last_event_at: Date.now(),
     // 演示：账号 1 给非空速率，其余账号无 step.end 数据为 null
     recent_output_tok_per_sec: accountId === "mock-acc-1" ? 12.5 : null,
+    today_cache_hit_rate: mock.cacheRates?.[6] ?? null,
   };
 }
 

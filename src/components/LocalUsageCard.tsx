@@ -76,6 +76,9 @@ export function todayWeeklyQuotaPct(points: HistoryPoint[], now: Date = new Date
  * + 「占用周配额」小字内联在「今日」标签后（官方周额度已用%的当日增量，
  *   issue #38；周配额数据全缺失的账号——DeepSeek / 无套餐——不渲染）。
  * + 近 10 分钟输出速率一行小字（嵌套 step.end 采样聚合；无数据不渲染）。
+ * + 今日缓存命中率一行小字（今日行后，缓存读 / 输入总量，仅 Kimi wire 事件参与；
+ *   无输入不渲染）+ 近 7 天柱悬停提示追加命中率（当日无输入不追加）
+ * + 底部常显口径说明（含缓存读写 token）。
  * last_scan_at 为空（从未扫描）时整卡不渲染。
  */
 export function LocalUsageCard({ stats, history }: LocalUsageCardProps) {
@@ -118,6 +121,13 @@ export function LocalUsageCard({ stats, history }: LocalUsageCardProps) {
           </span>
         )}
       </div>
+      {stats.today_cache_hit_rate !== null && stats.today_cache_hit_rate !== undefined && (
+        <p className="local-models">
+          {t("localUsage.todayCacheHitRate", {
+            pct: (stats.today_cache_hit_rate * 100).toFixed(1),
+          })}
+        </p>
+      )}
       <svg
         className="local-bars"
         viewBox={`0 0 ${CHART_W} ${CHART_H}`}
@@ -138,7 +148,7 @@ export function LocalUsageCard({ stats, history }: LocalUsageCardProps) {
               height={h}
               rx={3}
             >
-              <title>{`${d.date}: ${formatTokens(d.tokens)}`}</title>
+              <title>{`${d.date}: ${formatTokens(d.tokens)}${d.cache_hit_rate !== null && d.cache_hit_rate !== undefined ? ` · ${t("localUsage.cacheHitRateShort", { pct: (d.cache_hit_rate * 100).toFixed(1) })}` : ""}`}</title>
             </rect>
           );
         })}
@@ -160,6 +170,7 @@ export function LocalUsageCard({ stats, history }: LocalUsageCardProps) {
           })}
         </p>
       )}
+      <p className="local-scope-note">{t("localUsage.tokenScopeNote")}</p>
     </div>
   );
 }

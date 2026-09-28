@@ -1106,6 +1106,14 @@ body,
   color: var(--muted);
 }
 
+/* 本地消耗卡底部口径说明：常显灰小字 */
+.local-scope-note {
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--muted);
+  opacity: 0.75;
+}
+
 /* --- 会员等级 / Booster 一行两小卡 --- */
 
 .mini-row {

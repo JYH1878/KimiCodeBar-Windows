@@ -176,6 +176,9 @@ export interface DailyUsage {
   /** 本地日期 YYYY-MM-DD */
   date: string;
   tokens: number;
+  /** 当日缓存命中率 0-1（缓存读 / 输入总量，仅 Kimi wire 事件参与）；
+   *  当日输入总量为 0（无事件 / 纯 output / 全 harness 事件）为 null */
+  cache_hit_rate?: number | null;
 }
 
 /** 某模型的累计消耗 */
@@ -200,6 +203,8 @@ export interface LocalUsageStats {
   last_event_at: number | null;
   /** 近 10 分钟输出速率（tok/s，嵌套 step.end 聚合）；窗口内无有效采样为 null */
   recent_output_tok_per_sec?: number | null;
+  /** 今日缓存命中率 0-1（即 daily 末位那天的 cache_hit_rate）；今日输入总量为 0 为 null */
+  today_cache_hit_rate?: number | null;
 }
 
 // ============ 主题 ============

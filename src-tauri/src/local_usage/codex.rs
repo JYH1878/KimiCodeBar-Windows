@@ -137,6 +137,9 @@ pub(super) fn settle_new_lines(
                         ts_ms,
                         model: model.clone().unwrap_or_else(|| "unknown".to_string()),
                         tokens,
+                        // 缓存命中率只统计 Kimi wire 事件分量（拍板）：恒 0/0
+                        cache_read: 0,
+                        input_total: 0,
                     });
                 }
             }

@@ -156,6 +156,9 @@ pub(super) fn scan_db(
                     + tokens_of("reasoning")
                     + cache_read
                     + cache_write,
+                // 缓存命中率只统计 Kimi wire 事件分量（拍板）：harness 事件恒 0/0
+                cache_read: 0,
+                input_total: 0,
             },
             provider,
         ));

@@ -63,7 +63,10 @@
     "yesterday": "昨日 {{tokens}}",
     "ariaLabel": "近 7 天每日 Token 消耗柱状图",
     "todayQuotaPct": "（占用周额度 {{pct}}%）",
-    "recentOutputRate": "近 10 分钟输出速率 {{rate}} tok/s"
+    "recentOutputRate": "近 10 分钟输出速率 {{rate}} tok/s",
+    "todayCacheHitRate": "今日缓存命中率 {{pct}}%",
+    "cacheHitRateShort": "命中率 {{pct}}%",
+    "tokenScopeNote": "口径：含缓存读写 token，缓存读单价低、占量大"
   },
   "membership": {
     "title": "会员等级",

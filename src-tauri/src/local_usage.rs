@@ -65,7 +65,13 @@
 //! - 已删账号的桶不主动清，30 天保留窗口自然衰减；
 //! - 文件截断回退为整文件重读，该文件的旧贡献理论上可能重复计数一次
 //!   （会话文件按 uuid 命名、只增不改，实际不会触发）；
-//! - 已消失文件的偏移会被清理，同名新文件从头读，不会按旧偏移跳过开头。
+//! - 已消失文件的偏移按「本轮已扫 root 前缀」清理（见 scan_full）：root 整轮
+//!   不可达（停止的 WSL 发行版、探活失败的 UNC 额外目录）≠ 文件删除，其下
+//!   既有偏移与模型记忆条目原样保留，恢复可见后从旧偏移续扫、不重复计账；
+//!   root 长期不可达时其下真被删的条目随之休眠（不占 CPU 不读盘，无害）；
+//! - 缓存命中率：Kimi wire 事件按日另记缓存读与输入总量
+//!   （inputOther+inputCacheRead+inputCacheCreation，不含 output）两条映射，
+//!   四家 harness 事件按 0/0 计入（不进命中率分子分母）。
 //!
 //! 跨 Harness 扩展（Claude Code / Codex / OpenCode / ZCode 四家本地日志，解析实现见
 //! local_usage/ 子模块）：四家日志与 Kimi home 并列喂同一套分桶聚合器，事件语义
@@ -116,6 +122,9 @@ pub struct DailyUsage {
     /// 本地日期 YYYY-MM-DD
     pub date: String,
     pub tokens: u64,
+    /// 当日缓存命中率（缓存读 / 输入总量，仅 Kimi wire 事件参与）；
+    /// 当日输入总量为 0（无事件 / 纯 output / 全 harness 事件）为 null
+    pub cache_hit_rate: Option<f64>,
 }
 
 /// 某模型的累计消耗（与 src/types.ts 的 ModelUsage 一一对应）
@@ -143,6 +152,9 @@ pub struct LocalUsageStats {
     pub last_event_at: Option<i64>,
     /// 近 10 分钟输出速率（tok/s，嵌套 step.end 采样聚合）；窗口内无有效采样为 null
     pub recent_output_tok_per_sec: Option<f64>,
+    /// 今日缓存命中率（即 daily 末位那天的 cache_hit_rate，前端免翻 daily）；
+    /// 今日输入总量为 0 为 null
+    pub today_cache_hit_rate: Option<f64>,
 }
 
 /// 扫描结果视图（scan 的返回）：机器级最近事件时间 + 各桶统计。
@@ -390,6 +402,11 @@ struct UsageEvent {
     ts_ms: i64,
     model: String,
     tokens: u64,
+    /// 缓存读分量（缓存命中率分子，仅 Kimi wire 事件有值；harness 事件恒 0）
+    cache_read: u64,
+    /// 输入总量（inputOther+inputCacheRead+inputCacheCreation，不含 output；
+    /// 缓存命中率分母，仅 Kimi wire 事件有值；harness 事件恒 0）
+    input_total: u64,
 }
 
 /// usage 字段（usage.record 与嵌套 step.end 的 usage 同形）：camelCase 原文映射
@@ -409,6 +426,11 @@ impl UsageFields {
     /// 全字段求和（usage.record 的 tokens 口径）
     fn total(&self) -> u64 {
         self.input_other + self.output + self.input_cache_read + self.input_cache_creation
+    }
+
+    /// 输入总量（缓存命中率分母口径：三个输入分量之和，不含 output）
+    fn input_total(&self) -> u64 {
+        self.input_other + self.input_cache_read + self.input_cache_creation
     }
 }
 
@@ -439,6 +461,8 @@ fn parse_usage_line(line: &str) -> Option<UsageEvent> {
         ts_ms,
         model: line.model.unwrap_or_else(|| "unknown".to_string()),
         tokens: usage.total(),
+        cache_read: usage.input_cache_read,
+        input_total: usage.input_total(),
     })
 }
 
@@ -541,6 +565,13 @@ struct UsageAggregator {
     /// 不受按日窗口裁剪影响，自适应刷新靠它判"近 10 分钟有无新消耗"
     #[serde(default)]
     last_event_at: Option<i64>,
+    /// 本地日期（YYYY-MM-DD）→ 缓存读 tokens（缓存命中率分子；仅 Kimi wire
+    /// 事件携带分量，harness 事件恒加 0）
+    #[serde(default)]
+    by_date_cache_read: HashMap<String, u64>,
+    /// 本地日期（YYYY-MM-DD）→ 输入总量 tokens（缓存命中率分母，不含 output）
+    #[serde(default)]
+    by_date_input: HashMap<String, u64>,
     /// 近 10 分钟滑动窗口内的 step.end 采样（输出速率原料；每次扫描裁剪防膨胀）
     #[serde(default)]
     step_samples: Vec<StepSample>,
@@ -560,8 +591,11 @@ impl UsageAggregator {
         );
         if let Some(date) = date_key(event.ts_ms, tz) {
             *self.by_date.entry(date.clone()).or_insert(0) += event.tokens;
-            let models = self.by_date_model.entry(date).or_default();
+            let models = self.by_date_model.entry(date.clone()).or_default();
             *models.entry(event.model.clone()).or_insert(0) += event.tokens;
+            // 命中率分子分母：harness 事件为 0/0，不影响比率（纯 harness 日分母为 0 → None）
+            *self.by_date_cache_read.entry(date.clone()).or_insert(0) += event.cache_read;
+            *self.by_date_input.entry(date).or_insert(0) += event.input_total;
         }
     }
 
@@ -591,7 +625,7 @@ impl UsageAggregator {
         Some(tokens as f64 / duration as f64 * 1000.0)
     }
 
-    /// 丢弃 30 天前的按日聚合（两个映射同一窗口），控制状态文件体积
+    /// 丢弃 30 天前的按日聚合（四条映射同一窗口），控制状态文件体积
     fn prune(&mut self, today: NaiveDate) {
         let cutoff = (today - chrono::Duration::days(BY_DATE_RETENTION_DAYS))
             .format("%Y-%m-%d")
@@ -599,6 +633,8 @@ impl UsageAggregator {
         // 日期键零填充定长，字符串序即日期序
         self.by_date.retain(|date, _| date >= &cutoff);
         self.by_date_model.retain(|date, _| date >= &cutoff);
+        self.by_date_cache_read.retain(|date, _| date >= &cutoff);
+        self.by_date_input.retain(|date, _| date >= &cutoff);
     }
 
     /// 由累计聚合出统计视图：today 为本地今天；now_ms 为扫描时刻（输出速率窗口锚点）；
@@ -610,6 +646,16 @@ impl UsageAggregator {
                 .copied()
                 .unwrap_or(0)
         };
+        // 当日缓存命中率 = 缓存读 / 输入总量；输入为 0（无事件 / 纯 output /
+        // 全 harness 事件）→ None（前端不渲染该行）
+        let day_cache_hit_rate = |date: NaiveDate| {
+            let key = date.format("%Y-%m-%d").to_string();
+            let input = self.by_date_input.get(&key).copied().unwrap_or(0);
+            if input == 0 {
+                return None;
+            }
+            Some(self.by_date_cache_read.get(&key).copied().unwrap_or(0) as f64 / input as f64)
+        };
         let daily = (0..DAILY_DAYS)
             .rev()
             .map(|i| {
@@ -617,6 +663,7 @@ impl UsageAggregator {
                 DailyUsage {
                     date: date.format("%Y-%m-%d").to_string(),
                     tokens: day_tokens(date),
+                    cache_hit_rate: day_cache_hit_rate(date),
                 }
             })
             .collect();
@@ -644,6 +691,7 @@ impl UsageAggregator {
             last_scan_at,
             last_event_at: self.last_event_at,
             recent_output_tok_per_sec: self.recent_output_rate(now_ms),
+            today_cache_hit_rate: day_cache_hit_rate(today),
         }
     }
 }
@@ -671,8 +719,13 @@ fn fold_secondary_model(by_model: &mut Vec<ModelUsage>, target: &str) {
 /// 1 = 分账号 buckets 时代（无 version 字段的隐式版本）；2 = 新增 GLM 归属路由；
 /// 3 = 新增近 10 分钟 step.end 输出速率聚合（UsageAggregator 新增 step_samples）；
 /// 4 = 缺 model 的 step.end 改随会话级模型记忆（kimi_models）归属——修 DeepSeek
-///     模型会话的速率采样被 CLI 兜底（Kimi 优先）张冠李戴到 Kimi 桶
-const STATE_VERSION: u32 = 4;
+///     模型会话的速率采样被 CLI 兜底（Kimi 优先）张冠李戴到 Kimi 桶；
+/// 5 = WSL 抖动重复计账根修（四张表的 retain 清理从「全盘 disk_paths」改为
+///     「按本轮已扫 root 前缀」，见 scan_full）+ 按日缓存命中率聚合
+///     （by_date_cache_read / by_date_input）。存量虚高账本随版本不一致整体
+///     丢弃、按现存文件全量重扫归位（拍板：立刻清净，不等 30 天自然衰减；
+///     已被删除会话的历史消耗随之消失，诚实口径）
+const STATE_VERSION: u32 = 5;
 
 /// 扫描状态（scan-state.json）：格式版本 + 文件偏移 + 分桶累计聚合。损坏/不存在容忍为空状态重新全扫
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -1178,7 +1231,19 @@ where
     let mut harness_events: Vec<(UsageEvent, Option<String>)> = Vec::new();
 
     // 已消失的文件清掉偏移：同名新文件会从头读，不会按旧偏移跳过开头
-    // （Kimi wire.jsonl 与 Claude/Codex jsonl 的偏移同住一张表，清理统一做）
+    // （Kimi wire.jsonl 与 Claude/Codex jsonl 的偏移同住一张表，清理统一做）。
+    // 清理范围限定「本轮已扫 root 前缀」：本轮进入扫描目标的 root（scan_targets
+    // 各 sessions 目录 + harness 的 claude/codex/zcode 目录，无论是否扫到文件）
+    // 才清理其前缀下缺席的路径；root 整轮没进目标 ≠ 文件删除——停止的 WSL
+    // 发行版被 wsl_homes 过滤、exists() 探活失败的 extra_scan_dirs UNC 目录，
+    // 其前缀下既有偏移与各模型记忆条目原样保留，恢复可见后从旧偏移续扫、
+    // 不会全量重读重复计账（实锤过：WSL 抖动使 30 天窗口历史被整轮重计）。
+    // 前缀匹配按路径分量（Path::starts_with 语义），禁止裸字符串前缀
+    // （防 /tmp/x 误清 /tmp/x2）；状态键与扫描目标同源枚举（同一批
+    // to_string_lossy 产物），Windows 路径大小写一致性由此保证。
+    // 已知取舍（拍板接受）：root 长期不可达时其下真被删的文件条目休眠不清理
+    // （不占 CPU 不读盘，体积可忽略；会话文件 uuid 命名，同名撞路径实际不可能）；
+    // WSL 发行版整体卸载会留死条目，同样无害。
     let mut disk_paths: HashSet<String> = files
         .iter()
         .map(|(file, _)| file.to_string_lossy().into_owned())
@@ -1190,10 +1255,29 @@ where
     );
     disk_paths.extend(codex_files.iter().map(|f| f.to_string_lossy().into_owned()));
     disk_paths.extend(zcode_files.iter().map(|f| f.to_string_lossy().into_owned()));
-    state.files.retain(|p, _| disk_paths.contains(p));
-    state.codex_models.retain(|p, _| disk_paths.contains(p));
-    state.codex_totals.retain(|p, _| disk_paths.contains(p));
-    state.kimi_models.retain(|p, _| disk_paths.contains(p));
+    let scanned_roots: Vec<&Path> = scan_targets
+        .iter()
+        .map(|(dir, _)| dir.as_path())
+        .chain(harness.claude_dir.as_deref())
+        .chain(harness.codex_dir.as_deref())
+        .chain(harness.zcode_dir.as_deref())
+        .collect();
+    let under_scanned_root = |path: &str| {
+        let path = Path::new(path);
+        scanned_roots.iter().any(|root| path.starts_with(root))
+    };
+    state
+        .files
+        .retain(|p, _| disk_paths.contains(p) || !under_scanned_root(p));
+    state
+        .codex_models
+        .retain(|p, _| disk_paths.contains(p) || !under_scanned_root(p));
+    state
+        .codex_totals
+        .retain(|p, _| disk_paths.contains(p) || !under_scanned_root(p));
+    state
+        .kimi_models
+        .retain(|p, _| disk_paths.contains(p) || !under_scanned_root(p));
 
     for (path, attribution) in &files {
         let key = path.to_string_lossy().into_owned();
@@ -1837,6 +1921,16 @@ mod tests {
         assert!(discarded.files.is_empty() && discarded.buckets.is_empty());
         assert_eq!(discarded.version, STATE_VERSION);
 
+        // v4 状态（version 字段落后一代）→ 同样整体丢弃
+        std::fs::write(
+            &path,
+            r#"{"version":4,"last_scan_at":1,"files":{"a.jsonl":999},"buckets":{"acc-x":{"by_date":{"2026-08-26":5},"by_date_model":{},"last_event_at":1}}}"#,
+        )
+        .unwrap();
+        let discarded = load_state(&path);
+        assert!(discarded.files.is_empty() && discarded.buckets.is_empty());
+        assert_eq!(discarded.version, STATE_VERSION);
+
         // 当前版本状态 → 原样保留（版本字段随 save_state 落盘，下次 load 不再误判）
         let mut state = fresh_state();
         state.files.insert("a.jsonl".to_string(), 7);
@@ -1939,6 +2033,8 @@ mod tests {
             ]),
             last_event_at: None,
             step_samples: Vec::new(),
+            by_date_cache_read: HashMap::new(),
+            by_date_input: HashMap::new(),
         };
         let stats = agg.finish(
             NaiveDate::from_ymd_opt(2026, 7, 27).unwrap(),
@@ -2455,6 +2551,384 @@ mod tests {
         let stats2 = scan_unassigned(&sessions, &state_path, now, &tz);
         assert_eq!(stats2.today_tokens, today_tokens);
         assert_eq!(stats2.by_model, stats.by_model);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- WSL 抖动重复计账根修：已扫 root 前缀清理 ----
+
+    #[test]
+    fn unreachable_root_keeps_offsets_and_no_recount() {
+        // WSL-flap 回归：home 整轮不可达（停止的 WSL 发行版不进扫描目标）
+        // → 其偏移与模型记忆原样保留；恢复可见后续扫，账面零增长（不重复计账）
+        let dir = temp_dir("local-usage-flap");
+        let sessions_a = dir.join("home-a").join("sessions");
+        let sessions_b = dir.join("home-b").join("sessions");
+        let state_path = dir.join("config").join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+
+        let file_a = write_wire(
+            &sessions_a,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T10:00:00+08:00",
+                100,
+                10,
+            )],
+        );
+        let file_b = write_wire(
+            &sessions_b,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T10:00:00+08:00",
+                200,
+                20,
+            )],
+        );
+        let tokens_a = 100 + 10 + 11264;
+        let tokens_b = 200 + 20 + 11264;
+        let key_a = file_a.to_string_lossy().into_owned();
+        let key_b = file_b.to_string_lossy().into_owned();
+        let both = vec![
+            (sessions_a.clone(), Attribution::default()),
+            (sessions_b.clone(), Attribution::default()),
+        ];
+
+        // 第一轮：两个 home 都在目标 → 双双入账，偏移与模型记忆落盘
+        let view = scan_with(&both, &state_path, now, &tz);
+        assert_eq!(
+            view.for_account(UNASSIGNED_BUCKET).today_tokens,
+            tokens_a + tokens_b
+        );
+        let state = load_state(&state_path);
+        assert!(state.files.contains_key(&key_a) && state.files.contains_key(&key_b));
+        assert_eq!(
+            state.kimi_models.get(&key_a).map(String::as_str),
+            Some("kimi-code/k3")
+        );
+
+        // 第二轮：home-a 整轮不可达（模拟 WSL 关机）→ A 的偏移与模型记忆必须还在；
+        // 聚合账本不缩水（B 续扫零增长）
+        let view = scan_with(
+            &[(sessions_b.clone(), Attribution::default())],
+            &state_path,
+            now,
+            &tz,
+        );
+        assert_eq!(
+            view.for_account(UNASSIGNED_BUCKET).today_tokens,
+            tokens_a + tokens_b
+        );
+        let state = load_state(&state_path);
+        assert!(
+            state.files.contains_key(&key_a),
+            "不可达 root 的文件偏移必须保留（否则恢复后全量重读重复计账）"
+        );
+        assert!(
+            state.kimi_models.contains_key(&key_a),
+            "不可达 root 的模型记忆必须保留"
+        );
+
+        // 第三轮：A 恢复可见 → 从旧偏移续扫，账面零增长（修复前这里会整倍重计）
+        let view = scan_with(&both, &state_path, now, &tz);
+        assert_eq!(
+            view.for_account(UNASSIGNED_BUCKET).today_tokens,
+            tokens_a + tokens_b,
+            "WSL 恢复后不得重复计账"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleted_file_under_scanned_root_cleaned() {
+        // root 在扫描目标里、文件盘上没了 → 条目（偏移 + 模型记忆）被清；
+        // 同路径新建文件从头读、不按旧偏移跳过开头
+        let dir = temp_dir("local-usage-deleted");
+        let sessions = dir.join("sessions");
+        let state_path = dir.join("config").join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+
+        let file = write_wire(
+            &sessions,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T10:00:00+08:00",
+                100,
+                10,
+            )],
+        );
+        let key = file.to_string_lossy().into_owned();
+        let old_tokens = 100 + 10 + 11264;
+        scan_unassigned(&sessions, &state_path, now, &tz);
+        assert!(load_state(&state_path).files.contains_key(&key));
+
+        // 文件删除后扫描：root 在目标里 → 条目被清
+        std::fs::remove_file(&file).unwrap();
+        scan_unassigned(&sessions, &state_path, now, &tz);
+        let state = load_state(&state_path);
+        assert!(!state.files.contains_key(&key), "已删文件的偏移必须清理");
+        assert!(
+            !state.kimi_models.contains_key(&key),
+            "已删文件的模型记忆必须清理"
+        );
+
+        // 同路径新建文件（内容不同）：从头读，新事件入账
+        let file = write_wire(
+            &sessions,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T11:00:00+08:00",
+                7,
+                3,
+            )],
+        );
+        assert_eq!(file.to_string_lossy().into_owned(), key);
+        let stats = scan_unassigned(&sessions, &state_path, now, &tz);
+        assert_eq!(stats.today_tokens, old_tokens + (7 + 3 + 11264));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prefix_cleanup_respects_path_components() {
+        // 前缀边界按路径分量：root 「…/x」在扫不能误清「…/x2」下的条目
+        // （裸字符串 startsWith("…/x") 会把 "…/x2/…" 误判为前缀内 → 误清 → 重计）
+        let dir = temp_dir("local-usage-prefix");
+        let root_x = dir.join("x");
+        let root_x2 = dir.join("x2");
+        let state_path = dir.join("config").join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+
+        let file_x = write_wire(
+            &root_x,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T10:00:00+08:00",
+                100,
+                10,
+            )],
+        );
+        let file_x2 = write_wire(
+            &root_x2,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T10:00:00+08:00",
+                200,
+                20,
+            )],
+        );
+        let tokens_x = 100 + 10 + 11264;
+        let tokens_x2 = 200 + 20 + 11264;
+        let key_x2 = file_x2.to_string_lossy().into_owned();
+        let both = vec![
+            (root_x.clone(), Attribution::default()),
+            (root_x2.clone(), Attribution::default()),
+        ];
+        let view = scan_with(&both, &state_path, now, &tz);
+        assert_eq!(
+            view.for_account(UNASSIGNED_BUCKET).today_tokens,
+            tokens_x + tokens_x2
+        );
+
+        // 只扫 root_x：root_x2 的条目必须原样保留（「…/x」的前缀清理不能越界到「…/x2」）
+        scan_with(
+            &[(root_x.clone(), Attribution::default())],
+            &state_path,
+            now,
+            &tz,
+        );
+        let state = load_state(&state_path);
+        assert!(
+            state.files.contains_key(&key_x2),
+            "root 前缀清理必须按路径分量：「…/x」不能误清「…/x2」下的条目"
+        );
+
+        // root_x2 回到目标但文件已删：自己的 root 在扫 → 条目照清（保护不越界续命）
+        std::fs::remove_file(&file_x2).unwrap();
+        scan_with(&both, &state_path, now, &tz);
+        assert!(!load_state(&state_path).files.contains_key(&key_x2));
+
+        // file_x 全程未动：续扫零增长
+        let view = scan_with(&both, &state_path, now, &tz);
+        assert_eq!(
+            view.for_account(UNASSIGNED_BUCKET).today_tokens,
+            tokens_x + tokens_x2
+        );
+        let _ = file_x;
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn v4_state_discarded_and_full_rescan() {
+        // STATE_VERSION 4→5：v4 状态（带 version 字段、buckets 幽灵聚合、越界偏移）
+        // 整体丢弃 → 按现存文件全量重扫：幽灵数字不出现、真实事件计一次
+        let dir = temp_dir("local-usage-v4");
+        let sessions = dir.join("sessions");
+        let state_path = dir.join("config").join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+
+        let file = write_wire(
+            &sessions,
+            "main",
+            &[usage_line(
+                "kimi-code/k3",
+                "2026-07-27T10:00:00+08:00",
+                100,
+                10,
+            )],
+        );
+        let today_tokens = 100 + 10 + 11264;
+        let key = file.to_string_lossy().into_owned();
+        let v4 = serde_json::json!({
+            "version": 4,
+            "last_scan_at": ms("2026-07-27T09:00:00+08:00") / 1000,
+            // 偏移已越过今日事件（模拟旧版已消费）：不丢弃则该事件不会重读
+            "files": { key.clone(): std::fs::metadata(&file).unwrap().len() },
+            "buckets": {
+                UNASSIGNED_BUCKET: {
+                    "by_date": { "2026-07-27": 999999 },
+                    "by_date_model": { "2026-07-27": { "kimi-code/k3": 999999 } },
+                    "last_event_at": ms("2026-07-27T10:00:00+08:00"),
+                }
+            },
+            "kimi_models": { key: "kimi-code/k3" },
+        });
+        std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
+        std::fs::write(&state_path, serde_json::to_string(&v4).unwrap()).unwrap();
+
+        let stats = scan_unassigned(&sessions, &state_path, now, &tz);
+        assert_eq!(
+            stats.today_tokens, today_tokens,
+            "幽灵聚合必须丢弃、真实事件全量重扫计一次"
+        );
+
+        // 落盘的新状态已升到当前版本
+        let state = load_state(&state_path);
+        assert_eq!(state.version, STATE_VERSION);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- 缓存命中率 ----
+
+    #[test]
+    fn parse_usage_line_fills_cache_components() {
+        // 实测真实样例：cache_read = inputCacheRead；input_total = 三个输入分量（不含 output）
+        let line = r#"{"type":"usage.record","model":"kimi-code/k3","usage":{"inputOther":11592,"output":504,"inputCacheRead":11264,"inputCacheCreation":0},"usageScope":"turn","time":1784973672311}"#;
+        let event = parse_usage_line(line).unwrap();
+        assert_eq!(event.cache_read, 11264);
+        assert_eq!(event.input_total, 11592 + 11264); // inputCacheCreation = 0 省略
+                                                      // 缺 usage → 0/0
+        let event = parse_usage_line(r#"{"type":"usage.record","model":"m","time":1000}"#).unwrap();
+        assert_eq!(event.cache_read, 0);
+        assert_eq!(event.input_total, 0);
+    }
+
+    #[test]
+    fn aggregator_cache_hit_rate_per_day_and_none_cases() {
+        let tz = tz8();
+        let mut agg = UsageAggregator::default();
+        // 今天（UTC+8 2026-07-27）：两条 Kimi 事件，分量累计
+        // usage_line 每条 inputCacheRead=11264、inputCacheCreation=0
+        agg.add(
+            &parse_usage_line(&usage_line("m1", "2026-07-27T10:00:00+08:00", 736, 100)).unwrap(),
+            &tz,
+        );
+        agg.add(
+            &parse_usage_line(&usage_line("m1", "2026-07-27T11:00:00+08:00", 1000, 200)).unwrap(),
+            &tz,
+        );
+        // 昨日：纯 output 事件（输入分量全 0）→ tokens 有值但命中率 None
+        let pure_output = UsageEvent {
+            ts_ms: ms("2026-07-26T10:00:00+08:00"),
+            model: "m1".to_string(),
+            tokens: 500,
+            cache_read: 0,
+            input_total: 0,
+        };
+        agg.add(&pure_output, &tz);
+        // 前天：一条 Kimi 事件 + 一条 harness 事件（0/0）→ harness 不进分子分母
+        agg.add(
+            &parse_usage_line(&usage_line("m1", "2026-07-25T10:00:00+08:00", 1000, 0)).unwrap(),
+            &tz,
+        );
+        let harness_event = UsageEvent {
+            ts_ms: ms("2026-07-25T11:00:00+08:00"),
+            model: "gpt-x".to_string(),
+            tokens: 7777,
+            cache_read: 0,
+            input_total: 0,
+        };
+        agg.add(&harness_event, &tz);
+
+        let stats = agg.finish(
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 27).unwrap(),
+            None,
+            ms("2026-07-27T12:00:00+08:00"),
+        );
+        // 今日：cache = 11264*2，input = (736+11264) + (1000+11264) = 24264 → 22528/24264
+        let today_rate = stats.today_cache_hit_rate.unwrap();
+        assert!(approx(today_rate, 22528.0 / 24264.0));
+        // daily 升序末位即今日，与 today_cache_hit_rate 一致
+        let today_daily = stats.daily.last().unwrap();
+        assert_eq!(today_daily.date, "2026-07-27");
+        assert!(approx(today_daily.cache_hit_rate.unwrap(), today_rate));
+        // 昨日（纯 output / 输入 0）→ None；tokens 仍在
+        let yesterday = &stats.daily[stats.daily.len() - 2];
+        assert_eq!(yesterday.date, "2026-07-26");
+        assert_eq!(yesterday.tokens, 500);
+        assert_eq!(yesterday.cache_hit_rate, None);
+        // 前天：harness 事件只进 tokens、不进命中率分子分母 → 11264 / (1000+11264)
+        let before = &stats.daily[stats.daily.len() - 3];
+        assert_eq!(before.date, "2026-07-25");
+        assert_eq!(before.tokens, 11264 + 1000 + 7777);
+        assert!(approx(before.cache_hit_rate.unwrap(), 11264.0 / 12264.0));
+        // 更早的零消耗日 → None
+        assert_eq!(stats.daily[0].cache_hit_rate, None);
+    }
+
+    #[test]
+    fn scan_cache_hit_rate_end_to_end() {
+        // 扫描层端到端：wire 事件的分量经聚合进 daily 与 today_cache_hit_rate
+        let dir = temp_dir("local-usage-cache-rate");
+        let sessions = dir.join("sessions");
+        let state_path = dir.join("config").join("scan-state.json");
+        let tz = tz8();
+        let now = ms("2026-07-27T12:00:00+08:00");
+        write_wire(
+            &sessions,
+            "main",
+            &[
+                usage_line("kimi-code/k3", "2026-07-27T10:00:00+08:00", 100, 10),
+                usage_line("kimi-code/k3", "2026-07-26T10:00:00+08:00", 300, 30),
+            ],
+        );
+        let stats = scan_unassigned(&sessions, &state_path, now, &tz);
+        // 今日：cache 11264 / input (100+11264)；昨日：cache 11264 / input (300+11264)
+        assert!(approx(
+            stats.today_cache_hit_rate.unwrap(),
+            11264.0 / 11364.0
+        ));
+        let yesterday = &stats.daily[stats.daily.len() - 2];
+        assert!(approx(yesterday.cache_hit_rate.unwrap(), 11264.0 / 11564.0));
+        // 续扫（无新行）：命中率不重复累计
+        let stats2 = scan_unassigned(&sessions, &state_path, now, &tz);
+        assert!(approx(
+            stats2.today_cache_hit_rate.unwrap(),
+            11264.0 / 11364.0
+        ));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

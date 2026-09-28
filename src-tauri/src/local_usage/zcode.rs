@@ -118,6 +118,9 @@ pub(super) fn parse_line(line: &str) -> Option<UsageEvent> {
             .and_then(|m| m.id)
             .unwrap_or_else(|| "unknown".to_string()),
         tokens: usage.input + usage.output + usage.cache_read + usage.cache_write,
+        // 缓存命中率只统计 Kimi wire 事件分量（拍板）：harness 事件恒 0/0
+        cache_read: 0,
+        input_total: 0,
     })
 }
 
