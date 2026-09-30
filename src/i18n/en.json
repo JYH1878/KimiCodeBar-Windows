@@ -65,8 +65,7 @@
     "todayQuotaPct": "({{pct}}% of weekly quota)",
     "recentOutputRate": "Output rate (10 min): {{rate}} tok/s",
     "todayCacheHitRate": "Cache hit rate today: {{pct}}%",
-    "cacheHitRateShort": "hit rate {{pct}}%",
-    "tokenScopeNote": "Counts include cache read/write tokens — cache reads are cheap but make up most of the volume"
+    "cacheHitRateShort": "hit rate {{pct}}%"
   },
   "membership": {
     "title": "Membership",

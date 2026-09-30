@@ -76,9 +76,8 @@ export function todayWeeklyQuotaPct(points: HistoryPoint[], now: Date = new Date
  * + 「占用周配额」小字内联在「今日」标签后（官方周额度已用%的当日增量，
  *   issue #38；周配额数据全缺失的账号——DeepSeek / 无套餐——不渲染）。
  * + 近 10 分钟输出速率一行小字（嵌套 step.end 采样聚合；无数据不渲染）。
- * + 今日缓存命中率一行小字（今日行后，缓存读 / 输入总量，仅 Kimi wire 事件参与；
- *   无输入不渲染）+ 近 7 天柱悬停提示追加命中率（当日无输入不追加）
- * + 底部常显口径说明（含缓存读写 token）。
+ * + 今日缓存命中率一行小字（今日行后，缓存读 / 输入总量，Kimi wire 与
+ *   ZCode（GLM）通道参与；无输入不渲染）+ 近 7 天柱悬停提示追加命中率（当日无输入不追加）
  * last_scan_at 为空（从未扫描）时整卡不渲染。
  */
 export function LocalUsageCard({ stats, history }: LocalUsageCardProps) {
@@ -170,7 +169,6 @@ export function LocalUsageCard({ stats, history }: LocalUsageCardProps) {
           })}
         </p>
       )}
-      <p className="local-scope-note">{t("localUsage.tokenScopeNote")}</p>
     </div>
   );
 }

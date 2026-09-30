@@ -9,8 +9,13 @@
 //!   "model":{"modelId":"GLM-5.3-Flash","providerId":"builtin:bigmodel-coding-plan"},
 //!   "response":{"usage":{"inputTokens":62555,"outputTokens":202,
 //!   "totalTokens":62757,"cacheReadTokens":61824,"cacheWriteTokens":0}}}`
-//! tokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens
-//! （totalTokens 恒为四者中前三者之和，不重复计）。
+//! 口径（2026-09-30 三方复核）：inputTokens 是「总输入」= 非缓存输入 + 缓存读 +
+//! 缓存写——ZCode 自身归一化代码 `resources/glm/zcode.cjs` 里
+//! `inputTokens:{total:l+s+a}`（l = input_tokens、s = cache_creation、a =
+//! cache_read）；cacheReadTokens / cacheWriteTokens 只是明细。tokens =
+//! inputTokens + outputTokens（totalTokens 恒等于它），缓存读写不加第二遍。
+//! 复核数据：rollout 42/42 行、ZCode 数据库 857/857 行 `totalTokens ==
+//! inputTokens + outputTokens` 恒成立；旧版按字段名四项相加曾虚高约 1.9 倍。
 //!
 //! 归属 key：`v2/config.json` 的 `provider.<id>.options.apiKey`（多 provider 全量
 //! 收集、去重保序；任一把命中账号登记 key 即归，与 Claude/Codex 同通道）。
@@ -102,8 +107,6 @@ pub(super) fn parse_line(line: &str) -> Option<UsageEvent> {
         output: u64,
         #[serde(default, rename = "cacheReadTokens")]
         cache_read: u64,
-        #[serde(default, rename = "cacheWriteTokens")]
-        cache_write: u64,
     }
 
     let line: Line = serde_json::from_str(line).ok()?;
@@ -117,10 +120,10 @@ pub(super) fn parse_line(line: &str) -> Option<UsageEvent> {
             .model
             .and_then(|m| m.id)
             .unwrap_or_else(|| "unknown".to_string()),
-        tokens: usage.input + usage.output + usage.cache_read + usage.cache_write,
-        // 缓存命中率只统计 Kimi wire 事件分量（拍板）：harness 事件恒 0/0
-        cache_read: 0,
-        input_total: 0,
+        tokens: usage.input + usage.output,
+        // 缓存命中率分子/分母：inputTokens 已含缓存读（见模块头），cacheReadTokens 是明细
+        cache_read: usage.cache_read,
+        input_total: usage.input,
     })
 }
 
@@ -168,8 +171,10 @@ mod tests {
         .expect("真实结构应能解析");
         assert_eq!(event.model, "GLM-5.3-Flash");
         assert_eq!(event.ts_ms, 1787964583472);
-        // tokens = 62555 + 202 + 61824 + 0；totalTokens 字段不重复计
-        assert_eq!(event.tokens, 124581);
+        // tokens = 62555 + 202（inputTokens 已含缓存读 61824，不加第二遍）
+        assert_eq!(event.tokens, 62757);
+        assert_eq!(event.cache_read, 61824);
+        assert_eq!(event.input_total, 62555);
     }
 
     #[test]

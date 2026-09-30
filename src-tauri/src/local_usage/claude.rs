@@ -146,8 +146,8 @@ pub(super) fn settle_new_lines(
                 ts_ms: msg.ts_ms,
                 model: msg.model.clone(),
                 tokens: msg.tokens - counted,
-                // 缓存命中率只统计 Kimi wire 事件分量（拍板，
-                // Claude 流式差分的分量改造出范围）：恒 0/0
+                // 缓存命中率只统计 Kimi wire 与 ZCode 通道；本通道（Claude
+                // 流式差分，分量改造出范围）不参与：恒 0/0
                 cache_read: 0,
                 input_total: 0,
             });

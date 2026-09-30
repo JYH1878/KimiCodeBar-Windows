@@ -176,8 +176,8 @@ export interface DailyUsage {
   /** 本地日期 YYYY-MM-DD */
   date: string;
   tokens: number;
-  /** 当日缓存命中率 0-1（缓存读 / 输入总量，仅 Kimi wire 事件参与）；
-   *  当日输入总量为 0（无事件 / 纯 output / 全 harness 事件）为 null */
+  /** 当日缓存命中率 0-1（缓存读 / 输入总量，Kimi wire 与 ZCode 通道参与）；
+   *  当日输入总量为 0（无事件 / 纯 output / 其余 harness 事件）为 null */
   cache_hit_rate?: number | null;
 }
 

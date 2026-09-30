@@ -69,9 +69,10 @@
 //!   不可达（停止的 WSL 发行版、探活失败的 UNC 额外目录）≠ 文件删除，其下
 //!   既有偏移与模型记忆条目原样保留，恢复可见后从旧偏移续扫、不重复计账；
 //!   root 长期不可达时其下真被删的条目随之休眠（不占 CPU 不读盘，无害）；
-//! - 缓存命中率：Kimi wire 事件按日另记缓存读与输入总量
-//!   （inputOther+inputCacheRead+inputCacheCreation，不含 output）两条映射，
-//!   四家 harness 事件按 0/0 计入（不进命中率分子分母）。
+//! - 缓存命中率：Kimi wire 事件（inputOther+inputCacheRead+inputCacheCreation，
+//!   不含 output）与 ZCode 通道（inputTokens 已含缓存读写，见 zcode.rs）按日
+//!   另记缓存读与输入总量两条映射；Claude/Codex/OpenCode 事件按 0/0 计入
+//!   （不进命中率分子分母）。
 //!
 //! 跨 Harness 扩展（Claude Code / Codex / OpenCode / ZCode 四家本地日志，解析实现见
 //! local_usage/ 子模块）：四家日志与 Kimi home 并列喂同一套分桶聚合器，事件语义
@@ -122,8 +123,8 @@ pub struct DailyUsage {
     /// 本地日期 YYYY-MM-DD
     pub date: String,
     pub tokens: u64,
-    /// 当日缓存命中率（缓存读 / 输入总量，仅 Kimi wire 事件参与）；
-    /// 当日输入总量为 0（无事件 / 纯 output / 全 harness 事件）为 null
+    /// 当日缓存命中率（缓存读 / 输入总量，Kimi wire 与 ZCode 通道参与）；
+    /// 当日输入总量为 0（无事件 / 纯 output / 其余 harness 事件）为 null
     pub cache_hit_rate: Option<f64>,
 }
 
@@ -402,10 +403,10 @@ struct UsageEvent {
     ts_ms: i64,
     model: String,
     tokens: u64,
-    /// 缓存读分量（缓存命中率分子，仅 Kimi wire 事件有值；harness 事件恒 0）
+    /// 缓存读分量（缓存命中率分子；Kimi wire 与 ZCode 通道携带，其余 harness 事件恒 0）
     cache_read: u64,
-    /// 输入总量（inputOther+inputCacheRead+inputCacheCreation，不含 output；
-    /// 缓存命中率分母，仅 Kimi wire 事件有值；harness 事件恒 0）
+    /// 输入总量（缓存命中率分母，不含 output；Kimi 为 inputOther+inputCacheRead+
+    /// inputCacheCreation 之和，ZCode 即 inputTokens——已含缓存读写，见 zcode.rs）
     input_total: u64,
 }
 
@@ -565,8 +566,8 @@ struct UsageAggregator {
     /// 不受按日窗口裁剪影响，自适应刷新靠它判"近 10 分钟有无新消耗"
     #[serde(default)]
     last_event_at: Option<i64>,
-    /// 本地日期（YYYY-MM-DD）→ 缓存读 tokens（缓存命中率分子；仅 Kimi wire
-    /// 事件携带分量，harness 事件恒加 0）
+    /// 本地日期（YYYY-MM-DD）→ 缓存读 tokens（缓存命中率分子；Kimi wire 与
+    /// ZCode 通道携带分量，其余 harness 事件恒加 0）
     #[serde(default)]
     by_date_cache_read: HashMap<String, u64>,
     /// 本地日期（YYYY-MM-DD）→ 输入总量 tokens（缓存命中率分母，不含 output）
@@ -593,7 +594,8 @@ impl UsageAggregator {
             *self.by_date.entry(date.clone()).or_insert(0) += event.tokens;
             let models = self.by_date_model.entry(date.clone()).or_default();
             *models.entry(event.model.clone()).or_insert(0) += event.tokens;
-            // 命中率分子分母：harness 事件为 0/0，不影响比率（纯 harness 日分母为 0 → None）
+            // 命中率分子分母：Kimi/ZCode 携带真实分量，Claude/Codex/OpenCode
+            // 为 0/0 不影响比率（全 0/0 日分母为 0 → None）
             *self.by_date_cache_read.entry(date.clone()).or_insert(0) += event.cache_read;
             *self.by_date_input.entry(date).or_insert(0) += event.input_total;
         }
@@ -647,7 +649,7 @@ impl UsageAggregator {
                 .unwrap_or(0)
         };
         // 当日缓存命中率 = 缓存读 / 输入总量；输入为 0（无事件 / 纯 output /
-        // 全 harness 事件）→ None（前端不渲染该行）
+        // 全 0/0 harness 事件）→ None（前端不渲染该行）
         let day_cache_hit_rate = |date: NaiveDate| {
             let key = date.format("%Y-%m-%d").to_string();
             let input = self.by_date_input.get(&key).copied().unwrap_or(0);
@@ -724,8 +726,12 @@ fn fold_secondary_model(by_model: &mut Vec<ModelUsage>, target: &str) {
 ///     「按本轮已扫 root 前缀」，见 scan_full）+ 按日缓存命中率聚合
 ///     （by_date_cache_read / by_date_input）。存量虚高账本随版本不一致整体
 ///     丢弃、按现存文件全量重扫归位（拍板：立刻清净，不等 30 天自然衰减；
-///     已被删除会话的历史消耗随之消失，诚实口径）
-const STATE_VERSION: u32 = 5;
+///     已被删除会话的历史消耗随之消失，诚实口径）；
+/// 6 = ZCode（GLM）通道补缓存分量（cache_read = cacheReadTokens、input_total =
+///     inputTokens，见 zcode.rs）+ tokens 口径修正（inputTokens 已含缓存读写，
+///     原四项相加把缓存读/写加了第二遍、虚高约 1.9 倍）。同为升级即全量重扫：
+///     已被 ZCode 轮转删除的旧日志随之出账（拍板接受，账面归真实）
+const STATE_VERSION: u32 = 6;
 
 /// 扫描状态（scan-state.json）：格式版本 + 文件偏移 + 分桶累计聚合。损坏/不存在容忍为空状态重新全扫
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -2770,10 +2776,10 @@ mod tests {
     }
 
     #[test]
-    fn v4_state_discarded_and_full_rescan() {
-        // STATE_VERSION 4→5：v4 状态（带 version 字段、buckets 幽灵聚合、越界偏移）
+    fn v5_state_discarded_and_full_rescan() {
+        // STATE_VERSION 5→6：v5 状态（带 version 字段、buckets 幽灵聚合、越界偏移）
         // 整体丢弃 → 按现存文件全量重扫：幽灵数字不出现、真实事件计一次
-        let dir = temp_dir("local-usage-v4");
+        let dir = temp_dir("local-usage-v5");
         let sessions = dir.join("sessions");
         let state_path = dir.join("config").join("scan-state.json");
         let tz = tz8();
@@ -2791,8 +2797,8 @@ mod tests {
         );
         let today_tokens = 100 + 10 + 11264;
         let key = file.to_string_lossy().into_owned();
-        let v4 = serde_json::json!({
-            "version": 4,
+        let v5 = serde_json::json!({
+            "version": 5,
             "last_scan_at": ms("2026-07-27T09:00:00+08:00") / 1000,
             // 偏移已越过今日事件（模拟旧版已消费）：不丢弃则该事件不会重读
             "files": { key.clone(): std::fs::metadata(&file).unwrap().len() },
@@ -2806,7 +2812,7 @@ mod tests {
             "kimi_models": { key: "kimi-code/k3" },
         });
         std::fs::create_dir_all(state_path.parent().unwrap()).unwrap();
-        std::fs::write(&state_path, serde_json::to_string(&v4).unwrap()).unwrap();
+        std::fs::write(&state_path, serde_json::to_string(&v5).unwrap()).unwrap();
 
         let stats = scan_unassigned(&sessions, &state_path, now, &tz);
         assert_eq!(
@@ -4699,11 +4705,13 @@ api_key = "glm-key-nobody"
     }
 
     /// ZCode model-io 行（真实结构压缩：completedAt / model.modelId /
-    /// response.usage 驼峰字段；tokens = 100 + output + 1000）
+    /// response.usage 驼峰字段。真实形状：inputTokens 是总输入、已含缓存读——
+    /// input=1100（其中缓存读 1000）、cacheWrite=0、totalTokens = input + output；
+    /// 新口径 tokens = 1100 + output，命中率分量 1000/1100）
     fn zcode_line(model: &str, output: u64, rfc3339: &str) -> String {
         format!(
-            r#"{{"completedAt":"{rfc3339}","requestId":"req-{output}","attempt":1,"model":{{"modelId":"{model}","providerId":"builtin:bigmodel-coding-plan"}},"response":{{"usage":{{"inputTokens":100,"outputTokens":{output},"totalTokens":{total},"cacheReadTokens":1000,"cacheWriteTokens":0}}}}}}"#,
-            total = 100 + output,
+            r#"{{"completedAt":"{rfc3339}","requestId":"req-{output}","attempt":1,"model":{{"modelId":"{model}","providerId":"builtin:bigmodel-coding-plan"}},"response":{{"usage":{{"inputTokens":1100,"outputTokens":{output},"totalTokens":{total},"cacheReadTokens":1000,"cacheWriteTokens":0}}}}}}"#,
+            total = 1100 + output,
         )
     }
 
@@ -4926,9 +4934,14 @@ api_key = "glm-key-nobody"
         let tz = tz8();
         let now = ms("2026-08-22T12:00:00+08:00");
 
-        // 每行 tokens = 100 + output + 1000：1300 + 1150 = 2450
+        // 每行 tokens = 1100 + output（inputTokens 已含缓存读）：1300 + 1150 = 2450；
+        // 命中率分量每行 1000/1100 → 两条 2000/2200 = 1000/1100
         let view = scan_full(&[], &harness, &state_path, now, &tz);
         assert_eq!(view.for_account("acc-g").today_tokens, 2450);
+        assert_eq!(
+            view.for_account("acc-g").today_cache_hit_rate,
+            Some(1000.0 / 1100.0)
+        );
         assert_eq!(view.for_account("acc-g").by_model[0].model, "GLM-5.3-Flash");
         assert!(!view.by_account.contains_key(UNASSIGNED_BUCKET));
 
@@ -4978,6 +4991,11 @@ api_key = "glm-key-nobody"
 
         let view = scan_full(&[], &harness, &state_path, now, &tz);
         assert_eq!(view.for_account(UNASSIGNED_BUCKET).today_tokens, 1300);
+        // 未归属桶同样带缓存分量：1000/1100
+        assert_eq!(
+            view.for_account(UNASSIGNED_BUCKET).today_cache_hit_rate,
+            Some(1000.0 / 1100.0)
+        );
         assert_eq!(view.for_account("acc-g").today_tokens, 0);
         assert_eq!(view.machine_last_event_at, Some(ms("2026-08-22T10:00:00Z")));
 
@@ -5209,6 +5227,15 @@ api_key = "glm-key-nobody"
         // Claude(111) + OpenCode(33) 归 Kimi 账号；Codex(222) + ZCode(1144) 归 DeepSeek 账号
         assert_eq!(view.for_account("acc-kimi").today_tokens, 111 + 33);
         assert_eq!(view.for_account("acc-ds").today_tokens, 222 + 1144);
+        // ZCode 事件携带缓存分量（1000/1100）：DeepSeek 桶显示命中率；
+        // Codex 的 0/0 不进分母（222 不参与），Claude/OpenCode 同 → Kimi 桶 None
+        let ds = view.for_account("acc-ds");
+        assert_eq!(ds.today_cache_hit_rate, Some(1000.0 / 1100.0));
+        assert_eq!(
+            ds.daily.last().unwrap().cache_hit_rate,
+            Some(1000.0 / 1100.0)
+        );
+        assert_eq!(view.for_account("acc-kimi").today_cache_hit_rate, None);
         // 四家全部归属成功：未归属桶不生成（账号视图不含未归属数字）
         assert!(!view.by_account.contains_key(UNASSIGNED_BUCKET));
         assert_eq!(view.machine_last_event_at, Some(now_ms));

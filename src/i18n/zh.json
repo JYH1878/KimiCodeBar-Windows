@@ -65,8 +65,7 @@
     "todayQuotaPct": "（占用周额度 {{pct}}%）",
     "recentOutputRate": "近 10 分钟输出速率 {{rate}} tok/s",
     "todayCacheHitRate": "今日缓存命中率 {{pct}}%",
-    "cacheHitRateShort": "命中率 {{pct}}%",
-    "tokenScopeNote": "口径：含缓存读写 token，缓存读单价低、占量大"
+    "cacheHitRateShort": "命中率 {{pct}}%"
   },
   "membership": {
     "title": "会员等级",
