@@ -1,6 +1,6 @@
 // 桌面悬浮球（issue #58；v2 视觉重做）：常驻桌面的 5 小时/7 天额度玻璃珠。
 // 外环 = 7 天（weekly）、内环 = 5 小时（five_hour），中心数字 = 当前口径剩余百分比；
-// 颜色阈值固定（>40 绿 / 15–40 琥珀 / <15 红，与告警阈值无关），色值取自 App 主题。
+// 颜色随设置「低额度告警阈值」联动（T：<T 红 / T~2T 琥珀 / >2T 绿），色值取自 App 主题。
 //
 // 交互：Pointer Events 分段——按下只记起点（指针捕获），位移越过 5px 才交给系统
 // 拖拽（startDragging；防止 mousedown 即拖吞掉点击）；onMoved 静止 300ms 判拖拽
@@ -35,8 +35,8 @@ import {
 const DRAG_SETTLE_MS = 300;
 /** 点击 vs 拖拽：mouseup 时屏幕位移小于该像素判点击 */
 const CLICK_MAX_DRAG_PX = 5;
-/** 告急阈值：剩余低于它弧光呼吸（固定值，与告警设置无关） */
-const CRITICAL_PCT = 15;
+/** 低额度告警阈值兜底（设置未取到前用，与后端默认一致；后端已钳 1–99） */
+const DEFAULT_WARN_PCT = 20;
 /** 两端圆帽弧的最小可见量（约 3°）：剩余极低时也要看得见一截，不假装断了 */
 const MIN_ARC_DEG = 3;
 
@@ -55,11 +55,11 @@ const EMPTY_STATE: WidgetState = {
   balance_pct: null,
 };
 
-/** 剩余百分比 → 颜色（固定阈值，与告警设置无关；无数据灰） */
-function pctColor(pct: number | null): string {
+/** 剩余百分比 → 颜色（随告警阈值 T 联动：>2T 绿 / T~2T 琥珀 / <T 红；恰好 2T 与恰好 T 都算琥珀；无数据灰） */
+function pctColor(pct: number | null, warnPct: number): string {
   if (pct === null) return "rgba(255,255,255,0.32)";
-  if (pct > 40) return "#9ece6a";
-  if (pct >= CRITICAL_PCT) return "#e0af68";
+  if (pct > warnPct * 2) return "#9ece6a";
+  if (pct >= warnPct) return "#e0af68";
   return "#f7768e";
 }
 
@@ -116,17 +116,19 @@ function Ring({
   r,
   stroke,
   color,
+  warnPct,
 }: {
   pct: number | null;
   r: number;
   stroke: number;
   color?: string;
+  warnPct: number;
 }) {
   const c = 2 * Math.PI * r;
   const frac = pct === null ? 0 : Math.max(0, Math.min(100, pct)) / 100;
   const minFrac = MIN_ARC_DEG / 360;
   const shown = pct === null || pct <= 0 ? 0 : Math.max(frac, minFrac);
-  const arc = color ?? pctColor(pct);
+  const arc = color ?? pctColor(pct, warnPct);
   return (
     <>
       <circle cx={38} cy={38} r={r} fill="none" stroke="var(--w-track)" strokeWidth={stroke} />
@@ -142,7 +144,7 @@ function Ring({
           strokeDasharray={`${c * shown} ${c}`}
           transform="rotate(-90 38 38)"
           style={{ filter: `drop-shadow(0 0 2.4px ${withAlpha(arc, "80")})` }}
-          className={color === undefined && pct !== null && pct < CRITICAL_PCT ? "ring-crit" : undefined}
+          className={color === undefined && pct !== null && pct < warnPct ? "ring-crit" : undefined}
         />
       )}
     </>
@@ -152,7 +154,7 @@ function Ring({
 /** 自由态：玻璃珠（双环 + 中央数字栈；占位态灰数字 "--"、无口径标）。
  *  余额类账号（DeepSeek）：外环按「距告警线的比例」填充、内环只留底轨，
  *  中心显示余额金额 + 币种符号 */
-function Ball({ state }: { state: WidgetState }) {
+function Ball({ state, warnPct }: { state: WidgetState; warnPct: number }) {
   const { t } = useTranslation();
   const hasBalance = state.balance_pct !== null && state.balance !== null;
   const center = state.center_pct;
@@ -164,7 +166,7 @@ function Ball({ state }: { state: WidgetState }) {
   const unit = hasBalance
     ? `${currencySymbol(state.balance_currency)} ${t("widget.balance")}`
     : centerMetricLabel(state);
-  const accent = hasBalance ? balanceColor(state.balance_pct as number) : center === null ? null : pctColor(center);
+  const accent = hasBalance ? balanceColor(state.balance_pct as number) : center === null ? null : pctColor(center, warnPct);
   const numColor = accent ?? "var(--w-faint)";
   const numClass =
     numText.length > 4
@@ -186,13 +188,13 @@ function Ball({ state }: { state: WidgetState }) {
         <circle cx={38} cy={38} r={21} fill="url(#w-well)" />
         {hasBalance ? (
           <>
-            <Ring pct={balanceFill(state.balance_pct as number)} r={32} stroke={4.4} color={accent as string} />
-            <Ring pct={null} r={21.5} stroke={4.4} />
+            <Ring pct={balanceFill(state.balance_pct as number)} r={32} stroke={4.4} color={accent as string} warnPct={warnPct} />
+            <Ring pct={null} r={21.5} stroke={4.4} warnPct={warnPct} />
           </>
         ) : (
           <>
-            <Ring pct={state.weekly_pct} r={32} stroke={4.4} />
-            <Ring pct={state.five_hour_pct} r={21.5} stroke={4.4} />
+            <Ring pct={state.weekly_pct} r={32} stroke={4.4} warnPct={warnPct} />
+            <Ring pct={state.five_hour_pct} r={21.5} stroke={4.4} warnPct={warnPct} />
           </>
         )}
       </svg>
@@ -218,14 +220,14 @@ function Ball({ state }: { state: WidgetState }) {
 
 /** 细条内的一根微柱：底轨 + 从底按剩余填充的色柱（颜色给扫读、柱高给精确量）。
  *  color 缺省按剩余阈值取色；余额模式传自定义色（健康度带） */
-function Gauge({ pct, color }: { pct: number | null; color?: string }) {
-  const arc = color ?? pctColor(pct);
+function Gauge({ pct, color, warnPct }: { pct: number | null; color?: string; warnPct: number }) {
+  const arc = color ?? pctColor(pct, warnPct);
   const h = pct === null ? 0 : Math.max(0, Math.min(100, pct));
   return (
     <div className="gauge">
       {h > 0 && (
         <i
-          className={color === undefined && pct !== null && pct < CRITICAL_PCT ? "crit" : undefined}
+          className={color === undefined && pct !== null && pct < warnPct ? "crit" : undefined}
           style={{ height: `${h}%`, background: arc, boxShadow: `0 0 6px ${withAlpha(arc, "66")}` }}
         />
       )}
@@ -235,18 +237,18 @@ function Gauge({ pct, color }: { pct: number | null; color?: string }) {
 
 /** 贴边细条态（窗口 12×88）：上柱 5 小时、下柱 7 天；余额类账号一根居中柱
  *  （按距告警线的比例填充） */
-function Strip({ state }: { state: WidgetState }) {
+function Strip({ state, warnPct }: { state: WidgetState; warnPct: number }) {
   if (state.balance_pct !== null) {
     return (
       <div className="strip strip-single">
-        <Gauge pct={balanceFill(state.balance_pct)} color={balanceColor(state.balance_pct)} />
+        <Gauge pct={balanceFill(state.balance_pct)} color={balanceColor(state.balance_pct)} warnPct={warnPct} />
       </div>
     );
   }
   return (
     <div className="strip">
-      <Gauge pct={state.five_hour_pct} />
-      <Gauge pct={state.weekly_pct} />
+      <Gauge pct={state.five_hour_pct} warnPct={warnPct} />
+      <Gauge pct={state.weekly_pct} warnPct={warnPct} />
     </div>
   );
 }
@@ -258,6 +260,7 @@ function WidgetApp() {
   const [dockEdge, setDockEdge] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [opacity, setOpacity] = useState(1);
+  const [warnPct, setWarnPct] = useState(DEFAULT_WARN_PCT);
   const [phase, setPhase] = useState<Phase>("idle");
 
   // 拖拽过程状态（ref 直写不触发渲染）：mousedown 记屏幕起点，mouseup 按位移判点击
@@ -303,12 +306,14 @@ function WidgetApp() {
       .then((s) => {
         if (!alive) return;
         setOpacity(s.widget_opacity);
+        setWarnPct(s.warn_threshold_pct > 0 ? s.warn_threshold_pct : DEFAULT_WARN_PCT);
         void i18n.changeLanguage(resolveLang(s.language));
       })
       .catch(() => {});
     const unWidget = onWidgetUpdated((s) => setState(s));
     const unSettings = onSettingsChanged((s) => {
       setOpacity(s.widget_opacity);
+      setWarnPct(s.warn_threshold_pct > 0 ? s.warn_threshold_pct : DEFAULT_WARN_PCT);
       void i18n.changeLanguage(resolveLang(s.language));
     });
     return () => {
@@ -461,10 +466,10 @@ function WidgetApp() {
         key={docked ? "strip" : "ball"}
       >
         {docked ? (
-          <Strip state={data} />
+          <Strip state={data} warnPct={warnPct} />
         ) : (
           <div className="cluster">
-            <Ball state={data} />
+            <Ball state={data} warnPct={warnPct} />
             {data.has_data && data.account_name !== "" && (
               <div className="chip">{data.account_name}</div>
             )}
