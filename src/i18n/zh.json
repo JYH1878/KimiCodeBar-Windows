@@ -107,6 +107,12 @@
     "maxReached": "最多支持 10 个账号",
     "glmKeyPlaceholder": "GLM API Key（id.secret 形式）"
   },
+  "widget": {
+    "tip5h": "5 小时剩余 {{pct}}%",
+    "tip7d": "7 天剩余 {{pct}}%",
+    "tipBalance": "余额 {{amount}}",
+    "balance": "余额"
+  },
   "settings": {
     "title": "KimiCodeBar 设置",
     "loading": "加载中…",
@@ -160,6 +166,19 @@
     },
     "statusline": "Kimi Code 状态栏",
     "statuslineHint": "开后在 Kimi Code 终端底栏显示额度，需 KimiCodeBar 常驻运行；对新开的 Kimi Code 会话生效",
+    "widget": {
+      "title": "悬浮球",
+      "enabled": "显示桌面悬浮球",
+      "enabledHint": "常驻桌面的双环球：外环 7 天、内环 5 小时，中心为剩余百分比；可拖拽，贴近屏幕左右边缘自动收成细条，全屏应用时自动隐藏。点击球体打开面板；余额类账号（DeepSeek）显示余额金额，外环按距告警线的比例填充",
+      "opacity": "不透明度",
+      "center": "中心数字",
+      "centerAuto": "自动最紧张",
+      "centerFiveHour": "5 小时窗口",
+      "centerWeekly": "7 天窗口",
+      "account": "显示账号",
+      "accountAuto": "自动最紧张",
+      "balanceSuffix": "（余额）"
+    },
     "diagnostics": {
       "title": "诊断与日志",
       "hint": "遇到问题？导出诊断文件并附到 GitHub issue，可大幅加快排查（不含任何密钥）。",

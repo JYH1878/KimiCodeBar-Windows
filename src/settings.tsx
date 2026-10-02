@@ -6,7 +6,7 @@ import { useTranslation } from "react-i18next";
 import "./styles.css";
 import i18n, { resolveLang } from "./i18n";
 import { applyTheme, useTheme } from "./theme";
-import type { AppSettings, ThemeMode, UpdateInfo } from "./types";
+import type { Account, AppSettings, ThemeMode, UpdateInfo } from "./types";
 import {
   checkUpdate,
   exportDiagnostics,
@@ -49,6 +49,14 @@ interface GeneralForm {
   theme: string;
   /** 额外扫描目录文本区原文（一行一条，保存时按行拆分 trim 提交，非法值由后端校验） */
   extraDirs: string;
+  /** 桌面悬浮球开关（issue #58，默认关；翻转随保存生效，后端建/毁窗口） */
+  widgetEnabled: boolean;
+  /** 悬浮球不透明度 0.3–1.0（滑块按百分比展示/编辑） */
+  widgetOpacity: number;
+  /** 悬浮球中心数字口径（"auto"/"five_hour"/"weekly"；保存时 auto→null） */
+  widgetCenter: string;
+  /** 悬浮球显示账号（"auto" 或账号 id；保存时 auto→null） */
+  widgetAccount: string;
 }
 
 /** 设置窗口主界面（settings.html 入口） */
@@ -73,6 +81,10 @@ function SettingsApp() {
     language: "system",
     theme: "system",
     extraDirs: "",
+    widgetEnabled: false,
+    widgetOpacity: 1,
+    widgetCenter: "auto",
+    widgetAccount: "auto",
   });
   const [savingGeneral, setSavingGeneral] = useState(false);
   const [generalSaved, setGeneralSaved] = useState(false);
@@ -96,10 +108,13 @@ function SettingsApp() {
   const [updateFound, setUpdateFound] = useState<UpdateInfo | null>(null);
   const [updateMsg, setUpdateMsg] = useState<{ kind: "ok" | "err"; text: string } | null>(null);
   const updateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // 折叠卡片展开态：账号 / 通用设置 / 诊断与日志（默认收起；首装无账号时账号卡自动展开引导添加）
+  // 折叠卡片展开态：账号 / 通用设置 / 悬浮球 / 诊断与日志（默认收起；首装无账号时账号卡自动展开引导添加）
   const [accountsOpen, setAccountsOpen] = useState(false);
   const [generalOpen, setGeneralOpen] = useState(false);
+  const [widgetOpen, setWidgetOpen] = useState(false);
   const [diagOpen, setDiagOpen] = useState(false);
+  // 账号列表（悬浮球「显示账号」下拉的选项来源）
+  const [accounts, setAccounts] = useState<Account[]>([]);
   // 面板「+」定位信号：收到 settings-navigate("account-add") 时递增，账号卡滚动聚焦添加表单
   const [addFocusTick, setAddFocusTick] = useState(0);
   // 预设背景 id（纯 CSS 渐变 class）；null = 未选预设
@@ -141,6 +156,7 @@ function SettingsApp() {
         const [s, accountList] = await Promise.all([getSettings(), listAccounts()]);
         if (!alive) return;
         setSettings(s);
+        setAccounts(accountList);
         setForm({
           refreshMin: String(s.refresh_interval_min),
           adaptiveRefresh: s.adaptive_refresh,
@@ -154,6 +170,10 @@ function SettingsApp() {
           language: s.language ?? "system",
           theme: s.theme ?? "system",
           extraDirs: (s.extra_scan_dirs ?? []).join("\n"),
+          widgetEnabled: s.widget_enabled,
+          widgetOpacity: s.widget_opacity,
+          widgetCenter: s.widget_center_metric ?? "auto",
+          widgetAccount: s.widget_account_id ?? "auto",
         });
         // 应用持久化的语言（初始渲染用的是系统语言兜底）
         void i18n.changeLanguage(resolveLang(s.language));
@@ -266,6 +286,11 @@ function SettingsApp() {
       background_image: settings.background_image ?? null,
       background_preset: settings.background_preset ?? null,
       extra_scan_dirs: extraDirs,
+      // 悬浮球（issue #58）：位置/贴边三字段不透传（后端 merge 保留磁盘值，只由拖拽命令落盘）
+      widget_enabled: form.widgetEnabled,
+      widget_opacity: Math.min(1, Math.max(0.3, form.widgetOpacity)),
+      widget_center_metric: form.widgetCenter === "auto" ? null : form.widgetCenter,
+      widget_account_id: form.widgetAccount === "auto" ? null : form.widgetAccount,
     };
     setSavingGeneral(true);
     setGeneralError(null);
@@ -554,7 +579,95 @@ function SettingsApp() {
         )}
       </section>
 
-      {/* E. 诊断与日志（折叠卡片） */}
+      {/* E. 悬浮球（折叠卡片，issue #58）：开关 / 透明度 / 中心数字口径 / 显示账号 */}
+      <section className="scard">
+        <button
+          type="button"
+          className="collapse-head"
+          onClick={() => setWidgetOpen((v) => !v)}
+          aria-expanded={widgetOpen}
+        >
+          <span className="scard-title">{t("settings.widget.title")}</span>
+          <span className={`chevron${widgetOpen ? " open" : ""}`}>▸</span>
+        </button>
+        {widgetOpen && (
+          <>
+            <div className="form-row">
+              <label htmlFor="widget-enabled">{t("settings.widget.enabled")}</label>
+              <input
+                id="widget-enabled"
+                type="checkbox"
+                checked={form.widgetEnabled}
+                onChange={(e) => setForm((f) => ({ ...f, widgetEnabled: e.target.checked }))}
+              />
+            </div>
+            <p className="hint-muted">{t("settings.widget.enabledHint")}</p>
+            <div className="form-row">
+              <label htmlFor="widget-opacity">
+                {t("settings.widget.opacity")} {Math.round(form.widgetOpacity * 100)}%
+              </label>
+              <input
+                id="widget-opacity"
+                type="range"
+                min={30}
+                max={100}
+                step={5}
+                value={Math.round(form.widgetOpacity * 100)}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, widgetOpacity: Number(e.target.value) / 100 }))
+                }
+              />
+            </div>
+            <div className="form-row">
+              <label htmlFor="widget-center">{t("settings.widget.center")}</label>
+              <select
+                id="widget-center"
+                className="input"
+                value={form.widgetCenter}
+                onChange={(e) => setForm((f) => ({ ...f, widgetCenter: e.target.value }))}
+              >
+                <option value="auto">{t("settings.widget.centerAuto")}</option>
+                <option value="five_hour">{t("settings.widget.centerFiveHour")}</option>
+                <option value="weekly">{t("settings.widget.centerWeekly")}</option>
+              </select>
+            </div>
+            <div className="form-row">
+              <label htmlFor="widget-account">{t("settings.widget.account")}</label>
+              <select
+                id="widget-account"
+                className="input"
+                value={form.widgetAccount}
+                onChange={(e) => setForm((f) => ({ ...f, widgetAccount: e.target.value }))}
+              >
+                <option value="auto">{t("settings.widget.accountAuto")}</option>
+                {accounts.map((a) => (
+                  /* 余额类账号（DeepSeek）上球显示余额（无 5h/7d 额度窗口）：可选中，标注口径 */
+                  <option key={a.id} value={a.id}>
+                    {a.provider === "deepseek"
+                      ? `${a.name}${t("settings.widget.balanceSuffix")}`
+                      : a.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            {/* 分区自带保存（与通用设置共用同一保存流）：不必翻回上面的卡片找按钮 */}
+            {generalError !== null && <p className="hint-err">{generalError}</p>}
+            <div className="row-end">
+              {generalSaved && <span className="hint-ok">{t("settings.general.saved")}</span>}
+              <button
+                type="button"
+                className="btn primary"
+                onClick={() => void saveGeneral()}
+                disabled={savingGeneral}
+              >
+                {t("settings.general.save")}
+              </button>
+            </div>
+          </>
+        )}
+      </section>
+
+      {/* F. 诊断与日志（折叠卡片） */}
       <section className="scard">
         <button
           type="button"
@@ -602,7 +715,7 @@ function SettingsApp() {
         )}
       </section>
 
-      {/* F. 底栏：动态版本号 + 检查更新 */}
+      {/* G. 底栏：动态版本号 + 检查更新 */}
       <footer className="settings-footer">
         KimiCodeBar v{version}
         {" · "}

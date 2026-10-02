@@ -1,0 +1,359 @@
+/* 悬浮球样式（widget.html 独立入口，issue #58；v2 视觉重做）。
+   设计方向「桌面玻璃珠」：一枚深色玻璃质感圆珠，双圈弧光像嵌进玻璃的灯管，
+   数字落在中央的柔光凹槽里；靠自身材质（投影 + 边缘高光 + 左上月牙反光）在
+   任意壁纸上立住，不依赖页面背景。不透明度由设置经内联 style 注入 .widget。
+
+   配色与 App 主题（styles.css 的 Tokyo Night）同源：ok #9ece6a / warn #e0af68 /
+   danger #f7768e；阈值固定 40/15，与告警阈值无关（任务书拍板）。
+
+   窗口本身无边框 + 透明且 shadow(false)：页面背景必须全透明；CSS 投影超出
+   96×96 窗口的部分会被窗口边界裁掉，阴影扩散按 12px 内边距设计。 */
+
+:root {
+  /* 命中（剩余 >40） */
+  --w-ok: #9ece6a;
+  /* 紧张（15–40） */
+  --w-warn: #e0af68;
+  /* 告急（<15） */
+  --w-danger: #f7768e;
+  /* 占位态灰（--） */
+  --w-faint: rgba(255, 255, 255, 0.32);
+  /* 环底/条底轨 */
+  --w-track: rgba(255, 255, 255, 0.085);
+  /* 与面板大数字同源的等宽遥测字体（Cascadia 随 Win11 预装，Win10 回落 Consolas） */
+  --w-font-num: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
+  --w-font-ui: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  --w-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+}
+
+/* 开发目检用模拟壁纸（仅浏览器 mock 下 ?bg=light|dark 时由 widget.tsx 挂类，生产不触发） */
+html.wb-dark,
+html.wb-dark body {
+  background: radial-gradient(120% 120% at 72% 18%, #46536a 0%, #262b36 46%, #101216 100%);
+}
+html.wb-light,
+html.wb-light body {
+  background: linear-gradient(160deg, #f2f4f8 0%, #d7deea 58%, #b9c3d6 100%);
+}
+
+/* 开发目检：浏览器里没有真实的 12×88 贴边窗口，?mock=dock 下按窗口实际尺寸复现细条 */
+html.wb-dockwin .strip {
+  width: 12px;
+  height: 88px;
+}
+
+/* 整个窗口接收拖拽/点击：禁选中防拖拽时选中文字；cursor 跟随拖拽阶段 */
+.widget {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: grab;
+  font-family: var(--w-font-ui);
+  -webkit-font-smoothing: antialiased;
+}
+
+.widget.pressed,
+.widget.dragging {
+  cursor: grabbing;
+}
+
+/* 形态舞台：球 ↔ 细条切换时靠 key 重挂触发一次性「materialize」
+   （动画不加在 .widget 上：animation 的 fill 会抢占设置注入的内联 opacity） */
+.stage {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: w-stage-in 200ms var(--w-ease) both;
+}
+
+/* 贴边侧进入：从贴的那条边展开/收起（空间一致性：哪边收的从哪边出来） */
+.stage.from-left {
+  transform-origin: 0% 50%;
+}
+.stage.from-right {
+  transform-origin: 100% 50%;
+}
+
+@keyframes w-stage-in {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* 球 + 铭牌作为一个整体对象做悬停/按压/拖拽反馈 */
+.cluster {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  transition: transform 180ms var(--w-ease);
+}
+
+.widget:not(.dragging):not(.pressed):hover .cluster {
+  transform: translateY(-1px) scale(1.02);
+}
+
+.widget.pressed .cluster {
+  transform: scale(0.965);
+  transition-duration: 90ms;
+}
+
+.widget.dragging .cluster {
+  transform: scale(1.045);
+  transition-duration: 140ms;
+}
+
+/* ===== 自由态：玻璃珠 ===== */
+
+.ball {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  /* 材质三层：左上主光 → 右下环境补光（主题蓝的极淡回弹）→ 玻璃体明暗渐变 */
+  background:
+    radial-gradient(
+      82% 82% at 33% 20%,
+      rgba(255, 255, 255, 0.13),
+      rgba(255, 255, 255, 0.03) 44%,
+      rgba(255, 255, 255, 0) 64%
+    ),
+    radial-gradient(70% 70% at 74% 86%, rgba(122, 162, 247, 0.14), rgba(122, 162, 247, 0) 64%),
+    linear-gradient(163deg, #2c3149 0%, #1e2233 46%, #14161f 100%);
+  box-shadow:
+    0 6px 14px -4px rgba(0, 0, 0, 0.55),
+    0 2px 5px rgba(0, 0, 0, 0.32),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.095),
+    inset 0 1px 1px rgba(255, 255, 255, 0.14),
+    inset 0 -10px 16px -8px rgba(0, 0, 0, 0.66);
+  transition: box-shadow 180ms var(--w-ease);
+}
+
+/* 左上月牙反光：整圈 2px 的玻璃边缘被斜向光扫过的一道弧（mask 裁成细环） */
+.ball::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.34) 0%,
+    rgba(255, 255, 255, 0.08) 21%,
+    rgba(255, 255, 255, 0) 38%
+  );
+  -webkit-mask: radial-gradient(closest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px));
+  mask: radial-gradient(closest-side, transparent calc(100% - 2px), #000 calc(100% - 1.5px));
+}
+
+/* 右下回弹光：更细更淡的一道冷色弧，让球体不「贴纸化」 */
+.ball::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  background: linear-gradient(-55deg, rgba(122, 162, 247, 0.28) 0%, rgba(122, 162, 247, 0) 30%);
+  -webkit-mask: radial-gradient(closest-side, transparent calc(100% - 1.5px), #000 calc(100% - 1.2px));
+  mask: radial-gradient(closest-side, transparent calc(100% - 1.5px), #000 calc(100% - 1.2px));
+}
+
+.ball svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+/* 中央数字栈：数字 + 口径小标（5h / 7d），整体压在环心凹槽上 */
+.ball-core {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  transform: translateY(-0.5px);
+  pointer-events: none;
+}
+
+.ball-num {
+  font-family: var(--w-font-num);
+  font-size: 17px;
+  line-height: 1;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* "100%" 是唯一的四字符情况：收小一号防顶到内环 */
+.ball-num--wide {
+  font-size: 13.5px;
+}
+
+/* 余额金额五字符以上（如 "12345"）：再收一号，仍在环心凹槽内 */
+.ball-num--xwide {
+  font-size: 11.5px;
+}
+
+.ball-unit {
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: 0.08em;
+  color: rgba(255, 255, 255, 0.52);
+}
+
+/* 告急（<15）：弧光轻微呼吸，区别于静止画面；reduced-motion 下停用 */
+.ring-crit {
+  animation: w-breathe 2.6s ease-in-out infinite;
+}
+
+@keyframes w-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.62;
+  }
+}
+
+/* ===== 账号铭牌：与球同材质的迷你玻璃片，比球身低调一级 ===== */
+
+.chip {
+  max-width: 88px;
+  box-sizing: border-box;
+  padding: 1px 8px 2px;
+  border-radius: 999px;
+  background: rgba(21, 23, 33, 0.78);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.075),
+    inset 0 1px 1px rgba(255, 255, 255, 0.07),
+    0 2px 6px rgba(0, 0, 0, 0.4);
+  color: rgba(255, 255, 255, 0.82);
+  font-size: 10px;
+  line-height: 13px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ===== 贴边细条态（窗口 12×88）：上下两根微型「电量柱」 =====
+   上柱 = 5 小时、下柱 = 7 天；柱高按剩余百分比从底填充，颜色按各自阈值——
+   颜色给扫读、柱高给精确量；告急柱同呼吸。 */
+
+.strip {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 0;
+  border-radius: 6px;
+  background: linear-gradient(200deg, rgba(44, 49, 73, 0.94) 0%, rgba(20, 22, 31, 0.94) 100%);
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.085),
+    inset 0 1px 1px rgba(255, 255, 255, 0.1),
+    0 3px 8px rgba(0, 0, 0, 0.42);
+  transition:
+    box-shadow 160ms var(--w-ease),
+    transform 180ms var(--w-ease);
+}
+
+.widget.docked:hover .strip {
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.16),
+    inset 0 1px 1px rgba(255, 255, 255, 0.12),
+    0 3px 10px rgba(0, 0, 0, 0.45);
+}
+
+/* 细条同样有按压/拖拽反馈（与球体一致的物理感） */
+.widget.pressed .strip {
+  transform: scale(0.96);
+  transition-duration: 90ms;
+}
+
+.widget.dragging .strip {
+  transform: scale(1.06);
+  transition-duration: 140ms;
+}
+
+.gauge {
+  position: relative;
+  width: 6px;
+  flex: 1 1 0;
+  border-radius: 3px;
+  background: var(--w-track);
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+/* 余额类账号的细条：一根居中柱，不撑满整条（与双柱态视觉同一量级） */
+.strip-single .gauge {
+  max-height: 56px;
+}
+
+.gauge > i {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  border-radius: 3px;
+  transition: height 300ms var(--w-ease);
+}
+
+.gauge > i.crit {
+  animation: w-breathe 2.6s ease-in-out infinite;
+}
+
+/* ===== 无障碍：降级为纯淡入淡出，不做缩放/呼吸 ===== */
+
+@media (prefers-reduced-motion: reduce) {
+  .stage {
+    animation: w-stage-fade 150ms ease both;
+  }
+  .cluster,
+  .ball,
+  .strip,
+  .gauge > i {
+    transition: none;
+  }
+  .ring-crit,
+  .gauge > i.crit {
+    animation: none;
+  }
+}
+
+@keyframes w-stage-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}

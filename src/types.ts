@@ -139,6 +139,43 @@ export interface AppSettings {
   /** 额外扫描目录（实验性，最多 10 条）：远程 Kimi Code home（盘符绝对路径或 \\ 开头的 UNC），
    *  本地消耗统计纳入扫描；保存时后端校验（相对路径拒绝、去重） */
   extra_scan_dirs: string[];
+  /** 桌面悬浮球开关（issue #58，默认 false）：双环球常驻桌面，关即销毁窗口 */
+  widget_enabled: boolean;
+  /** 悬浮球整体不透明度 0.3–1.0（默认 1.0），后端保存/加载时钳制 */
+  widget_opacity: number;
+  /** 悬浮球中心数字口径：null/"auto" = 自动最紧张（已有窗口剩余最低者）、"five_hour"、"weekly" */
+  widget_center_metric?: string | null;
+  /** 悬浮球显示的账号 id；null = 自动选最紧张账号（有配额账号里 min(5h,7d) 剩余最低者） */
+  widget_account_id?: string | null;
+  /** 悬浮球窗口位置 x（逻辑像素）。后端专用字段：只由拖拽结束命令按真实窗口位置落盘，
+   *  前端保存设置时不传（后端 merge 保留磁盘值，防伪造与旧值覆盖） */
+  widget_x?: number | null;
+  /** 悬浮球窗口位置 y（逻辑像素）。后端专用字段，落盘规则同 widget_x */
+  widget_y?: number | null;
+  /** 悬浮球贴边状态：null = 自由悬浮、"left"/"right" = 贴边细条。后端专用字段，同 widget_x */
+  widget_dock_edge?: string | null;
+}
+
+/** 悬浮球展示数据（get_widget_state 返回 + widget-updated 事件 payload）。
+ *  pct 均为剩余 0–100 语义；null = 该窗口无数据（has_data=false 时其余字段全空） */
+export interface WidgetState {
+  /** 是否有可展示的账号数据（false 时前端渲染灰球 "--"） */
+  has_data: boolean;
+  /** 展示账号的名称（无数据为空串） */
+  account_name: string;
+  /** 5 小时窗口剩余百分比（内环） */
+  five_hour_pct: number | null;
+  /** 7 天窗口剩余百分比（外环） */
+  weekly_pct: number | null;
+  /** 中心数字（按 widget_center_metric 口径解析） */
+  center_pct: number | null;
+  /** 余额类账号（DeepSeek）的余额金额；配额类账号为 null */
+  balance: number | null;
+  /** 余额币种（"CNY"/"USD" 等）；配额类账号为 null */
+  balance_currency: string | null;
+  /** 余额健康度 = 余额 / DeepSeek 告警线 × 100（100 = 正好在告警线，越大越充裕）；
+   *  环填充取其一半（200 = 满环），颜色带 200/100 */
+  balance_pct: number | null;
 }
 
 /** 凭证配置状态：get_credential_status(account_id) 的返回 */

@@ -8,6 +8,7 @@ mod logging;
 mod panel;
 mod polling;
 mod tray;
+mod widget;
 
 use tauri::Manager;
 
@@ -109,6 +110,11 @@ fn main() {
             commands::open_log_dir,
             commands::export_diagnostics,
             commands::export_usage_report,
+            widget::get_widget_state,
+            widget::get_widget_layout,
+            widget::widget_drag_ended,
+            widget::widget_set_expanded,
+            widget::open_main_panel,
         ])
         .setup(|app| {
             // 日志必须最先初始化：之后所有埋点才有着落；失败退回 stderr，不 panic
@@ -139,6 +145,9 @@ fn main() {
 
             // 后台轮询：立即刷一次，之后按设置间隔循环
             polling::start(app.handle().clone());
+
+            // 桌面悬浮球：按设置懒创建（widget_enabled=true 才建窗口）
+            widget::reconcile(app.handle());
 
             // 主面板失焦（点击到面板外）时自动隐藏
             if let Some(main_window) = app.get_webview_window("main") {

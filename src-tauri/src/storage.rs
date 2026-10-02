@@ -24,6 +24,10 @@ pub const DEFAULT_DEEPSEEK_WARN_THRESHOLD: f64 = 5.0;
 pub const MAX_DEEPSEEK_WARN_THRESHOLD: f64 = 100_000.0;
 /// 账号数量上限（面板一页一个账号 + 末尾「+」）
 pub const MAX_ACCOUNTS: usize = 10;
+/// 悬浮球不透明度下限（widget_opacity 钳制下界）
+pub const MIN_WIDGET_OPACITY: f64 = 0.3;
+/// 悬浮球不透明度上限（widget_opacity 钳制上界）
+pub const MAX_WIDGET_OPACITY: f64 = 1.0;
 
 /// 单个账号（settings.json 的 accounts 数组元素，snake_case）。
 /// 凭证本体不落盘到这里：API Key / 网页 token 在 Windows 凭据管理器（槽位名带账号 id，
@@ -147,6 +151,32 @@ pub struct Settings {
     /// 空列表不落盘；旧版设置文件无此字段读回空
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extra_scan_dirs: Vec<String>,
+    /// 桌面悬浮球开关（issue #58）：开时常驻一个双环球（外环 7 天 / 内环 5 小时），
+    /// 关即销毁窗口；默认关
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub widget_enabled: bool,
+    /// 悬浮球整体不透明度（0.3–1.0，默认 1.0），加载/保存时钳制
+    #[serde(default = "default_widget_opacity")]
+    pub widget_opacity: f64,
+    /// 悬浮球中心数字口径：None/"auto" = 自动最紧张（已有窗口剩余最低者）、
+    /// "five_hour"、"weekly"；未知值按 auto 处理
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widget_center_metric: Option<String>,
+    /// 悬浮球显示的账号 id；None = 自动选最紧张账号（有配额数据账号里
+    /// min(5h, 7d) 剩余最低者）。指定 id 不存在/无配额时同样回落自动
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widget_account_id: Option<String>,
+    /// 悬浮球窗口位置 x（逻辑像素）；None = 默认位（主屏工作区右下角内缩 24）。
+    /// 只由拖拽结束命令落盘（save_settings 不透传，merge 保留磁盘值，防伪造）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widget_x: Option<f64>,
+    /// 悬浮球窗口位置 y（逻辑像素）；None = 默认位。落盘规则同 widget_x
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widget_y: Option<f64>,
+    /// 悬浮球贴边状态：None = 自由悬浮、"left"/"right" = 贴左右竖边收缩成细条。
+    /// 只由拖拽结束命令落盘（同 widget_x 防伪造）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub widget_dock_edge: Option<String>,
 }
 
 const fn default_refresh_interval_min() -> u32 {
@@ -169,6 +199,11 @@ const fn default_deepseek_warn_threshold() -> f64 {
     DEFAULT_DEEPSEEK_WARN_THRESHOLD
 }
 
+/// widget_opacity 缺省值：完全不透明
+const fn default_widget_opacity() -> f64 {
+    1.0
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -188,6 +223,13 @@ impl Default for Settings {
             background_image: None,
             background_preset: None,
             extra_scan_dirs: Vec::new(),
+            widget_enabled: false,
+            widget_opacity: 1.0,
+            widget_center_metric: None,
+            widget_account_id: None,
+            widget_x: None,
+            widget_y: None,
+            widget_dock_edge: None,
         }
     }
 }
@@ -299,7 +341,17 @@ pub fn load_settings() -> Result<Settings, String> {
     settings.deepseek_warn_threshold = settings
         .deepseek_warn_threshold
         .clamp(0.0, MAX_DEEPSEEK_WARN_THRESHOLD);
+    settings.widget_opacity = clamp_widget_opacity(settings.widget_opacity);
     Ok(settings)
+}
+
+/// 悬浮球不透明度钳制（纯函数）：非有限值（NaN/无穷，手改 json 可能出现）按 1.0 兜底，
+/// 其余钳到 MIN_WIDGET_OPACITY–MAX_WIDGET_OPACITY
+pub fn clamp_widget_opacity(v: f64) -> f64 {
+    if !v.is_finite() {
+        return 1.0;
+    }
+    v.clamp(MIN_WIDGET_OPACITY, MAX_WIDGET_OPACITY)
 }
 
 /// 原子写入 settings.json（临时文件 + rename）
@@ -437,6 +489,14 @@ mod tests {
             background_preset: None,
             // 顺手覆盖额外扫描目录的落盘/读回（UNC 形态，与真实用法一致）
             extra_scan_dirs: vec![r"\\server\share\home\u\.kimi-code".to_string()],
+            // 顺手覆盖悬浮球七字段的落盘/读回（开启 + 非默认值往返一致）
+            widget_enabled: true,
+            widget_opacity: 0.65,
+            widget_center_metric: Some("weekly".to_string()),
+            widget_account_id: Some("acc-1".to_string()),
+            widget_x: Some(120.5),
+            widget_y: Some(88.0),
+            widget_dock_edge: Some("left".to_string()),
         };
         save_settings(&settings).unwrap();
         assert!(dir.join("settings.json").exists());
@@ -596,6 +656,97 @@ mod tests {
         assert_eq!(load_settings().unwrap().warn_threshold_pct, 99.0);
 
         cleanup(&dir);
+    }
+
+    #[test]
+    fn settings_legacy_json_without_widget_fields_loads() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = use_temp_config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        // 旧版设置文件无任何 widget_* 字段：#[serde(default)] 全部读回默认值，其余字段不受影响
+        std::fs::write(dir.join("settings.json"), r#"{"refresh_interval_min":10}"#).unwrap();
+
+        let settings = load_settings().unwrap();
+        assert_eq!(settings.refresh_interval_min, 10);
+        assert!(!settings.widget_enabled);
+        assert_eq!(settings.widget_opacity, 1.0);
+        assert!(settings.widget_center_metric.is_none());
+        assert!(settings.widget_account_id.is_none());
+        assert!(settings.widget_x.is_none());
+        assert!(settings.widget_y.is_none());
+        assert!(settings.widget_dock_edge.is_none());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn settings_widget_enabled_roundtrip_and_disk_format() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = use_temp_config_dir();
+
+        let settings = Settings {
+            widget_enabled: true,
+            widget_opacity: 0.55,
+            widget_center_metric: Some("five_hour".to_string()),
+            widget_account_id: Some("acc-w".to_string()),
+            widget_x: Some(120.5),
+            widget_y: Some(88.0),
+            widget_dock_edge: Some("left".to_string()),
+            ..Default::default()
+        };
+        save_settings(&settings).unwrap();
+        assert_eq!(load_settings().unwrap(), settings);
+
+        // 磁盘格式为 snake_case JSON（与 types.ts 契约一致）
+        let raw = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(raw.contains("\"widget_enabled\""));
+        assert!(raw.contains("\"widget_opacity\""));
+        assert!(raw.contains("\"widget_center_metric\""));
+        assert!(raw.contains("\"widget_account_id\""));
+        assert!(raw.contains("\"widget_x\""));
+        assert!(raw.contains("\"widget_y\""));
+        assert!(raw.contains("\"widget_dock_edge\""));
+
+        // 关闭态（false）不落盘：磁盘上没有 widget_enabled 键，读回仍是 false
+        let mut off = settings.clone();
+        off.widget_enabled = false;
+        save_settings(&off).unwrap();
+        let raw = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(!raw.contains("\"widget_enabled\""));
+        assert!(!load_settings().unwrap().widget_enabled);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn settings_widget_opacity_clamped_on_load() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = use_temp_config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 手改 json 越界：低于 0.3 钳回下限、高于 1.0 钳回上限、NaN 按 1.0 兜底
+        std::fs::write(dir.join("settings.json"), r#"{"widget_opacity":0.05}"#).unwrap();
+        assert_eq!(load_settings().unwrap().widget_opacity, 0.3);
+        std::fs::write(dir.join("settings.json"), r#"{"widget_opacity":99}"#).unwrap();
+        assert_eq!(load_settings().unwrap().widget_opacity, 1.0);
+        std::fs::write(dir.join("settings.json"), r#"{"widget_opacity":"NaN"}"#).unwrap();
+        // "NaN" 不是合法 f64 JSON：serde 解析失败 → 整个文件按损坏容忍为默认设置
+        assert_eq!(load_settings().unwrap(), Settings::default());
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn clamp_widget_opacity_edges() {
+        // 非有限值兜底 1.0；范围钳制含端点
+        assert_eq!(super::clamp_widget_opacity(f64::NAN), 1.0);
+        assert_eq!(super::clamp_widget_opacity(f64::INFINITY), 1.0);
+        assert_eq!(super::clamp_widget_opacity(f64::NEG_INFINITY), 1.0);
+        assert_eq!(super::clamp_widget_opacity(0.0), 0.3);
+        assert_eq!(super::clamp_widget_opacity(0.3), 0.3);
+        assert_eq!(super::clamp_widget_opacity(0.7), 0.7);
+        assert_eq!(super::clamp_widget_opacity(1.0), 1.0);
+        assert_eq!(super::clamp_widget_opacity(2.5), 1.0);
     }
 
     #[test]

@@ -21,11 +21,12 @@ export default defineConfig({
 
   build: {
     outDir: "dist",
-    // 多页面入口：index.html = 用量面板，settings.html = 设置窗口
+    // 多页面入口：index.html = 用量面板，settings.html = 设置窗口，widget.html = 桌面悬浮球
     rollupOptions: {
       input: {
         main: fileURLToPath(new URL("./index.html", import.meta.url)),
         settings: fileURLToPath(new URL("./settings.html", import.meta.url)),
+        widget: fileURLToPath(new URL("./widget.html", import.meta.url)),
       },
     },
   },

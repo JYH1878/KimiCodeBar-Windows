@@ -1,10 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "KimiCodeBar 默认能力集：放开前端调用 opener 插件（打开授权页/控制台链接）",
-  "windows": ["main", "settings"],
+  "description": "KimiCodeBar 默认能力集：放开前端调用 opener 插件（打开授权页/控制台链接）+ 悬浮球窗口（拖拽移动）",
+  "windows": ["main", "settings", "widget"],
   "permissions": [
     "core:default",
+    "core:window:allow-start-dragging",
     "opener:default",
     "opener:allow-open-url",
     "opener:allow-reveal-item-in-dir",

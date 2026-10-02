@@ -18,6 +18,7 @@ import type {
   MonthlyInfo,
   PanelState,
   UpdateInfo,
+  WidgetState,
 } from "./types";
 
 /** 是否在 Tauri 运行时内（纯浏览器 vite dev 时为 false，走 mock 数据）。
@@ -333,6 +334,125 @@ export async function exportUsageReport(): Promise<string> {
   return invoke<string>("export_usage_report");
 }
 
+// ============ 悬浮球（issue #58，widget.html 入口专用）============
+
+/** 浏览器 mock 的悬浮球数据：?mock=empty 无数据占位态、?mock=critical 告急态、
+ *  ?mock=balance 余额类账号（DeepSeek）态、?mock=dock 贴边细条态（数据同默认态），
+ *  不带参数为默认有数据态 */
+const MOCK_WIDGET_FULL: WidgetState = {
+  has_data: true,
+  account_name: "账号 1",
+  five_hour_pct: 36,
+  weekly_pct: 87,
+  center_pct: 36,
+  balance: null,
+  balance_currency: null,
+  balance_pct: null,
+};
+const MOCK_WIDGET_EMPTY: WidgetState = {
+  has_data: false,
+  account_name: "",
+  five_hour_pct: null,
+  weekly_pct: null,
+  center_pct: null,
+  balance: null,
+  balance_currency: null,
+  balance_pct: null,
+};
+const MOCK_WIDGET_CRITICAL: WidgetState = {
+  has_data: true,
+  account_name: "演示号",
+  five_hour_pct: 8,
+  weekly_pct: 23,
+  center_pct: 8,
+  balance: null,
+  balance_currency: null,
+  balance_pct: null,
+};
+const MOCK_WIDGET_BALANCE: WidgetState = {
+  has_data: true,
+  account_name: "DeepSeek 演示",
+  five_hour_pct: null,
+  weekly_pct: null,
+  center_pct: null,
+  balance: 12.34,
+  balance_currency: "CNY",
+  balance_pct: 246.8, // 12.34 / 告警线 ¥5 × 100
+};
+
+/** 浏览器 mock 的悬浮球形态参数（widget.html 目检用，生产无此参数） */
+function mockWidgetVariant(): string {
+  return new URLSearchParams(window.location.search).get("mock") ?? "";
+}
+
+/** 球前端首屏数据（get_widget_state） */
+export async function getWidgetState(): Promise<WidgetState> {
+  if (!isTauri) {
+    const variant = mockWidgetVariant();
+    if (variant === "empty") return { ...MOCK_WIDGET_EMPTY };
+    if (variant === "critical") return { ...MOCK_WIDGET_CRITICAL };
+    if (variant === "balance" || variant === "balancedock") return { ...MOCK_WIDGET_BALANCE };
+    return { ...MOCK_WIDGET_FULL };
+  }
+  return invoke<WidgetState>("get_widget_state");
+}
+
+/** 球前端首屏布局：当前贴边状态（null = 自由悬浮），决定渲染球还是细条 */
+export async function getWidgetLayout(): Promise<string | null> {
+  if (!isTauri) {
+    const variant = mockWidgetVariant();
+    return variant === "dock" || variant === "balancedock" ? "left" : null;
+  }
+  return invoke<string | null>("get_widget_layout");
+}
+
+/**
+ * 拖拽静止 300ms 后调用：后端读窗口位置判贴边、切换球/细条形态并落盘，
+ * 返回判定后的贴边状态（"left"/"right"/null），前端据此切换渲染
+ */
+export async function widgetDragEnded(): Promise<string | null> {
+  if (!isTauri) return null;
+  return invoke<string | null>("widget_drag_ended");
+}
+
+/** 细条 hover 展开/收回（后端切窗口尺寸并内移对齐贴边）；浏览器 mock 直接模拟收起结果。
+ *  返回值 = 窗口最终是否收起（false = 仍在展开态：指针还在窗内，后端忽略了本次收回）。 */
+export async function widgetSetExpanded(expanded: boolean): Promise<boolean> {
+  if (!isTauri) return !expanded;
+  return invoke<boolean>("widget_set_expanded", { expanded });
+}
+
+/** 点击球体打开主面板（复用托盘左键显示路径）；浏览器 mock 仅打印 */
+export function openMainPanel(): void {
+  if (!isTauri) {
+    console.info("[mock] open_main_panel");
+    return;
+  }
+  invoke("open_main_panel").catch(() => {});
+}
+
+/**
+ * 订阅后端推送的悬浮球数据更新（widget-updated 事件，配额刷新/账号变更后广播）。
+ * 返回反注册函数，供组件卸载时调用。
+ */
+export function onWidgetUpdated(cb: (state: WidgetState) => void): () => void {
+  if (!isTauri) {
+    // 浏览器 mock 没有后端推送，返回空的反注册函数
+    return () => {};
+  }
+  let unlisten: (() => void) | null = null;
+  // 与 onQuotaUpdated 相同的兜底：注册完成前卸载也能正确反注册
+  let cancelled = false;
+  listen<WidgetState>("widget-updated", (event) => cb(event.payload)).then((fn) => {
+    if (cancelled) fn();
+    else unlisten = fn;
+  });
+  return () => {
+    cancelled = true;
+    unlisten?.();
+  };
+}
+
 // ============ 第 5 步：设置与凭证 ============
 
 /** 浏览器 mock 的可变"数据库"：让设置页在纯浏览器下也能走完整交互 */
@@ -352,6 +472,11 @@ const mockDb = {
     background_image: null,
     background_preset: null,
     extra_scan_dirs: [],
+    // 悬浮球（浏览器 mock 默认关；widget.html 页面 mock 不走这里）
+    widget_enabled: false,
+    widget_opacity: 1,
+    widget_center_metric: null,
+    widget_account_id: null,
   } as AppSettings,
   // 账号列表（顺序 = 面板页顺序）；初始与面板 mock 一致
   accounts: MOCK_ACCOUNTS.map((a) => ({ ...a })),

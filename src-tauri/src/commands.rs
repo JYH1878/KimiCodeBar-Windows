@@ -81,6 +81,33 @@ pub struct AppSettings {
     /// 保存时逐条校验/归一（见 sanitize_extra_scan_dirs）
     #[serde(default)]
     pub extra_scan_dirs: Vec<String>,
+    /// 桌面悬浮球开关（issue #58），默认关
+    #[serde(default)]
+    pub widget_enabled: bool,
+    /// 悬浮球整体不透明度（0.3–1.0，保存时钳制；默认 1.0）
+    #[serde(default = "default_widget_opacity")]
+    pub widget_opacity: f64,
+    /// 悬浮球中心数字口径：None/"auto" = 自动最紧张、"five_hour"、"weekly"
+    #[serde(default)]
+    pub widget_center_metric: Option<String>,
+    /// 悬浮球显示的账号 id；None = 自动选最紧张账号
+    #[serde(default)]
+    pub widget_account_id: Option<String>,
+    /// 悬浮球窗口位置 x（逻辑像素）。仅后端拖拽命令落盘：save_settings 不透传
+    /// （merge_settings_with_disk 保留磁盘值，防伪造与旧值覆盖）；前端保存时不传
+    #[serde(default)]
+    pub widget_x: Option<f64>,
+    /// 悬浮球窗口位置 y（逻辑像素）。落盘规则同 widget_x
+    #[serde(default)]
+    pub widget_y: Option<f64>,
+    /// 悬浮球贴边状态：None = 自由悬浮、"left"/"right" = 贴边细条。落盘规则同 widget_x
+    #[serde(default)]
+    pub widget_dock_edge: Option<String>,
+}
+
+/// widget_opacity 收参缺省值：完全不透明（与 storage 侧 default 一致）
+fn default_widget_opacity() -> f64 {
+    1.0
 }
 
 impl From<storage::Settings> for AppSettings {
@@ -100,6 +127,13 @@ impl From<storage::Settings> for AppSettings {
             background_image: s.background_image,
             background_preset: s.background_preset,
             extra_scan_dirs: s.extra_scan_dirs,
+            widget_enabled: s.widget_enabled,
+            widget_opacity: s.widget_opacity,
+            widget_center_metric: s.widget_center_metric,
+            widget_account_id: s.widget_account_id,
+            widget_x: s.widget_x,
+            widget_y: s.widget_y,
+            widget_dock_edge: s.widget_dock_edge,
         }
     }
 }
@@ -124,6 +158,13 @@ impl From<AppSettings> for storage::Settings {
             background_image: s.background_image,
             background_preset: s.background_preset,
             extra_scan_dirs: s.extra_scan_dirs,
+            widget_enabled: s.widget_enabled,
+            widget_opacity: s.widget_opacity,
+            widget_center_metric: s.widget_center_metric,
+            widget_account_id: s.widget_account_id,
+            widget_x: s.widget_x,
+            widget_y: s.widget_y,
+            widget_dock_edge: s.widget_dock_edge,
         }
     }
 }
@@ -223,7 +264,8 @@ pub struct UpdateInfo {
 }
 
 /// 单个账号的面板快照（PanelState.accounts 的元素，与 src/types.ts 的 AccountPanel 对应）
-#[derive(Debug, Clone, Serialize)]
+/// （Default 供 widget.rs 单测构造占位快照）
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct AccountPanel {
     /// 账号元数据（id / name / login_method）
     pub account: Account,
@@ -249,7 +291,7 @@ pub struct AccountPanel {
 }
 
 /// 面板状态（与 src/types.ts 的 PanelState 一一对应，snake_case 序列化）
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct PanelState {
     /// 是否正在后台刷新（整轮全部账号，单航班）
     pub loading: bool,
@@ -582,6 +624,8 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
 
         // 通知前端状态已变化
         let _ = app.emit("quota-updated", &panel);
+        // 悬浮球若开着，同步一份展示数据（KCB_TOTAL_SILENCE 分支内：静默模式零额外动作）
+        crate::widget::emit_widget_state(app, &panel);
     }
 
     panel
@@ -775,13 +819,18 @@ pub fn get_settings() -> AppSettings {
 /// save_settings 的「先读后写」合并：webview 传来的 AppSettings 不含账号列表，
 /// 且 background_image/background_preset 不可信（任意路径可借 join 穿越删/读文件）——
 /// accounts 与两个背景字段一律保留磁盘现值，背景今后只许专用命令
-/// （set_background_image / clear_background_image / set_background_preset）改
+/// （set_background_image / clear_background_image / set_background_preset）改。
+/// 悬浮球位置三字段（widget_x / widget_y / widget_dock_edge）同理保留磁盘现值：
+/// 它们只由拖拽结束命令按真实窗口位置落盘，webview 传来的值一律不可信（防伪造与旧值覆盖）
 fn merge_settings_with_disk(settings: AppSettings) -> storage::Settings {
     let current = storage::load_settings().unwrap_or_default();
     storage::Settings {
         accounts: current.accounts,
         background_image: current.background_image,
         background_preset: current.background_preset,
+        widget_x: current.widget_x,
+        widget_y: current.widget_y,
+        widget_dock_edge: current.widget_dock_edge,
         ..settings.into()
     }
 }
@@ -824,6 +873,7 @@ pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String
         storage::MAX_REFRESH_INTERVAL_MIN,
     );
     settings.warn_threshold_pct = settings.warn_threshold_pct.clamp(1.0, 99.0);
+    settings.widget_opacity = storage::clamp_widget_opacity(settings.widget_opacity);
     storage::save_settings(&settings)?;
 
     // 同步开机自启注册表；与系统状态已一致时不操作，失败只记日志不阻断保存
@@ -868,6 +918,13 @@ pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String
     // 保存成功后重注册全局热键（先全量注销再按新值注册）；
     // 被占用时返回中文错误（此时设置已落盘，仅热键未生效）
     crate::hotkey::apply(&app, settings.hotkey.as_deref())?;
+
+    // 悬浮球开关翻转时建/毁窗口（懒创建懒销毁）；透明度等展示属性由
+    // settings-changed 广播给球前端即时应用，这里只管窗口存在性
+    crate::widget::reconcile(&app);
+    // 悬浮球的展示账号/中心口径是后端算进 WidgetState 的（前端拿不到设置原值），
+    // 保存后立刻补发一份——否则改了「显示账号/中心数字」要等下一次配额刷新才见效
+    crate::widget::emit_widget_state(&app, &app.state::<AppState>().snapshot());
 
     // 全部生效后广播 settings-changed（payload 为钳制后的完整设置），
     // 前端两窗口监听后即时切换语言等；热键失败走 ? 提前返回，不会广播半成品
@@ -1406,6 +1463,8 @@ pub fn export_usage_report(app: AppHandle) -> Result<String, String> {
 fn emit_snapshot(app: &AppHandle) {
     let panel = app.state::<AppState>().snapshot();
     let _ = app.emit("quota-updated", &panel);
+    // 悬浮球展示数据同步（账号增删改名后球上的账号名/数据跟着收敛）
+    crate::widget::emit_widget_state(app, &panel);
 }
 
 /// Kimi Code API Key 前缀（与开放平台 sk- 不通用）
@@ -3018,28 +3077,37 @@ mod tests {
         cleanup_extra_key_env(&dir, &service, &["acc-g"]);
     }
 
-    // ---- save_settings 背景字段防篡改 ----
+    // ---- save_settings 后端专属字段防篡改（背景 / 悬浮球位置）----
 
     #[test]
-    fn save_settings_merge_keeps_malicious_background_off_disk() {
+    fn save_settings_merge_keeps_backend_only_fields_off_disk() {
         let _guard = EXTRA_KEY_ENV_LOCK.lock().unwrap();
         let (dir, service) = setup_extra_key_env(vec![]);
 
-        // 磁盘现状：合法背景图 + 预设
+        // 磁盘现状：合法背景图 + 预设 + 悬浮球拖拽落盘的位置三字段
         storage::save_settings(&storage::Settings {
             background_image: Some("background.png".to_string()),
             background_preset: Some("night".to_string()),
+            widget_x: Some(120.5),
+            widget_y: Some(88.0),
+            widget_dock_edge: Some("left".to_string()),
             ..Default::default()
         })
         .unwrap();
 
-        // webview 传来篡改值（绝对路径 / ../ 穿越）：合并后磁盘现值原样保留
+        // webview 传来篡改值（背景绝对路径 / ../ 穿越、悬浮球位置伪造）：合并后磁盘现值原样保留
         let mut incoming = AppSettings::from(storage::Settings::default());
         incoming.background_image = Some("C:\\Windows\\System32\\drivers\\etc\\hosts".to_string());
         incoming.background_preset = Some("../evil".to_string());
+        incoming.widget_x = Some(-9999.0);
+        incoming.widget_y = Some(-9999.0);
+        incoming.widget_dock_edge = Some("right".to_string());
         let merged = merge_settings_with_disk(incoming);
         assert_eq!(merged.background_image.as_deref(), Some("background.png"));
         assert_eq!(merged.background_preset.as_deref(), Some("night"));
+        assert_eq!(merged.widget_x, Some(120.5));
+        assert_eq!(merged.widget_y, Some(88.0));
+        assert_eq!(merged.widget_dock_edge.as_deref(), Some("left"));
 
         cleanup_extra_key_env(&dir, &service, &[]);
     }

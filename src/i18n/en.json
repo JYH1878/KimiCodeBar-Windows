@@ -107,6 +107,12 @@
     "maxReached": "Up to 10 accounts",
     "glmKeyPlaceholder": "GLM API Key (id.secret form)"
   },
+  "widget": {
+    "tip5h": "5-hour window: {{pct}}% left",
+    "tip7d": "7-day window: {{pct}}% left",
+    "tipBalance": "Balance {{amount}}",
+    "balance": "balance"
+  },
   "settings": {
     "title": "KimiCodeBar Settings",
     "loading": "Loading…",
@@ -160,6 +166,19 @@
     },
     "statusline": "Kimi Code status line",
     "statuslineHint": "Shows the quota in the Kimi Code terminal status bar when enabled. KimiCodeBar must stay running; applies to newly opened Kimi Code sessions",
+    "widget": {
+      "title": "Floating widget",
+      "enabled": "Show desktop floating widget",
+      "enabledHint": "A double-ring gauge that stays on your desktop: outer ring for the 7-day window, inner ring for 5 hours, with the remaining percentage in the center. Draggable; hugs either side edge as a slim bar; hides automatically during full-screen apps. Click it to open the panel. Balance-type accounts (DeepSeek) show the balance instead, with the outer ring tracking it against your warning threshold",
+      "opacity": "Opacity",
+      "center": "Center number",
+      "centerAuto": "Tightest window",
+      "centerFiveHour": "5-hour window",
+      "centerWeekly": "7-day window",
+      "account": "Account",
+      "accountAuto": "Tightest account",
+      "balanceSuffix": " (balance)"
+    },
     "diagnostics": {
       "title": "Diagnostics & logs",
       "hint": "Running into issues? Export a diagnostics file and attach it to a GitHub issue to speed up troubleshooting (contains no secrets).",
