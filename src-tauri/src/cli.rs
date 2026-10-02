@@ -90,7 +90,7 @@ fn run_status() -> i32 {
 fn run_statusline() -> i32 {
     // 绝不能 AttachConsole：statusline 恒由 Kimi Code 派生并管道捕获 stdout
     // （经 cmd /c 时父进程带控制台），附着会把输出拐到控制台、管道变空，
-    // 状态栏永久回退内置布局（2026-08-25 实机抓到，见 HANDOFF 待沉淀）
+    // 状态栏永久回退内置布局（2026-08-25 实机抓到，详见本地交接档案 坑 31）
     let settings = match kimicodebar::storage::load_settings() {
         Ok(settings) => settings,
         Err(e) => return print_stderr(&format!("读取设置失败: {e}"), EXIT_NO_DATA),
