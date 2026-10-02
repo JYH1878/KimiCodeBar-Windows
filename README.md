@@ -21,8 +21,9 @@ Kimi Code 用量监控的 Windows 系统托盘工具。常驻托盘不打扰，�
 
 - **系统托盘常驻**：左键弹出用量面板（自动定位到托盘图标上方，失焦收起）；右键菜单（刷新 / 设置 / 退出）
 - **双窗口用量**：7 天窗口 + 5 小时窗口的已用百分比、剩余量、重置倒计时
+- **桌面悬浮球**：不打开面板也能随时瞥一眼用量——常驻桌面的额度小球，外环 7 天、内环 5 小时，中心数字显示最紧张的窗口（可固定为 5 小时或 7 天）；拖动自由摆放，推到屏幕左右边缘自动收缩成细条、悬停展开；全屏应用时自动隐藏，退出后恢复；可调透明度、可指定显示账号（默认自动选最紧张的）；DeepSeek 等余额账号按余额比例上球。设置 → 悬浮球 中开启（默认关闭）
 - **月度总量**：Kimi + Code 每月总用量分列显示（设置中粘贴一次网页 refresh_token，插件自动续期）
-- **本地消耗统计**：扫描本地 `wire.jsonl` 会话日志，按天统计 token 消耗（今日/昨日 + 近 7 天柱状图 + 今日分模型占比 + 近 10 分钟输出速率 + 缓存命中率，附「含缓存读写 token」口径说明），不依赖 API；多账号各自独立统计（按 CLI 凭证自动归属，支持 `KIMI_CODE_HOME` 多开的全部 `~/.kimi-code-*` 配置目录）；并接入 Claude Code、Codex、OpenCode、ZCode（智谱自家 CLI）的本地日志，按各家配置的 API key 精确归属到已登记账号；同一账号在不同工具挂的多把 key 可在设置页登记为「额外 Key」（每账号最多 5 把）汇总归属——所有 key 只在内存比对，不落盘、不用于任何网络请求；并自动发现本机 WSL 发行版内的 Kimi Code home（读注册表发行版名，扫 `\\wsl.localhost\<distro>\home\*\.kimi-code` 与 `root\.kimi-code`，同规则按凭证归属，无需设置）；GLM 账号同口径统计（Kimi Code 自定义 provider 段的 key 与 ZCode 的 Coding Plan key 均与账号登记 key 匹配归属，升级后自动全量重扫把历史消耗归位）
+- **本地消耗统计**：扫描本地 `wire.jsonl` 会话日志，按天统计 token 消耗（今日/昨日 + 近 7 天柱状图 + 今日分模型占比 + 近 10 分钟输出速率 + 缓存命中率），不依赖 API；多账号各自独立统计（按 CLI 凭证自动归属，支持 `KIMI_CODE_HOME` 多开的全部 `~/.kimi-code-*` 配置目录）；并接入 Claude Code、Codex、OpenCode、ZCode（智谱自家 CLI）的本地日志，按各家配置的 API key 精确归属到已登记账号；同一账号在不同工具挂的多把 key 可在设置页登记为「额外 Key」（每账号最多 5 把）汇总归属——所有 key 只在内存比对，不落盘、不用于任何网络请求；并自动发现本机 WSL 发行版内的 Kimi Code home（读注册表发行版名，扫 `\\wsl.localhost\<distro>\home\*\.kimi-code` 与 `root\.kimi-code`，同规则按凭证归属，无需设置）；GLM 账号同口径统计（Kimi Code 自定义 provider 段的 key 与 ZCode 的 Coding Plan key 均与账号登记 key 匹配归属，升级后自动全量重扫把历史消耗归位）
 - **用量趋势**：近 24 小时双线折线图（7 天/5 小时），本地记录 7 天历史，纯事实不预测；详情页「今日」消耗后据此标注「（占用周额度 X.X%）」——官方周额度已用%的当日增量（DeepSeek 等无配额窗口的账号不显示）
 - **会员与钱包**：显示会员档位（Andante / Moderato / Allegretto / Allegro）与加油包（Booster）钱包余额、月度用量
 - **多账号**：最多 10 个账号，面板左右翻页（像手机桌面）一页一个账号；滚轮 / 拖拽 / 点圆点翻页，末尾「+」快捷添加，设置页集中管理（改名 / 排序 / 删除）。旧版单账号数据自动迁移为「账号 1」，升级无感
@@ -147,7 +148,7 @@ cd src-tauri && cargo test
 ## 工程与质量
 
 - **CI 门禁**：每次 push / PR 自动执行 `cargo fmt --check`、`cargo clippy -D warnings`、ESLint、`cargo test`（[工作流](.github/workflows/ci.yml)）
-- **测试策略**：390+ 单元/集成测试，重点覆盖用量响应的防御性解析（字段缺失、proto3 省略、字段别名、金额单位换算）、OAuth 流程纯逻辑、版本比较、配置读写回环；真实 API 响应脱敏后作为 fixture 常驻回归
+- **测试策略**：470+ 单元/集成测试，重点覆盖用量响应的防御性解析（字段缺失、proto3 省略、字段别名、金额单位换算）、OAuth 流程纯逻辑、版本比较、配置读写回环；真实 API 响应脱敏后作为 fixture 常驻回归
 - **Dependabot**：每周自动检查 npm / cargo / GitHub Actions 依赖升级并开 PR
 - **自动发版**：打 `v*` tag → CI 自动构建 NSIS 安装包与便携 zip → 生成 Release 草稿，人工确认后发布（[工作流](.github/workflows/release.yml)）
 
