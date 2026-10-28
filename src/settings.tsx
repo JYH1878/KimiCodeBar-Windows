@@ -51,6 +51,8 @@ interface GeneralForm {
   extraDirs: string;
   /** 桌面悬浮球开关（issue #58，默认关；翻转随保存生效，后端建/毁窗口） */
   widgetEnabled: boolean;
+  /** 悬浮球「全屏应用时自动隐藏」（默认开；关 = 球常驻，被藏的球随保存恢复） */
+  widgetAutoHide: boolean;
   /** 悬浮球不透明度 0.3–1.0（滑块按百分比展示/编辑） */
   widgetOpacity: number;
   /** 悬浮球中心数字口径（"auto"/"five_hour"/"weekly"；保存时 auto→null） */
@@ -82,6 +84,7 @@ function SettingsApp() {
     theme: "system",
     extraDirs: "",
     widgetEnabled: false,
+    widgetAutoHide: true,
     widgetOpacity: 1,
     widgetCenter: "auto",
     widgetAccount: "auto",
@@ -171,6 +174,7 @@ function SettingsApp() {
           theme: s.theme ?? "system",
           extraDirs: (s.extra_scan_dirs ?? []).join("\n"),
           widgetEnabled: s.widget_enabled,
+          widgetAutoHide: s.widget_auto_hide,
           widgetOpacity: s.widget_opacity,
           widgetCenter: s.widget_center_metric ?? "auto",
           widgetAccount: s.widget_account_id ?? "auto",
@@ -288,6 +292,7 @@ function SettingsApp() {
       extra_scan_dirs: extraDirs,
       // 悬浮球（issue #58）：位置/贴边三字段不透传（后端 merge 保留磁盘值，只由拖拽命令落盘）
       widget_enabled: form.widgetEnabled,
+      widget_auto_hide: form.widgetAutoHide,
       widget_opacity: Math.min(1, Math.max(0.3, form.widgetOpacity)),
       widget_center_metric: form.widgetCenter === "auto" ? null : form.widgetCenter,
       widget_account_id: form.widgetAccount === "auto" ? null : form.widgetAccount,
@@ -602,6 +607,16 @@ function SettingsApp() {
               />
             </div>
             <p className="hint-muted">{t("settings.widget.enabledHint")}</p>
+            <div className="form-row">
+              <label htmlFor="widget-auto-hide">{t("settings.widget.autoHide")}</label>
+              <input
+                id="widget-auto-hide"
+                type="checkbox"
+                checked={form.widgetAutoHide}
+                onChange={(e) => setForm((f) => ({ ...f, widgetAutoHide: e.target.checked }))}
+              />
+            </div>
+            <p className="hint-muted">{t("settings.widget.autoHideHint")}</p>
             <div className="form-row">
               <label htmlFor="widget-opacity">
                 {t("settings.widget.opacity")} {Math.round(form.widgetOpacity * 100)}%

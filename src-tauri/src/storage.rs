@@ -155,6 +155,11 @@ pub struct Settings {
     /// 关即销毁窗口；默认关
     #[serde(default, skip_serializing_if = "is_false")]
     pub widget_enabled: bool,
+    /// 悬浮球「全屏应用时自动隐藏」开关，默认开：开时全屏守卫命中藏球、退出恢复；
+    /// 关时球常驻（守卫判定恒不隐藏，正被守卫藏着的球在下一周期恢复）。
+    /// 判定口径见 fullscreen::widget_hide_decision（裸 QUNS=2 不藏）
+    #[serde(default = "default_widget_auto_hide")]
+    pub widget_auto_hide: bool,
     /// 悬浮球整体不透明度（0.3–1.0，默认 1.0），加载/保存时钳制
     #[serde(default = "default_widget_opacity")]
     pub widget_opacity: f64,
@@ -204,6 +209,11 @@ const fn default_widget_opacity() -> f64 {
     1.0
 }
 
+/// widget_auto_hide 缺省值：开（历史行为延续，旧 settings.json 缺字段按开读回）
+const fn default_widget_auto_hide() -> bool {
+    true
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -224,6 +234,7 @@ impl Default for Settings {
             background_preset: None,
             extra_scan_dirs: Vec::new(),
             widget_enabled: false,
+            widget_auto_hide: true,
             widget_opacity: 1.0,
             widget_center_metric: None,
             widget_account_id: None,
@@ -489,8 +500,10 @@ mod tests {
             background_preset: None,
             // 顺手覆盖额外扫描目录的落盘/读回（UNC 形态，与真实用法一致）
             extra_scan_dirs: vec![r"\\server\share\home\u\.kimi-code".to_string()],
-            // 顺手覆盖悬浮球七字段的落盘/读回（开启 + 非默认值往返一致）
+            // 顺手覆盖悬浮球七字段的落盘/读回（开启 + 非默认值往返一致）；
+            // widget_auto_hide 存 false（非默认值才能证明键真的落盘往返）
             widget_enabled: true,
+            widget_auto_hide: false,
             widget_opacity: 0.65,
             widget_center_metric: Some("weekly".to_string()),
             widget_account_id: Some("acc-1".to_string()),
@@ -669,6 +682,8 @@ mod tests {
         let settings = load_settings().unwrap();
         assert_eq!(settings.refresh_interval_min, 10);
         assert!(!settings.widget_enabled);
+        // 全屏自动隐藏缺字段按默认 true 读回（历史行为延续）
+        assert!(settings.widget_auto_hide);
         assert_eq!(settings.widget_opacity, 1.0);
         assert!(settings.widget_center_metric.is_none());
         assert!(settings.widget_account_id.is_none());
@@ -700,6 +715,7 @@ mod tests {
         // 磁盘格式为 snake_case JSON（与 types.ts 契约一致）
         let raw = std::fs::read_to_string(dir.join("settings.json")).unwrap();
         assert!(raw.contains("\"widget_enabled\""));
+        assert!(raw.contains("\"widget_auto_hide\""));
         assert!(raw.contains("\"widget_opacity\""));
         assert!(raw.contains("\"widget_center_metric\""));
         assert!(raw.contains("\"widget_account_id\""));
@@ -707,13 +723,41 @@ mod tests {
         assert!(raw.contains("\"widget_y\""));
         assert!(raw.contains("\"widget_dock_edge\""));
 
-        // 关闭态（false）不落盘：磁盘上没有 widget_enabled 键，读回仍是 false
+        // 关闭态（false）不落盘：磁盘上没有 widget_enabled 键，读回仍是 false；
+        // widget_auto_hide 同 low_warn_enabled 模式总是落盘（true/false 都带键）
         let mut off = settings.clone();
         off.widget_enabled = false;
+        off.widget_auto_hide = true;
         save_settings(&off).unwrap();
         let raw = std::fs::read_to_string(dir.join("settings.json")).unwrap();
         assert!(!raw.contains("\"widget_enabled\""));
+        assert!(raw.contains("\"widget_auto_hide\": true"));
         assert!(!load_settings().unwrap().widget_enabled);
+        assert!(load_settings().unwrap().widget_auto_hide);
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn settings_widget_auto_hide_default_and_false_roundtrip() {
+        // 默认构造为 true（与旧 settings.json 缺字段读回一致）
+        assert!(Settings::default().widget_auto_hide);
+
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = use_temp_config_dir();
+
+        // 显式 false 落盘往返一致
+        let settings = Settings {
+            widget_auto_hide: false,
+            ..Default::default()
+        };
+        save_settings(&settings).unwrap();
+        assert!(!load_settings().unwrap().widget_auto_hide);
+
+        // 缺字段（旧版文件）读回 true
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("settings.json"), r#"{"refresh_interval_min":10}"#).unwrap();
+        assert!(load_settings().unwrap().widget_auto_hide);
 
         cleanup(&dir);
     }

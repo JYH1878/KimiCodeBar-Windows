@@ -69,6 +69,39 @@ fn guard_decision(quns: Option<i32>, heuristic: bool) -> bool {
     quns.is_some_and(notification_state_fullscreen) || heuristic
 }
 
+/// 悬浮球专用隐藏判定（纯函数，传感器矩阵单测锚点）。与共享 guard_decision 的差异：
+/// 裸 QUNS=2（QUNS_BUSY）单独出现不算全屏——2026-10-03 本机实发「无任何真实
+/// 全屏窗口却整晚报 2」，球被藏到重启才恢复（HANDOFF §5）；真全屏时前台窗口
+/// 几乎总铺满所在显示器（同日探针实测：边界全屏窗口 QUNS=2 且几何命中），
+/// 几何启发式兜底即可覆盖，仅信 3/4（D3D 独占 / 演示模式）。
+/// auto_hide=false（用户显式要求球常驻）：任何传感器输入都不隐藏
+pub fn widget_hide_decision(quns: Option<i32>, heuristic: bool, auto_hide: bool) -> bool {
+    if !auto_hide {
+        return false;
+    }
+    quns.is_some_and(|s| matches!(s, 3 | 4)) || heuristic
+}
+
+/// 悬浮球实际隐藏判定（纯函数，守卫每跳与创建期共用）：widget_hide_decision 的
+/// 稳态矩阵之上补一条——**QUNS=2 且存在铺满所在显示器的可见顶层窗口**
+/// （covering_present，见 covering_fullscreen_window_present 的非前台扫描）也隐藏。
+/// 背景（2026-10-28 验收打回）：进程启动/重建时，本进程的隐藏 Tauri 窗口会被
+/// WebView2 初始化短暂激活成前台并可能长期占据（实测卡死不释放），前台几何因
+/// own-pid 排除而结构性失明（geometry 恒 false），裸 QUNS=2 按矩阵又不敢藏 →
+/// 创建即 show = 全屏中闪现、且守卫每跳都误判「非全屏」。
+/// 「裸 2 不可信」只针对「无任何真实全屏窗口」的卡 2 形态（2026-10-03 事故，
+/// 当晚收掉全部窗口 QUNS 仍报 2）——需要铺满窗口的几何佐证才算真全屏，
+/// 卡 2 误报机器上（covering=false）判定与稳态矩阵逐行一致，球照常显示。
+pub fn widget_hide_decision_with_covering(
+    quns: Option<i32>,
+    heuristic: bool,
+    covering_present: bool,
+    auto_hide: bool,
+) -> bool {
+    widget_hide_decision(quns, heuristic, auto_hide)
+        || (auto_hide && quns == Some(2) && covering_present)
+}
+
 /// 矩形覆盖判定（纯函数）：窗口矩形覆盖显示器矩形，四边各允许
 /// COVER_TOLERANCE_PX 的内缩容差（窗口比显示器大 / 出屏都算覆盖）
 pub(crate) fn rect_covers(win: (i32, i32, i32, i32), mon: (i32, i32, i32, i32)) -> bool {
@@ -104,6 +137,91 @@ fn platform_probe() -> (Option<i32>, Option<ForegroundInfo>, bool) {
 #[cfg(not(windows))]
 fn platform_probe() -> (Option<i32>, Option<ForegroundInfo>, bool) {
     (None, None, false)
+}
+
+/// 扫描是否存在「可见、非本进程、非外壳类、铺满所在显示器」的顶层窗口——
+/// 真全屏窗口的**非前台**佐证。只做窗口枚举 + 几何，不看前台（调用场景：
+/// 启动/重建瞬间前台可能被启动方控制台或本进程新窗口占据，前台几何失明）。
+/// 仅供悬浮球判定（创建期与守卫每跳共用）；共享守卫（托盘/通知）不使用。
+#[cfg(windows)]
+pub fn covering_fullscreen_window_present() -> bool {
+    use windows_sys::core::BOOL;
+    use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetClassNameW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
+    };
+
+    struct ScanState {
+        own_pid: u32,
+        found: bool,
+    }
+
+    // SAFETY：回调由 EnumWindows 在同一线程同步调用；lparam 指向调用方栈上的
+    // ScanState；返回 0 停止枚举（已找到铺满窗口）
+    unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let state = unsafe { &mut *(lparam as *mut ScanState) };
+        if unsafe { IsWindowVisible(hwnd) } == 0 {
+            return 1; // 不可见（最小化/隐藏窗口）不参与
+        }
+        let mut pid: u32 = 0;
+        // SAFETY：hwnd 来自系统枚举；&mut pid 指向有效栈变量，失败时 pid 保持 0
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        if pid == state.own_pid {
+            return 1; // 本进程窗口（面板/设置/球自身）永不算外部全屏
+        }
+        let mut class_buf = [0u16; 256];
+        // SAFETY：缓冲区长度与容量一致传入；返回值为实际写入字符数（不含 NUL）
+        let class_len =
+            unsafe { GetClassNameW(hwnd, class_buf.as_mut_ptr(), class_buf.len() as i32) };
+        let class_name = if class_len > 0 {
+            String::from_utf16_lossy(&class_buf[..class_len as usize])
+        } else {
+            String::new()
+        };
+        if shell_class_excluded(&class_name) {
+            return 1; // 桌面/任务栏等常驻满屏外壳窗口不算
+        }
+        let mut wrect: RECT = unsafe { std::mem::zeroed() };
+        // SAFETY：&mut wrect 指向有效栈变量；返回 0 = 失败（按未覆盖跳过）
+        if unsafe { GetWindowRect(hwnd, &mut wrect) } == 0 {
+            return 1;
+        }
+        let mut mi: MONITORINFO = unsafe { std::mem::zeroed() };
+        mi.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        // SAFETY：mi 已按 cbSize 初始化；MonitorFromWindow 对任意 hwnd 安全
+        let hmon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+        if unsafe { GetMonitorInfoW(hmon, &mut mi) } != 0
+            && rect_covers(
+                (wrect.left, wrect.top, wrect.right, wrect.bottom),
+                (
+                    mi.rcMonitor.left,
+                    mi.rcMonitor.top,
+                    mi.rcMonitor.right,
+                    mi.rcMonitor.bottom,
+                ),
+            )
+        {
+            state.found = true;
+            return 0;
+        }
+        1
+    }
+
+    let mut state = ScanState {
+        own_pid: std::process::id(),
+        found: false,
+    };
+    // SAFETY：回调与 state 均为本调用栈上的有效对象
+    unsafe { EnumWindows(Some(enum_cb), &mut state as *mut ScanState as LPARAM) };
+    state.found
+}
+
+#[cfg(not(windows))]
+pub fn covering_fullscreen_window_present() -> bool {
+    false
 }
 
 /// QUNS 原始状态值；API 失败（HRESULT < 0）返回 None
@@ -314,5 +432,118 @@ mod tests {
         // QUNS API 失败（None）：只靠启发式，fail-open
         assert!(!guard_decision(None, false));
         assert!(guard_decision(None, true));
+    }
+
+    // ---- 悬浮球专用隐藏判定（传感器矩阵）----
+
+    #[test]
+    fn widget_hide_matrix_switch_on() {
+        // 裸 QUNS=2（几何未命中）不藏：2026-10-03「QUNS 卡 2 无真全屏」事故的正向断言
+        assert!(!widget_hide_decision(Some(2), false, true));
+        // QUNS=2 + 几何命中：真全屏（探测实测边界全屏窗口正是 2 + 铺满）→ 藏
+        assert!(widget_hide_decision(Some(2), true, true));
+        // QUNS=3 / 4（D3D 独占全屏 / 演示模式）：几何不命中也藏
+        assert!(widget_hide_decision(Some(3), false, true));
+        assert!(widget_hide_decision(Some(4), false, true));
+        assert!(widget_hide_decision(Some(3), true, true));
+        assert!(widget_hide_decision(Some(4), true, true));
+        // 1/5/6/7 与未知取值（0/8/-1）+ 几何未命中：不藏
+        for q in [1, 5, 6, 7, 0, 8, -1] {
+            assert!(!widget_hide_decision(Some(q), false, true), "quns={q}");
+        }
+        // QUNS API 失败（None）：只靠几何兜底
+        assert!(!widget_hide_decision(None, false, true));
+        assert!(widget_hide_decision(None, true, true));
+    }
+
+    #[test]
+    fn widget_hide_matrix_switch_off_never_hides() {
+        // 开关关 = 球常驻：任何传感器组合都不隐藏
+        for q in [
+            None,
+            Some(1),
+            Some(2),
+            Some(3),
+            Some(4),
+            Some(5),
+            Some(7),
+            Some(-1),
+        ] {
+            for h in [false, true] {
+                assert!(
+                    !widget_hide_decision(q, h, false),
+                    "quns={q:?} geometry={h}"
+                );
+            }
+        }
+    }
+
+    // ---- 悬浮球带 covering 佐证的判定（启动/重建时序回归，2026-10-28 验收打回；
+    //      守卫每跳与创建期共用此判定）----
+
+    #[test]
+    fn widget_covering_matrix_switch_on() {
+        // 回归场景（启动/重建时序）：本进程隐藏窗口被 WebView2 激活成前台 →
+        // 几何失明（false），但 QUNS=2 且扫描到铺满屏幕的真实全屏窗口 →
+        // 必须隐藏（旧逻辑创建即 show、守卫每跳误判非全屏 = 全屏中闪现且无人恢复）
+        assert!(widget_hide_decision_with_covering(
+            Some(2),
+            false,
+            true,
+            true
+        ));
+        // QUNS 卡 2 且无任何铺满窗口（历史事故形态）→ 创建即显示，稳态矩阵语义不变
+        assert!(!widget_hide_decision_with_covering(
+            Some(2),
+            false,
+            false,
+            true
+        ));
+        // QUNS 正常/查询失败时，铺满窗口（如后台无边框视频）不单独构成创建期隐藏
+        assert!(!widget_hide_decision_with_covering(
+            Some(5),
+            false,
+            true,
+            true
+        ));
+        assert!(!widget_hide_decision_with_covering(None, false, true, true));
+        // 其余输入与稳态矩阵一致
+        assert!(widget_hide_decision_with_covering(
+            Some(2),
+            true,
+            false,
+            true
+        ));
+        assert!(widget_hide_decision_with_covering(
+            Some(3),
+            false,
+            false,
+            true
+        ));
+        assert!(widget_hide_decision_with_covering(None, true, false, true));
+        assert!(!widget_hide_decision_with_covering(
+            Some(5),
+            false,
+            false,
+            true
+        ));
+        assert!(!widget_hide_decision_with_covering(
+            Some(1),
+            false,
+            false,
+            true
+        ));
+    }
+
+    #[test]
+    fn widget_covering_matrix_switch_off_never_hides() {
+        for q in [None, Some(1), Some(2), Some(3), Some(4), Some(5)] {
+            for (h, c) in [(false, false), (false, true), (true, false), (true, true)] {
+                assert!(
+                    !widget_hide_decision_with_covering(q, h, c, false),
+                    "quns={q:?} geometry={h} covering={c}"
+                );
+            }
+        }
     }
 }

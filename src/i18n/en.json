@@ -170,6 +170,8 @@
       "title": "Floating widget",
       "enabled": "Show desktop floating widget",
       "enabledHint": "A double-ring gauge that stays on your desktop: outer ring for the 7-day window, inner ring for 5 hours, with the remaining percentage in the center. Draggable; hugs either side edge as a slim bar; hides automatically during full-screen apps. Click it to open the panel. Balance-type accounts (DeepSeek) show the balance instead, with the outer ring tracking it against your warning threshold",
+      "autoHide": "Hide during full-screen apps",
+      "autoHideHint": "Hides the widget while a true full-screen app is in the foreground (window covering the screen, or exclusive/presentation mode) and restores it after exit. Turn it off to keep the widget always visible if the system ever misreports full-screen. On by default",
       "opacity": "Opacity",
       "center": "Center number",
       "centerAuto": "Tightest window",

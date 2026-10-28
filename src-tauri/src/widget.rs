@@ -5,7 +5,12 @@
 //! - 可拖拽（系统 startDragging），拖拽静止 300ms 后前端调 `widget_drag_ended`，
 //!   后端按窗口与所在显示器工作区的关系判定贴边：贴左右竖边自动收缩成 12×88 细条
 //!   （hover 展开回 96×96），自由悬浮保持 96×96；位置与贴边三字段落盘；
-//! - 全屏应用活跃时自动隐藏（复用 fullscreen 双传感器守卫），退出恢复显示；
+//! - 全屏应用活跃时自动隐藏，退出恢复；判定独立于托盘/通知的共享守卫：
+//!   几何 ∪ QUNS∈{3,4}，另补「QUNS=2 + 铺满窗口扫描佐证」（裸 QUNS=2 不藏——
+//!   2026-10-03 QUNS 卡 2 事故；佐证分支防启动/重建期前台被本进程隐藏窗口占据
+//!   导致的几何失明，见 fullscreen::widget_hide_decision_with_covering），
+//!   「全屏应用时自动隐藏」可在设置关闭；hide/show 失败保留状态下一轮重试，
+//!   守卫初态与创建期结果一致（防藏死），开关关闭后最迟一周期恢复；
 //! - 窗口懒创建懒销毁：`widget_enabled` 开才建（启动 / save_settings 后 reconcile），
 //!   关即销毁，保低内存卖点。
 //!
@@ -339,9 +344,31 @@ fn create_widget_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     .visible(false)
     .build()?;
     apply_widget_layout(&window, &settings);
-    let _ = window.show();
-    tracing::info!("悬浮球窗口已创建（widget_enabled=true）");
-    spawn_fullscreen_guard(app.clone());
+    // 创建期全屏判定（与守卫每跳同款 widget_hide_decision_with_covering）：稳态矩阵
+    // 之外补「QUNS=2 + 存在铺满屏幕的可见全屏窗口（covering 扫描，不看前台）」——
+    // 启动/重建时本进程的隐藏窗口可能被 WebView2 激活成前台（own-pid 排除 → 前台
+    // 几何失明），此时 QUNS=2 有铺满窗口佐证 → 先藏，防全屏中闪现；守卫以
+    // initially_hidden 接力（状态与窗口实际可见性一致，退出全屏后有人发 Show）。
+    // 传感器随创建日志落盘（验收取证：创建瞬间前台归属 / QUNS / 几何 / 铺满扫描）
+    let probe = kimicodebar::fullscreen::probe();
+    let covering = kimicodebar::fullscreen::covering_fullscreen_window_present();
+    let hide = kimicodebar::fullscreen::widget_hide_decision_with_covering(
+        probe.quns,
+        probe.heuristic,
+        covering,
+        settings.widget_auto_hide,
+    );
+    let ctx = guard_log_ctx(settings.widget_auto_hide, &probe, covering);
+    if hide {
+        tracing::info!("悬浮球创建于全屏期：保持隐藏不闪显（{ctx}）");
+    } else {
+        // 显式 show 并核查结果（失败记 warn，守卫下一轮如需恢复会再试）
+        if let Err(e) = window.show() {
+            tracing::warn!("悬浮球窗口显示失败: {e}");
+        }
+        tracing::info!("悬浮球窗口已创建并显示（{ctx}）");
+    }
+    spawn_fullscreen_guard(app.clone(), hide);
     Ok(window)
 }
 
@@ -593,16 +620,104 @@ pub fn get_widget_state(app: AppHandle) -> WidgetState {
     compute_widget_state(&panel, &settings)
 }
 
-/// 全屏守卫 ticker：球窗口存在期间每 FULLSCREEN_GUARD_SECS 探测一次，全屏命中 hide、
+/// 全屏守卫单步动作（纯判定）：由「本轮应否隐藏 × 当前是否被守卫隐藏」推出。
+/// 恢复分支同时覆盖「退出全屏」与「widget_auto_hide 关闭」（两者都令 should_hide=false），
+/// 因此开关关闭时被藏的球最迟下一周期（≤FULLSCREEN_GUARD_SECS）恢复
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WidgetGuardAction {
+    /// 全屏命中且当前可见 → hide
+    Hide,
+    /// 不再命中且当前被守卫隐藏 → show
+    Show,
+    /// 状态无变化 → 不动窗口（也就不刷日志，防每 2 秒刷屏）
+    None,
+}
+
+pub(crate) fn widget_guard_action(should_hide: bool, hidden_by_guard: bool) -> WidgetGuardAction {
+    match (should_hide, hidden_by_guard) {
+        (true, false) => WidgetGuardAction::Hide,
+        (false, true) => WidgetGuardAction::Show,
+        _ => WidgetGuardAction::None,
+    }
+}
+
+/// 执行守卫动作：hide/show 的 Result 必须核查——只有成功才更新 hidden_by_guard；
+/// 失败记 warn（带传感器上下文）保留原状态，下一轮 tick 按原状态重算出同一动作重试。
+/// 返回执行后的隐藏状态。只在动作实际发生时落一行日志（info=成功转换 / warn=失败重试）
+fn apply_guard_action<E: std::fmt::Display>(
+    action: WidgetGuardAction,
+    hidden_by_guard: bool,
+    ctx: &str,
+    hide: impl FnOnce() -> Result<(), E>,
+    show: impl FnOnce() -> Result<(), E>,
+) -> bool {
+    match action {
+        WidgetGuardAction::Hide => match hide() {
+            Ok(()) => {
+                tracing::info!("全屏守卫隐藏悬浮球（{ctx}）");
+                true
+            }
+            Err(e) => {
+                tracing::warn!("悬浮球隐藏失败，下一轮重试（{ctx}）：{e}");
+                hidden_by_guard
+            }
+        },
+        WidgetGuardAction::Show => match show() {
+            Ok(()) => {
+                tracing::info!("全屏守卫恢复悬浮球（{ctx}）");
+                false
+            }
+            Err(e) => {
+                tracing::warn!("悬浮球恢复显示失败，下一轮重试（{ctx}）：{e}");
+                hidden_by_guard
+            }
+        },
+        WidgetGuardAction::None => hidden_by_guard,
+    }
+}
+
+/// 组装守卫动作日志的传感器上下文（取证字段：开关 / QUNS 原始值 / 几何结果 /
+/// 铺满窗口扫描 / 前台摘要）
+fn guard_log_ctx(
+    auto_hide: bool,
+    probe: &kimicodebar::fullscreen::FullscreenProbe,
+    covering: bool,
+) -> String {
+    let fg = match &probe.foreground {
+        Some(f) => format!(
+            "{} [{}] ({},{})-({},{})",
+            f.exe_name,
+            f.class_name,
+            f.window_rect.0,
+            f.window_rect.1,
+            f.window_rect.2,
+            f.window_rect.3
+        ),
+        None => "无前台窗口".to_string(),
+    };
+    format!(
+        "widget_auto_hide={auto_hide} quns={:?} geometry={} covering={covering} 前台={fg}",
+        probe.quns, probe.heuristic
+    )
+}
+
+/// 全屏守卫 ticker：球窗口存在期间每 FULLSCREEN_GUARD_SECS 探测一次，命中 hide、
 /// 退出 show；命中/恢复各落一行日志（仿轮询探针行，供「球还在不在」类问题对照）。
-/// 窗口销毁或被新一轮守卫接替（代次不符）时循环自退出
-fn spawn_fullscreen_guard(app: AppHandle) {
+/// 窗口销毁或被新一轮守卫接替（代次不符）时循环自退出。
+/// 判定用悬浮球专用的 fullscreen::widget_hide_decision_with_covering：稳态矩阵
+/// （裸 QUNS=2 不藏）之上补「QUNS=2 + 铺满窗口佐证」——启动/重建后本进程的隐藏
+/// 窗口可能被 WebView2 激活成前台且不释放，前台几何结构性失明，靠非前台扫描兜底
+/// （与托盘/通知共享的 guard_decision 语义不同，勿混用）。
+/// initially_hidden：创建期已按同判定藏住的窗口传 true——守卫状态必须与窗口实际
+/// 可见性一致，否则退出全屏后没人发 Show（球藏死）；每轮重读设置，widget_auto_hide
+/// 关闭当场生效（被藏的球下一周期恢复，之后守卫不再藏球）
+fn spawn_fullscreen_guard(app: AppHandle, initially_hidden: bool) {
     let gen = WIDGET_GUARD_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn(async move {
         let mut ticker =
             tokio::time::interval(std::time::Duration::from_secs(FULLSCREEN_GUARD_SECS));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut hidden_by_guard = false;
+        let mut hidden_by_guard = initially_hidden;
         loop {
             ticker.tick().await;
             if WIDGET_GUARD_SEQ.load(Ordering::SeqCst) != gen {
@@ -612,22 +727,28 @@ fn spawn_fullscreen_guard(app: AppHandle) {
                 tracing::debug!("悬浮球窗口已销毁，全屏守卫 ticker 退出");
                 return;
             };
-            match (
-                kimicodebar::fullscreen::fullscreen_app_active(),
+            let settings = storage::load_settings().unwrap_or_default();
+            let probe = kimicodebar::fullscreen::probe();
+            let covering = kimicodebar::fullscreen::covering_fullscreen_window_present();
+            let should_hide = kimicodebar::fullscreen::widget_hide_decision_with_covering(
+                probe.quns,
+                probe.heuristic,
+                covering,
+                settings.widget_auto_hide,
+            );
+            let action = widget_guard_action(should_hide, hidden_by_guard);
+            let ctx = guard_log_ctx(settings.widget_auto_hide, &probe, covering);
+            // 每跳探针行（debug 级默认关，RUST_LOG=debug 取证用；info 日志零刷屏）
+            tracing::debug!(
+                "悬浮球守卫探针：{ctx} → should_hide={should_hide} action={action:?} hidden={hidden_by_guard}"
+            );
+            hidden_by_guard = apply_guard_action(
+                action,
                 hidden_by_guard,
-            ) {
-                (true, false) => {
-                    let _ = window.hide();
-                    hidden_by_guard = true;
-                    tracing::info!("全屏守卫命中：悬浮球已隐藏（退出全屏后自动恢复）");
-                }
-                (false, true) => {
-                    let _ = window.show();
-                    hidden_by_guard = false;
-                    tracing::info!("全屏守卫解除：悬浮球已恢复显示");
-                }
-                _ => {}
-            }
+                &ctx,
+                || window.hide(),
+                || window.show(),
+            );
         }
     });
 }
@@ -1096,5 +1217,169 @@ mod tests {
         assert_eq!(state.balance_currency, None);
         assert_eq!(state.balance_pct, None);
         assert_eq!(state.five_hour_pct, Some(36.0));
+    }
+
+    // ---- 全屏守卫状态机（传感器矩阵见 fullscreen.rs；此处测动作判定与失败重试）----
+
+    #[test]
+    fn guard_action_transitions() {
+        use WidgetGuardAction::*;
+        // 命中且当前可见 → 藏
+        assert_eq!(widget_guard_action(true, false), Hide);
+        // 不再命中且当前被守卫藏 → 恢复（含 widget_auto_hide 关闭路径）
+        assert_eq!(widget_guard_action(false, true), Show);
+        // 持续全屏 / 持续可见：无动作（也就无日志，防每 2 秒刷屏）
+        assert_eq!(widget_guard_action(true, true), None);
+        assert_eq!(widget_guard_action(false, false), None);
+    }
+
+    #[test]
+    fn switch_off_in_fullscreen_triggers_restore_next_tick() {
+        // 真全屏中（QUNS=2 + 几何命中）关闭开关：判定恒不藏 → 被藏的球下一周期恢复
+        let should_hide = kimicodebar::fullscreen::widget_hide_decision(Some(2), true, false);
+        assert!(!should_hide);
+        assert_eq!(
+            widget_guard_action(should_hide, true),
+            WidgetGuardAction::Show
+        );
+    }
+
+    #[test]
+    fn hide_show_success_updates_state() {
+        // 成功的 hide：状态翻为隐藏；show 分支不应被调用
+        assert!(apply_guard_action(
+            WidgetGuardAction::Hide,
+            false,
+            "t",
+            || Ok::<(), String>(()),
+            || panic!("Hide 分支不应调用 show"),
+        ));
+        // 成功的 show：状态翻为可见；hide 分支不应被调用
+        assert!(!apply_guard_action(
+            WidgetGuardAction::Show,
+            true,
+            "t",
+            || panic!("Show 分支不应调用 hide"),
+            || Ok::<(), String>(()),
+        ));
+    }
+
+    #[test]
+    fn restore_failure_keeps_hidden_and_retries_next_tick() {
+        // 恢复失败：状态保持「被守卫隐藏」（窗口实际不可见，状态必须与窗口一致）
+        let hidden = apply_guard_action(
+            WidgetGuardAction::Show,
+            true,
+            "t",
+            || Ok::<(), String>(()),
+            || Err("模拟 show 失败".to_string()),
+        );
+        assert!(hidden);
+        // 下一轮同输入（should_hide=false、hidden=true）重算出同一动作 Show 重试；
+        // 这次成功 → 恢复可见
+        assert_eq!(widget_guard_action(false, hidden), WidgetGuardAction::Show);
+        assert!(!apply_guard_action(
+            widget_guard_action(false, hidden),
+            hidden,
+            "t",
+            || Ok::<(), String>(()),
+            || Ok::<(), String>(()),
+        ));
+    }
+
+    #[test]
+    fn hide_failure_keeps_visible_state_for_retry() {
+        // 隐藏失败：状态保持「未被守卫隐藏」，下一轮重算出 Hide 再试
+        let hidden = apply_guard_action(
+            WidgetGuardAction::Hide,
+            false,
+            "t",
+            || Err("模拟 hide 失败".to_string()),
+            || Ok::<(), String>(()),
+        );
+        assert!(!hidden);
+        assert_eq!(widget_guard_action(true, hidden), WidgetGuardAction::Hide);
+    }
+
+    #[test]
+    fn none_action_preserves_state_without_touching_window() {
+        // 无动作：窗口 API 一次都不该碰
+        let never_hide = || -> Result<(), String> { panic!("None 不应调用 hide") };
+        let never_show = || -> Result<(), String> { panic!("None 不应调用 show") };
+        assert!(apply_guard_action(
+            WidgetGuardAction::None,
+            true,
+            "t",
+            never_hide,
+            never_show
+        ));
+        assert!(!apply_guard_action(
+            WidgetGuardAction::None,
+            false,
+            "t",
+            never_hide,
+            never_show
+        ));
+    }
+
+    #[test]
+    fn guard_log_ctx_carries_sensor_evidence() {
+        // 日志上下文必须带齐取证字段：开关 / QUNS 原始值 / 几何结果 / 铺满扫描 / 前台摘要
+        let probe = kimicodebar::fullscreen::FullscreenProbe {
+            quns: Some(2),
+            heuristic: false,
+            foreground: Some(kimicodebar::fullscreen::ForegroundInfo {
+                exe_name: "game.exe".to_string(),
+                class_name: "UnityWndClass".to_string(),
+                window_rect: (0, 0, 1920, 1080),
+                monitor_rect: (0, 0, 1920, 1080),
+            }),
+            guard: true,
+        };
+        let ctx = guard_log_ctx(true, &probe, true);
+        assert!(ctx.contains("widget_auto_hide=true"), "ctx={ctx}");
+        assert!(ctx.contains("quns=Some(2)"), "ctx={ctx}");
+        assert!(ctx.contains("geometry=false"), "ctx={ctx}");
+        assert!(ctx.contains("covering=true"), "ctx={ctx}");
+        assert!(ctx.contains("game.exe [UnityWndClass]"), "ctx={ctx}");
+
+        // 无前台窗口（API 失败）也不慌
+        let probe = kimicodebar::fullscreen::FullscreenProbe {
+            quns: None,
+            heuristic: false,
+            foreground: None,
+            guard: false,
+        };
+        let ctx = guard_log_ctx(false, &probe, false);
+        assert!(ctx.contains("widget_auto_hide=false"), "ctx={ctx}");
+        assert!(ctx.contains("quns=None"), "ctx={ctx}");
+        assert!(ctx.contains("covering=false"), "ctx={ctx}");
+        assert!(ctx.contains("无前台窗口"), "ctx={ctx}");
+    }
+
+    #[test]
+    fn guard_initial_hidden_state_reconciles_via_action_matrix() {
+        // 创建期藏住的球（initially_hidden=true）：守卫初态必须与窗口一致——
+        // 退出全屏后（should_hide=false）按动作矩阵发出 Show 恢复；
+        // 全屏仍在（should_hide=true）则 None 维持隐藏。反向（初始可见）同理由
+        // guard_action_transitions 覆盖
+        let still_fullscreen =
+            kimicodebar::fullscreen::widget_hide_decision_with_covering(Some(2), false, true, true);
+        assert!(still_fullscreen);
+        assert_eq!(
+            widget_guard_action(still_fullscreen, true),
+            WidgetGuardAction::None
+        );
+        let fullscreen_over = kimicodebar::fullscreen::widget_hide_decision_with_covering(
+            Some(5),
+            false,
+            false,
+            true,
+        );
+        assert!(!fullscreen_over);
+        assert_eq!(
+            widget_guard_action(fullscreen_over, true),
+            WidgetGuardAction::Show
+        );
     }
 }

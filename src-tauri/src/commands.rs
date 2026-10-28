@@ -84,6 +84,10 @@ pub struct AppSettings {
     /// 桌面悬浮球开关（issue #58），默认关
     #[serde(default)]
     pub widget_enabled: bool,
+    /// 悬浮球「全屏应用时自动隐藏」，默认开；判定口径见 fullscreen::widget_hide_decision
+    /// （裸 QUNS=2 不藏）。关时球常驻，被守卫藏着的球在下一周期恢复
+    #[serde(default = "default_widget_auto_hide")]
+    pub widget_auto_hide: bool,
     /// 悬浮球整体不透明度（0.3–1.0，保存时钳制；默认 1.0）
     #[serde(default = "default_widget_opacity")]
     pub widget_opacity: f64,
@@ -110,6 +114,11 @@ fn default_widget_opacity() -> f64 {
     1.0
 }
 
+/// widget_auto_hide 收参缺省值：开（与 storage 侧 default 一致，旧前端不传该字段按开）
+fn default_widget_auto_hide() -> bool {
+    true
+}
+
 impl From<storage::Settings> for AppSettings {
     fn from(s: storage::Settings) -> Self {
         Self {
@@ -128,6 +137,7 @@ impl From<storage::Settings> for AppSettings {
             background_preset: s.background_preset,
             extra_scan_dirs: s.extra_scan_dirs,
             widget_enabled: s.widget_enabled,
+            widget_auto_hide: s.widget_auto_hide,
             widget_opacity: s.widget_opacity,
             widget_center_metric: s.widget_center_metric,
             widget_account_id: s.widget_account_id,
@@ -159,6 +169,7 @@ impl From<AppSettings> for storage::Settings {
             background_preset: s.background_preset,
             extra_scan_dirs: s.extra_scan_dirs,
             widget_enabled: s.widget_enabled,
+            widget_auto_hide: s.widget_auto_hide,
             widget_opacity: s.widget_opacity,
             widget_center_metric: s.widget_center_metric,
             widget_account_id: s.widget_account_id,
@@ -2136,6 +2147,35 @@ mod tests {
         let dto = AppSettings::from(storage::Settings::default());
         assert!(!dto.statusline_enabled);
         assert!(!storage::Settings::from(dto).statusline_enabled);
+    }
+
+    #[test]
+    fn app_settings_dto_roundtrip_covers_widget_auto_hide() {
+        // storage → DTO：非默认值（false）透出
+        let stored = storage::Settings {
+            widget_auto_hide: false,
+            ..Default::default()
+        };
+        let dto = AppSettings::from(stored);
+        assert!(!dto.widget_auto_hide);
+
+        // DTO → storage：字段带回
+        assert!(!storage::Settings::from(dto).widget_auto_hide);
+
+        // 默认（开）双向一致
+        let dto = AppSettings::from(storage::Settings::default());
+        assert!(dto.widget_auto_hide);
+        assert!(storage::Settings::from(dto).widget_auto_hide);
+
+        // 反序列化缺字段（旧前端 payload 不带该键）按默认 true 收参
+        // （AppSettings 仅 widget/theme/背景类字段有 serde default，必填字段带齐）
+        let dto: AppSettings = serde_json::from_str(
+            r#"{"refresh_interval_min":5,"adaptive_refresh":true,"low_warn_enabled":true,
+                "warn_threshold_pct":20,"deepseek_warn_threshold":5,"autostart":false,
+                "statusline_enabled":false,"minimal_mode":false}"#,
+        )
+        .unwrap();
+        assert!(dto.widget_auto_hide);
     }
 
     // ---- 多账号状态组装 ----

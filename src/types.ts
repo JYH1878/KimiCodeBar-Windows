@@ -141,6 +141,9 @@ export interface AppSettings {
   extra_scan_dirs: string[];
   /** 桌面悬浮球开关（issue #58，默认 false）：双环球常驻桌面，关即销毁窗口 */
   widget_enabled: boolean;
+  /** 悬浮球「全屏应用时自动隐藏」（默认 true）：判定为真全屏（几何铺满 ∪ QUNS 3/4，
+   *  裸 QUNS=2 不算）时藏球、退出恢复；false = 球常驻不隐藏 */
+  widget_auto_hide: boolean;
   /** 悬浮球整体不透明度 0.3–1.0（默认 1.0），后端保存/加载时钳制 */
   widget_opacity: number;
   /** 悬浮球中心数字口径：null/"auto" = 自动最紧张（已有窗口剩余最低者）、"five_hour"、"weekly" */

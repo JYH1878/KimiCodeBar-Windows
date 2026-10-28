@@ -474,6 +474,7 @@ const mockDb = {
     extra_scan_dirs: [],
     // 悬浮球（浏览器 mock 默认关；widget.html 页面 mock 不走这里）
     widget_enabled: false,
+    widget_auto_hide: true,
     widget_opacity: 1,
     widget_center_metric: null,
     widget_account_id: null,
