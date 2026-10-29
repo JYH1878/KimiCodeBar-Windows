@@ -21,7 +21,7 @@ use kimicodebar::quota::{deepseek_needs_low_warning, needs_low_warning, KimiQuot
 use kimicodebar::storage::{self, Account, CachedQuota};
 use kimicodebar::update;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State, WebviewWindow};
 use tauri_plugin_autostart::ManagerExt;
 use tokio::sync::watch;
 
@@ -808,15 +808,105 @@ async fn fetch_update_info() -> UpdateInfo {
     }
 }
 
+/// 物理像素矩形（x, y, w, h）：窗口 outer_position/outer_size 与显示器 work_area
+/// 的统一表示（同一坐标单位比较，坑 57 配套）
+pub(crate) type PhysRect = (i32, i32, i32, i32);
+
+/// 窗口矩形是否完整落在工作区矩形内（物理像素；含左上角、含右下角内边界）
+fn rect_fully_inside(win: PhysRect, area: PhysRect) -> bool {
+    win.0 >= area.0
+        && win.1 >= area.1
+        && win.0 + win.2 <= area.0 + area.2
+        && win.1 + win.3 <= area.1 + area.3
+}
+
+/// 窗口位置校正（纯函数，物理像素统一单位）：窗口矩形完整落在任一显示器工作区
+/// 内 → None（保留原位，正常副屏位置不误伤）；否则（完全离屏 / 跨屏越界，常因
+/// 换 Dock、拔显示器、被外部工具移动）→ Some(主屏工作区内居中且四边不出界的新
+/// 位置；窗口比工作区大时贴左上）。work_areas 为空（显示器枚举失败）→ None 保留
+/// 原位不动（宁可维持现状也不瞎挪）；主屏缺失回落列表首个工作区
+pub(crate) fn corrected_window_position(
+    win: PhysRect,
+    work_areas: &[PhysRect],
+    primary: Option<PhysRect>,
+) -> Option<(i32, i32)> {
+    if work_areas.is_empty() {
+        return None;
+    }
+    if work_areas.iter().any(|&a| rect_fully_inside(win, a)) {
+        return None;
+    }
+    let (ax, ay, aw, ah) = primary
+        .or_else(|| work_areas.first().copied())
+        .unwrap_or((0, 0, 800, 600));
+    let x = if win.2 >= aw {
+        ax
+    } else {
+        (ax + (aw - win.2) / 2).clamp(ax, ax + aw - win.2)
+    };
+    let y = if win.3 >= ah {
+        ay
+    } else {
+        (ay + (ah - win.3) / 2).clamp(ay, ay + ah - win.3)
+    };
+    Some((x, y))
+}
+
+/// 打开/唤起设置窗口的唯一实现（面板按钮 open_settings 命令与托盘菜单共用）：
+/// show+set_focus 前先校正位置——窗口完全在任一当前显示器工作区内（含正常副屏）
+/// 就保留，否则移回主屏工作区居中（救回离屏窗口，2026-10-29）
+pub fn show_settings_window(app: &AppHandle, caller: &str) {
+    let Some(window) = app.get_webview_window("settings") else {
+        return;
+    };
+    ensure_settings_window_onscreen(app, &window);
+    tracing::info!("window.show+set_focus 调用，caller={caller}");
+    let _ = window.show();
+    let _ = window.set_focus();
+}
+
+fn monitor_work_area(m: &tauri::Monitor) -> PhysRect {
+    let wa = m.work_area();
+    (
+        wa.position.x,
+        wa.position.y,
+        wa.size.width as i32,
+        wa.size.height as i32,
+    )
+}
+
+/// 位置校正执行：读 outer_position/outer_size 与各显示器 work_area（同为物理像素），
+/// 校正用 Position::Physical 直写（单位一致，不走逻辑换算）。读不到位置/尺寸时跳过
+/// 校正只记 warn，不阻断 show
+fn ensure_settings_window_onscreen(app: &AppHandle, window: &WebviewWindow) {
+    let (Ok(pos), Ok(size)) = (window.outer_position(), window.outer_size()) else {
+        tracing::warn!("读取设置窗口位置/尺寸失败，跳过位置校正");
+        return;
+    };
+    let work_areas: Vec<PhysRect> = app
+        .available_monitors()
+        .unwrap_or_default()
+        .iter()
+        .map(monitor_work_area)
+        .collect();
+    let primary = app
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .as_ref()
+        .map(monitor_work_area);
+    let win = (pos.x, pos.y, size.width as i32, size.height as i32);
+    if let Some((x, y)) = corrected_window_position(win, &work_areas, primary) {
+        let _ = window.set_position(tauri::Position::Physical(PhysicalPosition::new(x, y)));
+        tracing::info!("设置窗口位置无效（离屏/越界，原 {win:?}），已移回主屏工作区 ({x},{y})");
+    }
+}
+
 /// 打开设置窗口；section 指定定位分区（如 "account-add" 定位到账号添加表单），
 /// 经 settings-navigate 事件通知设置页（设置窗自启动常驻，JS 监听始终在线）
 #[tauri::command]
 pub fn open_settings(app: AppHandle, section: Option<String>) {
-    if let Some(window) = app.get_webview_window("settings") {
-        tracing::info!("window.show+set_focus 调用，caller=commands::open_settings");
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
+    show_settings_window(&app, "commands::open_settings");
     if let Some(section) = section {
         let _ = app.emit("settings-navigate", section);
     }
@@ -931,8 +1021,10 @@ pub fn save_settings(app: AppHandle, settings: AppSettings) -> Result<(), String
     crate::hotkey::apply(&app, settings.hotkey.as_deref())?;
 
     // 悬浮球开关翻转时建/毁窗口（懒创建懒销毁）；透明度等展示属性由
-    // settings-changed 广播给球前端即时应用，这里只管窗口存在性
-    crate::widget::reconcile(&app);
+    // settings-changed 广播给球前端即时应用，这里只管窗口存在性。
+    // 必须转阻塞线程：Tauri 同步命令跑主线程，内联建窗会在 IPC 派发内嵌套死锁
+    // （2026-10-29 实测 build 永不返回、保存也挂死）；建/销毁统一走该入口
+    crate::widget::spawn_reconcile(&app);
     // 悬浮球的展示账号/中心口径是后端算进 WidgetState 的（前端拿不到设置原值），
     // 保存后立刻补发一份——否则改了「显示账号/中心数字」要等下一次配额刷新才见效
     crate::widget::emit_widget_state(&app, &app.state::<AppState>().snapshot());
@@ -3205,5 +3297,102 @@ mod tests {
             .map(|i| format!(r"\\srv\share{i}"))
             .collect();
         assert!(sanitize_extra_scan_dirs(&eleven).is_err());
+    }
+
+    // ---- 设置窗口位置校正（离屏救回，2026-10-29）----
+
+    /// 主屏 1920×1040 工作区 + 副屏在左（负坐标），窗口 650×700 物理像素
+    fn demo_areas() -> (Vec<PhysRect>, PhysRect) {
+        (
+            vec![(0, 0, 1920, 1040), (-1920, 0, 1920, 1040)],
+            (0, 0, 1920, 1040),
+        )
+    }
+
+    #[test]
+    fn position_fully_onscreen_primary_or_secondary_kept() {
+        let (areas, primary) = demo_areas();
+        // 完全在主屏 → 保留
+        assert_eq!(
+            corrected_window_position((100, 100, 650, 700), &areas, Some(primary)),
+            None
+        );
+        // 完全在正常副屏（负坐标）→ 同样保留，不误伤多屏用户
+        assert_eq!(
+            corrected_window_position((-1800, 100, 650, 700), &areas, Some(primary)),
+            None
+        );
+        // 恰好贴住工作区右下角（含端点）→ 完整在内，保留
+        assert_eq!(
+            corrected_window_position((1920 - 650, 1040 - 700, 650, 700), &areas, Some(primary)),
+            None
+        );
+    }
+
+    #[test]
+    fn position_fully_offscreen_corrected_to_primary_center() {
+        let (areas, primary) = demo_areas();
+        // 完全离屏（远超任何显示器）→ 移到主屏工作区居中：(1920-650)/2=635,
+        // (1040-700)/2=170
+        assert_eq!(
+            corrected_window_position((5000, 5000, 650, 700), &areas, Some(primary)),
+            Some((635, 170))
+        );
+        // 负向离屏（副屏被拔掉后残留在原副屏位置）同样校正
+        assert_eq!(
+            corrected_window_position((-5000, -3000, 650, 700), &areas, Some(primary)),
+            Some((635, 170))
+        );
+    }
+
+    #[test]
+    fn position_straddling_screen_edge_corrected() {
+        let (areas, primary) = demo_areas();
+        // 跨屏越界：起点在主屏但右缘出屏（100+650 > 1920? 用 1700 起点）
+        // 1700+650=2350 > 1920 → 无效 → 校正
+        assert_eq!(
+            corrected_window_position((1700, 100, 650, 700), &areas, Some(primary)),
+            Some((635, 170))
+        );
+        // 底部越界（任务栏区下方出界）：1000+700=1700 > 1040
+        assert_eq!(
+            corrected_window_position((100, 1000, 650, 700), &areas, Some(primary)),
+            Some((635, 170))
+        );
+    }
+
+    #[test]
+    fn position_monitor_enumeration_failure_keeps_original() {
+        // 显示器枚举失败（空工作区列表）→ 宁可不动也不瞎挪
+        assert_eq!(
+            corrected_window_position((5000, 5000, 650, 700), &[], None),
+            None
+        );
+        assert_eq!(
+            corrected_window_position((100, 100, 650, 700), &[], None),
+            None
+        );
+    }
+
+    #[test]
+    fn position_correction_fallbacks_and_clamps() {
+        let (areas, primary) = demo_areas();
+        // 主屏信息缺失 → 回落列表首个工作区（此处同为主屏）
+        assert_eq!(
+            corrected_window_position((5000, 5000, 650, 700), &areas.clone(), None),
+            Some((635, 170))
+        );
+        // 窗口比工作区大（不可能全进）→ 贴左上，不出负界
+        let tiny = vec![(0, 0, 400, 300)];
+        assert_eq!(
+            corrected_window_position((5000, 5000, 650, 700), &tiny, Some((0, 0, 400, 300))),
+            Some((0, 0))
+        );
+        // 奇数尺寸居中取整不越界：窗口 651 宽，(1920-651)/2=634（整数除法向下取整，
+        // 634+651=1285 ≤ 1920；clamp 亦兜底）
+        assert_eq!(
+            corrected_window_position((9999, 9999, 651, 701), &areas, Some(primary)),
+            Some(((1920 - 651) / 2, (1040 - 701) / 2))
+        );
     }
 }

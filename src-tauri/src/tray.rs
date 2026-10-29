@@ -80,11 +80,9 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
                 });
             }
             "settings" => {
-                if let Some(window) = app.get_webview_window("settings") {
-                    tracing::info!("window.show+set_focus 调用，caller=tray::menu(settings)");
-                    let _ = window.show();
-                    let _ = window.set_focus();
-                }
+                // 与面板按钮（commands::open_settings）共用同一入口：show 前先做
+                // 离屏位置校正，救回被移出屏幕的设置窗口
+                commands::show_settings_window(app, "tray::menu(settings)");
             }
             "quit" => app.exit(0),
             _ => {}

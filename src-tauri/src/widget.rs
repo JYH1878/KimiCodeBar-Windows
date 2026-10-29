@@ -12,13 +12,19 @@
 //!   「全屏应用时自动隐藏」可在设置关闭；hide/show 失败保留状态下一轮重试，
 //!   守卫初态与创建期结果一致（防藏死），开关关闭后最迟一周期恢复；
 //! - 窗口懒创建懒销毁：`widget_enabled` 开才建（启动 / save_settings 后 reconcile），
-//!   关即销毁，保低内存卖点。
+//!   关即销毁，保低内存卖点。销毁生命周期（2026-10-29 坑 57）：close() 后 Tauri
+//!   窗口表条目可长期残留（WebView2 异步拆卸，本机实测 ≥15 秒），期间 reconcile
+//!   误判「窗口健在」跳过重建 → 快速关开后球永久消失。正解 = hide() 先行 +
+//!   destroy() 强制销毁 + `WindowEvent::Destroyed` 确认（已请求 ≠ 已销毁）+
+//!   确认后按最新设置自动补建；守卫 ticker 兼任窗口表监视器兜底。
 //!
 //! 坐标铁律（panel.rs 教训）：一律逻辑像素，所在显示器 scale_factor 换算只在读
 //! 系统值（work_area / outer_position）出物理坐标时使用，禁止把物理回读值直接喂回
 //! set_size / set_position（单位语义不一致会把窗口越撑越大）。
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
+use std::time::Instant;
 
 use serde::Serialize;
 use tauri::{
@@ -42,6 +48,49 @@ pub const DEFAULT_MARGIN: f64 = 24.0;
 const FULLSCREEN_GUARD_SECS: u64 = 2;
 /// 守卫代次：每次创建窗口 +1，旧守卫发现代次不符自动退出（快速开关不叠双守卫）
 static WIDGET_GUARD_SEQ: AtomicU64 = AtomicU64::new(0);
+/// 窗口实例代次：每创建一个窗口 +1；Destroyed 回调携带创建期代次，与当前代次
+/// 不符即旧窗口的迟到/重复通知，忽略（防旧代次回调误建新窗）
+static WIDGET_INSTANCE_SEQ: AtomicU64 = AtomicU64::new(0);
+/// 销毁确认超时（秒）：超过后仍见窗口表条目 = Tauri 侧拆卸卡住（坑 57 僵尸），
+/// 落 warn 如实告知；恢复不靠重试销毁，靠守卫监视窗口表 + 每次保存的 reconcile
+const DESTROY_CONFIRM_TIMEOUT_SECS: u64 = 5;
+
+/// 悬浮球窗口生命周期簿记（快速开关核心状态；纯决策函数只吃快照，单测不碰全局）
+#[derive(Debug, Default)]
+struct WidgetLifecycle {
+    /// 当前窗口代次（0 = 从未创建过窗口）
+    generation: u64,
+    /// destroy() 已请求、尚未收到 Destroyed 确认——此时 Tauri 窗口表里是
+    /// 「僵尸条目」：get_webview_window 仍命中，但窗口已不可交互/拆卸中
+    destroy_pending: bool,
+    /// 销毁请求时刻（超时告警用；destroy_pending=false 时为 None）
+    destroy_requested_at: Option<Instant>,
+    /// 本代是否已发过销毁确认超时告警（只警一次，防守卫每 2 秒刷屏）
+    destroy_timeout_warned: bool,
+}
+
+impl WidgetLifecycle {
+    const fn new() -> Self {
+        WidgetLifecycle {
+            generation: 0,
+            destroy_pending: false,
+            destroy_requested_at: None,
+            destroy_timeout_warned: false,
+        }
+    }
+}
+
+/// 生命周期全局状态（锁中毒不致命：恢复数据继续用）
+static WIDGET_LIFECYCLE: Mutex<WidgetLifecycle> = Mutex::new(WidgetLifecycle::new());
+/// reconcile 串行锁：Destroyed 回调 / 守卫 ticker / save_settings 三处都可能触发
+/// 补建，并发下「都判无窗口→都建」会撞 label（第二次报已存在错）——串行后天然去重
+static WIDGET_RECONCILE_LOCK: Mutex<()> = Mutex::new(());
+
+fn lifecycle_lock() -> MutexGuard<'static, WidgetLifecycle> {
+    WIDGET_LIFECYCLE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// 悬浮球展示数据（与 src/types.ts 的 WidgetState 一一对应，snake_case 序列化；
 /// pct 均为剩余 0–100 语义，None = 该窗口无数据；余额类账号（DeepSeek）无
@@ -307,25 +356,117 @@ pub fn emit_widget_state(app: &AppHandle, panel: &PanelState) {
     let _ = app.emit("widget-updated", &state);
 }
 
-/// 按设置收敛悬浮球窗口的存在性（启动 / save_settings 后调用）：
-/// 开 → 懒创建；关 → 销毁；状态未变 → 无操作
+/// reconcile 的纯决策（坑 57 核心）：输入（期望开关、Tauri 窗口表是否有本 label、
+/// 是否销毁中）→ 动作。窗口表命中但销毁未确认 = 僵尸条目，不能当「健在」用：
+/// 应开时等 Destroyed 确认后补建（确认回调会再调 reconcile），绝不在僵尸上无操作
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WidgetReconcileAction {
+    /// 应开而无窗口（销毁已确认或从未建过）→ 创建
+    Create,
+    /// 应关而窗口健在 → 请求销毁
+    Destroy,
+    /// 应开但旧窗口销毁未确认 → 等 Destroyed 确认后自动补建
+    AwaitDestroyConfirm,
+    /// 无事可做（开+健在 / 关+无窗 / 关+销毁中已请求过）
+    None,
+}
+
+pub(crate) fn widget_reconcile_decision(
+    enabled: bool,
+    window_in_table: bool,
+    destroy_pending: bool,
+) -> WidgetReconcileAction {
+    match (enabled, window_in_table, destroy_pending) {
+        (true, false, _) => WidgetReconcileAction::Create,
+        (true, true, false) => WidgetReconcileAction::None,
+        (true, true, true) => WidgetReconcileAction::AwaitDestroyConfirm,
+        (false, true, false) => WidgetReconcileAction::Destroy,
+        (false, true, true) => WidgetReconcileAction::None,
+        (false, false, _) => WidgetReconcileAction::None,
+    }
+}
+
+/// Destroyed 确认的纯决策：通知携带的代次 == 当前代次（且 >0）→ 这条确认属于
+/// 当前窗口，有效（应触发补建 reconcile）；否则是旧代次的迟到/重复通知，忽略
+/// （防「重复完成通知」或旧窗口回调误建新窗）
+pub(crate) fn widget_destroyed_notification(
+    current_generation: u64,
+    notify_generation: u64,
+) -> bool {
+    current_generation != 0 && current_generation == notify_generation
+}
+
+/// 在阻塞线程上执行 reconcile：Tauri 同步命令跑在主线程，窗口 build 嵌套在 IPC
+/// 派发内执行会死锁（2026-10-29 实测：save_settings 内直接调用 → build 永不返回，
+/// 保存也挂死）；三个触发源（保存 / Destroyed 确认 / 守卫兜底）统一走这里
+pub(crate) fn spawn_reconcile(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || reconcile(&app));
+}
+
+/// 按设置收敛悬浮球窗口的存在性（启动 / save_settings / Destroyed 确认后调用）：
+/// 开 → 懒创建；关 → 销毁；销毁中重开 → 等确认自动补建。
+/// 串行锁防三处触发源并发补建撞 label（见 WIDGET_RECONCILE_LOCK）。
+/// ⚠️ 别在 Tauri 同步命令上下文直接调用（主线程嵌套建窗死锁），用 spawn_reconcile
 pub fn reconcile(app: &AppHandle) {
+    let _serial = WIDGET_RECONCILE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let enabled = storage::load_settings()
         .map(|s| s.widget_enabled)
         .unwrap_or(false);
-    match (enabled, app.get_webview_window(WIDGET_LABEL).is_some()) {
-        (true, false) => {
+    let window_in_table = app.get_webview_window(WIDGET_LABEL).is_some();
+    let (generation, destroy_pending, destroy_age, timeout_warned) = {
+        let lc = lifecycle_lock();
+        (
+            lc.generation,
+            lc.destroy_pending,
+            lc.destroy_requested_at.map(|t| t.elapsed()),
+            lc.destroy_timeout_warned,
+        )
+    };
+    match widget_reconcile_decision(enabled, window_in_table, destroy_pending) {
+        WidgetReconcileAction::Create => {
+            tracing::info!(
+                "悬浮球 reconcile → 创建（enabled={enabled} 窗口在表={window_in_table} 销毁中={destroy_pending}）"
+            );
             if let Err(e) = create_widget_window(app) {
-                tracing::warn!("创建悬浮球窗口失败: {e}");
+                tracing::warn!("创建悬浮球窗口失败（下次保存/触发时重试）: {e}");
             }
         }
-        (false, true) => destroy_widget_window(app),
-        _ => {}
+        WidgetReconcileAction::Destroy => {
+            tracing::info!(
+                "悬浮球 reconcile → 销毁（enabled={enabled} 窗口在表={window_in_table}）"
+            );
+            destroy_widget_window(app);
+        }
+        WidgetReconcileAction::AwaitDestroyConfirm => {
+            // 销毁确认由 Destroyed 回调驱动（补建在那边）；此处只负责如实记账：
+            // 常规等待打 info，超时（Tauri 窗口表残留僵尸）打一次 warn——恢复路径
+            // 不变：守卫监视窗口表移除 + 每次保存都会再进这里
+            let timeout = std::time::Duration::from_secs(DESTROY_CONFIRM_TIMEOUT_SECS);
+            if destroy_age.is_some_and(|age| age >= timeout) {
+                if !timeout_warned {
+                    tracing::warn!(
+                        "悬浮球销毁确认超时（第 {generation} 代，已 {:?}，Tauri 窗口表仍残留旧条目）\
+                         ——守卫将持续监视，条目移除后按最新设置自动补建",
+                        destroy_age.unwrap_or_default()
+                    );
+                    lifecycle_lock().destroy_timeout_warned = true;
+                }
+            } else {
+                tracing::info!(
+                    "旧悬浮球窗口销毁中（第 {generation} 代），销毁确认后按最新设置自动补建"
+                );
+            }
+        }
+        WidgetReconcileAction::None => {}
     }
 }
 
 /// 创建悬浮球窗口：无边框透明置顶、不进任务栏、不可调尺寸、不抢焦点，
 /// 先按设置定位再 show（避免闪现在默认位）。全程只 show，绝不 set_focus。
+/// 创建即登记代次并挂 Destroyed 监听（销毁确认 + 补建的唯二入口之一）
 fn create_widget_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     let settings = storage::load_settings().unwrap_or_default();
     let window = tauri::WebviewWindowBuilder::new(
@@ -343,6 +484,37 @@ fn create_widget_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     .focused(false)
     .visible(false)
     .build()?;
+    let generation = WIDGET_INSTANCE_SEQ.fetch_add(1, Ordering::SeqCst) + 1;
+    {
+        let mut lc = lifecycle_lock();
+        lc.generation = generation;
+        lc.destroy_pending = false;
+        lc.destroy_requested_at = None;
+        lc.destroy_timeout_warned = false;
+    }
+    // Destroyed 确认：窗口真正从 Tauri 窗口表移除后回调（tauri 先移表项再派发监听器）。
+    // 代次不符 = 旧窗口的迟到/重复通知 → 忽略；有效确认 → 清销毁中状态并按最新
+    // 设置补建。回调跑在事件循环线程，建窗须转异步任务（同线程投递建窗消息会卡死）
+    let listen_app = app.clone();
+    window.on_window_event(move |event| {
+        if !matches!(event, tauri::WindowEvent::Destroyed) {
+            return;
+        }
+        let current = lifecycle_lock().generation;
+        if !widget_destroyed_notification(current, generation) {
+            tracing::debug!(
+                "悬浮球旧代次销毁通知（通知第 {generation} 代，当前第 {current} 代），忽略"
+            );
+            return;
+        }
+        {
+            let mut lc = lifecycle_lock();
+            lc.destroy_pending = false;
+            lc.destroy_requested_at = None;
+        }
+        tracing::info!("悬浮球窗口已确认销毁（第 {generation} 代），按最新设置补建检查");
+        spawn_reconcile(&listen_app);
+    });
     apply_widget_layout(&window, &settings);
     // 创建期全屏判定（与守卫每跳同款 widget_hide_decision_with_covering）：稳态矩阵
     // 之外补「QUNS=2 + 存在铺满屏幕的可见全屏窗口（covering 扫描，不看前台）」——
@@ -372,11 +544,35 @@ fn create_widget_window(app: &AppHandle) -> tauri::Result<WebviewWindow> {
     Ok(window)
 }
 
-/// 销毁悬浮球窗口（widget_enabled=false）：全屏守卫 ticker 随窗口消失自动退出
+/// 销毁悬浮球窗口（widget_enabled=false）：先立即 hide（WebView2 异步拆卸可能拖
+/// 数秒，置顶旧窗残留桌面会拖累面板/设置窗的焦点与点击），再 destroy() 强制销毁
+/// （跳过 CloseRequested）。destroy() 返回 Ok 只代表请求已受理——真正完成以
+/// Destroyed 确认为准（已请求 ≠ 已销毁，坑 57：旧代码 close() 后立刻报「已销毁」
+/// 是提前报喜，且窗口表僵尸条目让重开永远跳过创建）
 fn destroy_widget_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window(WIDGET_LABEL) {
-        let _ = window.close();
-        tracing::info!("悬浮球窗口已销毁（widget_enabled=false）");
+    let Some(window) = app.get_webview_window(WIDGET_LABEL) else {
+        return;
+    };
+    if let Err(e) = window.hide() {
+        tracing::warn!("悬浮球窗口隐藏失败（销毁前置）: {e}");
+    }
+    match window.destroy() {
+        Ok(()) => {
+            let generation = {
+                let mut lc = lifecycle_lock();
+                lc.destroy_pending = true;
+                lc.destroy_requested_at = Some(Instant::now());
+                lc.generation
+            };
+            tracing::info!(
+                "悬浮球窗口销毁已请求（第 {generation} 代，widget_enabled=false），等待销毁确认"
+            );
+        }
+        Err(e) => {
+            // 失败保留「健在」记账（destroy_pending 不置位）：下次 reconcile 重走
+            // Destroy 分支重试；窗口已被 hide 至少不再干扰交互
+            tracing::warn!("悬浮球窗口销毁请求失败: {e}");
+        }
     }
 }
 
@@ -703,7 +899,9 @@ fn guard_log_ctx(
 
 /// 全屏守卫 ticker：球窗口存在期间每 FULLSCREEN_GUARD_SECS 探测一次，命中 hide、
 /// 退出 show；命中/恢复各落一行日志（仿轮询探针行，供「球还在不在」类问题对照）。
-/// 窗口销毁或被新一轮守卫接替（代次不符）时循环自退出。
+/// 循环退出三条路：被新一轮守卫接替（代次不符）、窗口离开 Tauri 窗口表（销毁
+/// 完成——此时按最新设置补建检查，是 Destroyed 回调之外的兜底入口，坑 57）、
+/// 销毁中僵尸期跳过动作只盯窗口表。
 /// 判定用悬浮球专用的 fullscreen::widget_hide_decision_with_covering：稳态矩阵
 /// （裸 QUNS=2 不藏）之上补「QUNS=2 + 铺满窗口佐证」——启动/重建后本进程的隐藏
 /// 窗口可能被 WebView2 激活成前台且不释放，前台几何结构性失明，靠非前台扫描兜底
@@ -724,9 +922,34 @@ fn spawn_fullscreen_guard(app: AppHandle, initially_hidden: bool) {
                 return; // 窗口重建过：守卫已由新一轮接管
             }
             let Some(window) = app.get_webview_window(WIDGET_LABEL) else {
-                tracing::debug!("悬浮球窗口已销毁，全屏守卫 ticker 退出");
+                // 窗口离开 Tauri 窗口表 = 销毁真正完成（Destroyed 回调是第一补建
+                // 入口，这里是兜底：事件丢失/迟到也能在 ≤2 秒内补上）。守卫自身
+                // 代次未变 → 没有新窗口接管 → 直接触发补建检查后退出
+                tracing::info!("悬浮球窗口已离开窗口表，全屏守卫退出并按最新设置补建检查");
+                spawn_reconcile(&app);
                 return;
             };
+            let (pending, pending_age, timeout_warned) = {
+                let lc = lifecycle_lock();
+                (
+                    lc.destroy_pending,
+                    lc.destroy_requested_at.map(|t| t.elapsed()),
+                    lc.destroy_timeout_warned,
+                )
+            };
+            if pending {
+                // 销毁中僵尸：不做传感器动作（hide/show 会失败刷屏），只盯窗口表
+                // 移除 + 超时告警一次（恢复靠兜底分支，不重试销毁）
+                let timeout = std::time::Duration::from_secs(DESTROY_CONFIRM_TIMEOUT_SECS);
+                if pending_age.is_some_and(|a| a >= timeout) && !timeout_warned {
+                    tracing::warn!(
+                        "悬浮球销毁确认超时（已 {pending_age:?}，Tauri 窗口表仍残留旧条目）\
+                         ——守卫持续监视，条目移除后按最新设置自动补建"
+                    );
+                    lifecycle_lock().destroy_timeout_warned = true;
+                }
+                continue;
+            }
             let settings = storage::load_settings().unwrap_or_default();
             let probe = kimicodebar::fullscreen::probe();
             let covering = kimicodebar::fullscreen::covering_fullscreen_window_present();
@@ -1380,6 +1603,96 @@ mod tests {
         assert_eq!(
             widget_guard_action(fullscreen_over, true),
             WidgetGuardAction::Show
+        );
+    }
+
+    // ---- 生命周期决策（坑 57：快速关开后消失）----
+
+    #[test]
+    fn reconcile_decision_full_matrix() {
+        use WidgetReconcileAction::{AwaitDestroyConfirm, Create, Destroy};
+        // (enabled, 窗口在表, 销毁中) → 动作
+        assert_eq!(widget_reconcile_decision(true, false, false), Create);
+        assert_eq!(widget_reconcile_decision(true, false, true), Create); // 确认已到但状态未清也建（窗口不在表即无冲突）
+        assert_eq!(
+            widget_reconcile_decision(true, true, false),
+            WidgetReconcileAction::None // 健在
+        );
+        assert_eq!(
+            widget_reconcile_decision(true, true, true),
+            AwaitDestroyConfirm
+        ); // 僵尸销毁中
+        assert_eq!(widget_reconcile_decision(false, true, false), Destroy);
+        assert_eq!(
+            widget_reconcile_decision(false, true, true),
+            WidgetReconcileAction::None // 已请求销毁，不重复打
+        );
+        assert_eq!(
+            widget_reconcile_decision(false, false, false),
+            WidgetReconcileAction::None
+        );
+        assert_eq!(
+            widget_reconcile_decision(false, false, true),
+            WidgetReconcileAction::None
+        );
+    }
+
+    #[test]
+    fn reconcile_reenable_while_destroying_waits_then_creates() {
+        // 销毁中重开（坑 57 主场景）：旧代码此处无操作 → 僵尸清掉后无补建 → 球
+        // 永久消失。新决策：销毁未确认时等 Destroyed 确认，确认后（窗口离开表）
+        // 同一输入收敛到 Create
+        assert_eq!(
+            widget_reconcile_decision(true, true, true),
+            WidgetReconcileAction::AwaitDestroyConfirm
+        );
+        // Destroyed 确认到达：窗口表已清（tauri 先移表项再派发监听器）
+        assert_eq!(
+            widget_reconcile_decision(true, false, false),
+            WidgetReconcileAction::Create
+        );
+    }
+
+    #[test]
+    fn reconcile_stays_closed_never_creates() {
+        // 保持关闭：任何输入组合都不产生 Create（不补建）
+        assert_eq!(
+            widget_reconcile_decision(false, true, false),
+            WidgetReconcileAction::Destroy
+        );
+        assert_eq!(
+            widget_reconcile_decision(false, true, true),
+            WidgetReconcileAction::None
+        );
+        assert_eq!(
+            widget_reconcile_decision(false, false, false),
+            WidgetReconcileAction::None
+        );
+        assert_eq!(
+            widget_reconcile_decision(false, false, true),
+            WidgetReconcileAction::None
+        );
+    }
+
+    #[test]
+    fn destroyed_notification_valid_only_for_current_generation() {
+        // 当前代次的销毁确认有效（触发补建 reconcile）
+        assert!(widget_destroyed_notification(3, 3));
+        // 旧代次迟到通知：当前已是新一代窗口 → 忽略，不重建
+        assert!(!widget_destroyed_notification(4, 3));
+        // 从未创建过（generation=0）→ 无效
+        assert!(!widget_destroyed_notification(0, 0));
+    }
+
+    #[test]
+    fn duplicate_destroyed_notification_does_not_recreate() {
+        // 序列模拟：第 1 代销毁 → 确认有效 → 补建出第 2 代 → 旧确认重复送达：
+        // 通知代次(1) != 当前代次(2) → 忽略（窗口表里是健在的第 2 代，决策 None）
+        assert!(widget_destroyed_notification(1, 1)); // 首次确认有效
+        assert!(!widget_destroyed_notification(2, 1)); // 重复通知被代次挡下
+        assert_eq!(
+            widget_reconcile_decision(true, true, false),
+            WidgetReconcileAction::None // 第 2 代健在，不再建
         );
     }
 }
