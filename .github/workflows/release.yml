@@ -51,7 +51,7 @@ jobs:
       # 显式 draft: true——softprops 默认 draft:false 会把 tauri-action 建的草稿直接发布，
       # 「核对草稿再 Publish」闸门会名存实亡（v1.2.1 踩过，2026-08-19）
       - name: 上传便携版到 Release
-        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3
         with:
           files: src-tauri/target/release/KimiCodeBar_*_x64-portable.zip
           draft: true
