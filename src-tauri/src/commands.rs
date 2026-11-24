@@ -341,6 +341,13 @@ struct AccountRuntime {
     monthly: Option<MonthlyInfo>,
     /// 月度数据获取失败原因（如网页登录态过期）；成功为 None
     monthly_error: Option<String>,
+    /// 月度过期标记：网页登录态失效（401）后置位，重新授权成功才清除；
+    /// 随缓存落盘、启动预热恢复（文案由标记派生，见 MONTHLY_EXPIRED_MESSAGE）
+    monthly_expired: bool,
+    /// 月度代次（进程内竞态防线，不持久化）：clear_monthly_state 递增；
+    /// do_refresh 发起月度请求前记录，应用结果前比较——不一致 = 期间发生过
+    /// 主动清除，在途旧结果整单丢弃（防清除后被复活，2026-11-23 竞态修复）
+    monthly_epoch: u64,
     /// 最近一次成功的 DeepSeek 余额（仅 provider=deepseek 的账号）
     last_balance: Option<(DeepSeekBalance, i64)>,
 }
@@ -364,8 +371,14 @@ impl AppState {
             let cache = storage::load_cache(&account.id);
             let runtime = AccountRuntime {
                 last_quota: cache.as_ref().map(|c| (c.quota.clone(), c.fetched_at)),
-                // 月度数据随配额缓存一并预热
+                // 月度数据随配额缓存一并预热；过期标记同步恢复并派生提示文案
+                // （refresh_token 失效后旧数据 + "请到设置页更新"跨重启保留）
                 monthly: cache.as_ref().and_then(|c| c.monthly.clone()),
+                monthly_error: cache
+                    .as_ref()
+                    .filter(|c| c.monthly_expired)
+                    .map(|_| MONTHLY_EXPIRED_MESSAGE.to_string()),
+                monthly_expired: cache.as_ref().is_some_and(|c| c.monthly_expired),
                 // DeepSeek 余额同缓存预热（断网/未刷新也能展示）
                 last_balance: cache
                     .as_ref()
@@ -415,6 +428,30 @@ impl AppState {
         self.inner.lock().unwrap().accounts.remove(account_id);
     }
 
+    /// 主动清除该账号的月度展示（clear_web_token 专用）：内存数据、过期提示与
+    /// cache-<id>.json 里的月度字段一并清掉，并递增月度代次。刷新路径的 NoToken
+    /// 结局已不再代劳（过期保留语义，2026-11-23）；同一锁内递增代次 + 清空三态，
+    /// 在途刷新记录的是旧代次，落地时对不上即整单丢弃——清除后才不会被旧结果复活
+    pub fn clear_monthly_state(&self, account_id: &str) {
+        {
+            let mut inner = self.inner.lock().unwrap();
+            // 条目不存在也要创建并递增：代次挂在运行时条目上，先落地新代次
+            let runtime = inner.accounts.entry(account_id.to_string()).or_default();
+            runtime.monthly = None;
+            runtime.monthly_error = None;
+            runtime.monthly_expired = false;
+            runtime.monthly_epoch += 1;
+        }
+        // 缓存里有月度字段才重写（quota / deepseek_balance 等其余字段原样保留）
+        if let Some(mut cache) = storage::load_cache(account_id) {
+            cache.monthly = None;
+            cache.monthly_expired = false;
+            if let Err(e) = storage::save_cache(account_id, &cache) {
+                tracing::warn!("清除月度缓存失败（账号 {account_id}）: {e}");
+            }
+        }
+    }
+
     /// 各账号最近一次成功的 usages 原始响应（已截断）：(账号名, 响应, epoch 秒)，诊断导出用
     pub fn raw_responses(&self) -> Vec<(String, String, i64)> {
         let inner = self.inner.lock().unwrap();
@@ -435,6 +472,18 @@ impl AppState {
     }
 }
 
+/// 单账号一轮刷新的收集产物（do_refresh 应用阶段消费）
+struct AccountOutcomes {
+    account_id: String,
+    /// 配额 / 余额结局
+    outcome: FetchOutcome,
+    /// 发起月度请求前的月度代次快照（防主动清除后被在途结果复活）
+    monthly_epoch: u64,
+    monthly_outcome: MonthlyOutcome,
+    /// 网页端补拉的会员等级
+    membership_level: Option<String>,
+}
+
 /// 刷新主流程（轮询 / 托盘菜单"刷新" / 面板显示时共用）：一轮刷新全部账号。
 /// 单航班合并：并发调用排队等在途刷新完成，各自拿到完整新状态；
 /// 每个账号 45s 兜底超时，保证 loading 永远不会被永久置位。
@@ -451,7 +500,7 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
     }
 
     // 逐账号拉取（配额 + 月度 + 会员等级）：任何环节挂起都不能把 loading 永久置位
-    let mut outcomes: Vec<(String, FetchOutcome, MonthlyOutcome, Option<String>)> = Vec::new();
+    let mut outcomes: Vec<AccountOutcomes> = Vec::new();
     for account in &accounts {
         // 任何环节挂起（网络 / 系统凭证服务）都不能把 loading 永久置位
         let outcome = match tokio::time::timeout(
@@ -462,6 +511,17 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
         {
             Ok(outcome) => outcome,
             Err(_) => FetchOutcome::Failed("请求超时，请检查网络".to_string()),
+        };
+        // 月度代次快照：必须在发起月度请求前记录（锁内短读，无 await 持锁）——
+        // 联网期间用户可能点清除（clear_monthly_state 递增代次并清空三态），
+        // 应用结果时对不上即整单丢弃，旧数据不得复活
+        let monthly_epoch = {
+            let inner = state.inner.lock().unwrap();
+            inner
+                .accounts
+                .get(&account.id)
+                .map(|rt| rt.monthly_epoch)
+                .unwrap_or(0)
         };
         // 月度总量（网页 token）：拿到配额后无论成败都继续尝试；
         // 非 Kimi 账号（DeepSeek / GLM）无月度概念，直接跳过（GOAL 拍板）
@@ -479,12 +539,13 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
         } else {
             fetch_web_membership_level(&account.id).await
         };
-        outcomes.push((
-            account.id.clone(),
+        outcomes.push(AccountOutcomes {
+            account_id: account.id.clone(),
             outcome,
+            monthly_epoch,
             monthly_outcome,
             membership_level,
-        ));
+        });
     }
 
     let mut any_quota_success = false;
@@ -492,7 +553,14 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
         let mut inner = state.inner.lock().unwrap();
         // 所有分支必须先复位 loading（NoCredential 曾漏掉这行导致永久卡死）
         inner.loading = false;
-        for (account_id, outcome, monthly_outcome, membership_level) in outcomes {
+        for result in outcomes {
+            let AccountOutcomes {
+                account_id,
+                outcome,
+                monthly_epoch,
+                monthly_outcome,
+                membership_level,
+            } = result;
             let runtime = inner.accounts.entry(account_id.clone()).or_default();
             let quota_success = matches!(outcome, FetchOutcome::Success(..));
             let balance_success = matches!(outcome, FetchOutcome::DeepSeekSuccess(..));
@@ -531,31 +599,17 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
                 }
             }
 
-            // 月度结果：成功才覆盖数据；失败一律保留旧数据，仅记原因
-            let mut monthly_success = false;
-            match monthly_outcome {
-                // 未配置网页 token：清空月度展示
-                MonthlyOutcome::NoToken => {
-                    runtime.monthly = None;
-                    runtime.monthly_error = None;
-                }
-                MonthlyOutcome::Success(info) => {
-                    runtime.monthly = Some(info);
-                    runtime.monthly_error = None;
-                    monthly_success = true;
-                }
-                MonthlyOutcome::Unauthorized => {
-                    runtime.monthly_error = Some("网页登录态已过期，请到设置页更新".to_string());
-                }
-                MonthlyOutcome::Failed => {
-                    runtime.monthly_error = Some("月度数据刷新失败".to_string());
-                }
-            }
+            // 月度结果：先过代次闸门再按矩阵迁移（apply_monthly_checked）；
+            // 落盘触发条件只认实际生效的结果——过时结果既不迁移状态、
+            // 也不得作为 monthly_success / monthly_expired_entered 写回缓存
+            let (monthly_success, monthly_expired_entered) =
+                apply_monthly_checked(runtime, monthly_epoch, monthly_outcome);
 
-            // 配额或月度或余额任一成功：把最新内存态落盘到该账号的 cache-<id>.json
-            // （月度/余额挂在配额缓存上；配额失败但月度成功时沿用旧配额数据，fetched_at 不变；
-            //   DeepSeek 账号无配额，以空配额占位、余额落盘供断网显示）
-            if quota_success || monthly_success || balance_success {
+            // 配额或月度或余额任一成功、或本轮月度进入过期态：把最新内存态落盘到
+            // 该账号的 cache-<id>.json（月度/余额挂在配额缓存上；配额失败但月度成功时
+            // 沿用旧配额数据，fetched_at 不变；DeepSeek 账号无配额，以空配额占位、
+            // 余额落盘供断网显示）
+            if quota_success || monthly_success || balance_success || monthly_expired_entered {
                 let fetched_at = runtime
                     .last_quota
                     .as_ref()
@@ -575,6 +629,7 @@ pub async fn do_refresh(app: &AppHandle) -> PanelState {
                                 .unwrap_or_default(),
                             fetched_at,
                             monthly: runtime.monthly.clone(),
+                            monthly_expired: runtime.monthly_expired,
                             deepseek_balance: runtime.last_balance.clone().map(|(b, _)| b),
                         },
                     );
@@ -1415,13 +1470,34 @@ pub async fn set_web_token(
     }
 }
 
-/// 清除该账号的网页 token（新旧体系都清）并触发一次刷新（该页回到无月度数据态）
+/// 清除网页凭证与月度展示的生产主体（clear_web_token 调用，测试直接驱动）：
+/// 新旧网页令牌、进程内访问缓存、月度内存三态与缓存文件。
+/// 执行前先取得 refresh_lock 与在途刷新串行——代次只挡旧月度结果回填，
+/// 挡不住在途续期的凭证写回（save_web_refresh_token / WEB_ACCESS_CACHE），
+/// 必须让清除排在整轮刷新（含续期落盘）之后（2026-11-23 竞态补修）。
+/// 锁顺序 refresh_lock → inner，与 do_refresh 一致。
+async fn clear_web_credentials_and_monthly(
+    state: &AppState,
+    account_id: &str,
+) -> Result<(), String> {
+    // 先取得 refresh_lock：在途刷新的续期、轮换落盘、访问缓存写入与旧结果应用
+    // 全部完成后清除才执行，凭证不会被旧操作反向写回（锁内不再调 do_refresh）
+    let _permit = state.refresh_lock.lock().await;
+    creds::clear_web_token(account_id).map_err(|e| e.to_string())?;
+    creds::clear_web_refresh_token(account_id).map_err(|e| e.to_string())?;
+    WEB_ACCESS_CACHE.lock().unwrap().remove(account_id);
+    // 月度数据/过期提示/缓存主动清除（刷新的 NoToken 结局已不再代劳）
+    state.clear_monthly_state(account_id);
+    tracing::info!("网页 token 已清除（账号 {account_id}）");
+    Ok(())
+}
+
+/// 清除该账号的网页 token（新旧体系都清）、月度展示与缓存，并触发一次刷新
 #[tauri::command]
 pub async fn clear_web_token(app: AppHandle, account_id: String) -> Result<(), String> {
-    creds::clear_web_token(&account_id).map_err(|e| e.to_string())?;
-    creds::clear_web_refresh_token(&account_id).map_err(|e| e.to_string())?;
-    WEB_ACCESS_CACHE.lock().unwrap().remove(&account_id);
-    tracing::info!("网页 token 已清除（账号 {account_id}）");
+    // 生产方法内部取得并释放 refresh_lock 后才触发刷新（严禁持锁调 do_refresh：
+    // 它会再次获取同一把锁自我死锁）
+    clear_web_credentials_and_monthly(&app.state::<AppState>(), &account_id).await?;
     do_refresh(&app).await;
     Ok(())
 }
@@ -1736,6 +1812,65 @@ enum MonthlyOutcome {
     Unauthorized,
     /// 其他失败（网络/解析/keyring）：保留旧数据
     Failed,
+}
+
+/// 月度过期提示文案（刷新迁移与启动预热恢复共用同一来源）
+const MONTHLY_EXPIRED_MESSAGE: &str = "网页登录态已过期，请到设置页更新";
+
+/// 月度状态迁移（纯函数便于单测）：给定当前 (数据, 错误提示, 过期标记) 与本次刷新
+/// 结局，返回迁移后的新三元组。
+///
+/// - Success：新数据替换旧数据，清错误与过期标记
+/// - Unauthorized / Failed：保留旧数据，写对应错误；Unauthorized 额外置过期标记
+///   （标记随缓存落盘、重启预热恢复，直到重新授权成功才清除）
+/// - NoToken：见分支内注释
+fn apply_monthly_outcome(
+    monthly: Option<MonthlyInfo>,
+    monthly_error: Option<String>,
+    monthly_expired: bool,
+    outcome: MonthlyOutcome,
+) -> (Option<MonthlyInfo>, Option<String>, bool) {
+    match outcome {
+        // 无网页凭证不改变月度状态：从未配置的账号初始态本就为空；
+        // refresh_token 失效被自动清除后的无凭证刷新必须保留旧数据与过期提示
+        // （曾在此无条件清空，导致月度卡过期后静默消失，2026-11-23 修）。
+        // 主动清除走 clear_web_token → AppState::clear_monthly_state，不经此路径
+        MonthlyOutcome::NoToken => (monthly, monthly_error, monthly_expired),
+        MonthlyOutcome::Success(info) => (Some(info), None, false),
+        MonthlyOutcome::Unauthorized => (monthly, Some(MONTHLY_EXPIRED_MESSAGE.to_string()), true),
+        MonthlyOutcome::Failed => (
+            monthly,
+            Some("月度数据刷新失败".to_string()),
+            monthly_expired,
+        ),
+    }
+}
+
+/// 应用月度结局到运行时快照（do_refresh 应用阶段调用），返回缓存落盘的触发
+/// 标志 `(monthly_success, monthly_expired_entered)`——只有实际生效的结果才能
+/// 作为落盘条件。`recorded_epoch` 是发起月度请求前记录的代次（见 do_refresh）。
+fn apply_monthly_checked(
+    runtime: &mut AccountRuntime,
+    recorded_epoch: u64,
+    outcome: MonthlyOutcome,
+) -> (bool, bool) {
+    // 代次闸门：发起月度请求后发生过主动清除（clear_monthly_state 已递增代次
+    // 并清空三态）→ 整单旧结果丢弃——不迁移状态、不产生任何落盘触发条件
+    if runtime.monthly_epoch != recorded_epoch {
+        return (false, false);
+    }
+    let success = matches!(outcome, MonthlyOutcome::Success(..));
+    let expired_entered = matches!(outcome, MonthlyOutcome::Unauthorized);
+    let (monthly, monthly_error, monthly_expired) = apply_monthly_outcome(
+        runtime.monthly.take(),
+        runtime.monthly_error.take(),
+        runtime.monthly_expired,
+        outcome,
+    );
+    runtime.monthly = monthly;
+    runtime.monthly_error = monthly_error;
+    runtime.monthly_expired = monthly_expired;
+    (success, expired_entered)
 }
 
 /// 网页 access_token 提前续期余量（秒）：剩余有效期小于该值视为临期
@@ -2344,6 +2479,8 @@ mod tests {
                     reset_time: None,
                 }),
                 monthly_error: None,
+                monthly_expired: false,
+                monthly_epoch: 0,
                 last_balance: None,
             },
         );
@@ -2356,6 +2493,8 @@ mod tests {
                 last_raw_response: None,
                 monthly: None,
                 monthly_error: Some("月度数据刷新失败".to_string()),
+                monthly_expired: false,
+                monthly_epoch: 0,
                 last_balance: None,
             },
         );
@@ -2445,6 +2584,117 @@ mod tests {
         );
         let panel = assemble_panel_state_with(&inner, &settings, &|_| true);
         assert!(panel.accounts[0].low_warning);
+    }
+
+    // ---- 月度状态迁移（apply_monthly_outcome）----
+
+    fn monthly_info(total_pct: f64) -> MonthlyInfo {
+        MonthlyInfo {
+            total_pct,
+            kimi_pct: total_pct,
+            code_pct: 0.0,
+            reset_time: None,
+        }
+    }
+
+    /// 事故回归（2026-11-19 实机）：refresh_token 401 触发自动清除凭证后，
+    /// 下一轮刷新拿到 NoToken——旧实现把旧数据与过期提示一起清空，月度卡静默消失。
+    /// 修复后 NoToken 不得抹掉任何月度状态。
+    #[test]
+    fn monthly_state_survives_unauthorized_then_no_token() {
+        // 轮 N：401 过期——旧数据保留、过期提示与标记置位
+        let (m, e, x) = apply_monthly_outcome(
+            Some(monthly_info(74.21)),
+            None,
+            false,
+            MonthlyOutcome::Unauthorized,
+        );
+        assert!(m.is_some(), "过期后旧数据必须保留");
+        assert_eq!(e.as_deref(), Some("网页登录态已过期，请到设置页更新"));
+        assert!(x, "过期标记必须置位");
+
+        // 轮 N+1：凭证已被自动清除 → NoToken——数据与过期提示都必须还在
+        let (m2, e2, x2) = apply_monthly_outcome(m, e, x, MonthlyOutcome::NoToken);
+        assert!(m2.is_some(), "凭证被自动清除后的无凭证刷新不得抹掉旧数据");
+        assert_eq!(
+            e2.as_deref(),
+            Some("网页登录态已过期，请到设置页更新"),
+            "过期提示必须持续到重新授权"
+        );
+        assert!(x2, "过期标记必须跨刷新保留");
+    }
+
+    #[test]
+    fn monthly_state_success_replaces_data_and_clears_error() {
+        // 成功：新数据替换旧数据，错误与过期标记一并清除
+        let (m, e, x) = apply_monthly_outcome(
+            Some(monthly_info(74.21)),
+            Some("网页登录态已过期，请到设置页更新".to_string()),
+            true,
+            MonthlyOutcome::Success(monthly_info(31.4)),
+        );
+        assert!((m.unwrap().total_pct - 31.4).abs() < 1e-9);
+        assert!(e.is_none());
+        assert!(!x);
+    }
+
+    #[test]
+    fn monthly_state_unauthorized_keeps_data_and_marks_expired() {
+        let (m, e, x) = apply_monthly_outcome(
+            Some(monthly_info(74.21)),
+            None,
+            false,
+            MonthlyOutcome::Unauthorized,
+        );
+        assert!((m.unwrap().total_pct - 74.21).abs() < 1e-9);
+        assert_eq!(e.as_deref(), Some("网页登录态已过期，请到设置页更新"));
+        assert!(x);
+    }
+
+    #[test]
+    fn monthly_state_failure_keeps_data_and_expired_flag() {
+        // 普通失败：保留旧数据、写失败文案；已置位的过期标记不受影响
+        let (m, e, x) = apply_monthly_outcome(
+            Some(monthly_info(74.21)),
+            Some("网页登录态已过期，请到设置页更新".to_string()),
+            true,
+            MonthlyOutcome::Failed,
+        );
+        assert!((m.unwrap().total_pct - 74.21).abs() < 1e-9);
+        assert_eq!(e.as_deref(), Some("月度数据刷新失败"));
+        assert!(x, "普通失败不得清除过期标记");
+
+        // 未过期态下的普通失败：标记保持 false
+        let (_, _, x2) = apply_monthly_outcome(None, None, false, MonthlyOutcome::Failed);
+        assert!(!x2);
+    }
+
+    #[test]
+    fn monthly_state_never_configured_stays_empty() {
+        // 从未配置网页 token：初始空态经 NoToken 后仍为空（月度卡保持隐藏）
+        let (m, e, x) = apply_monthly_outcome(None, None, false, MonthlyOutcome::NoToken);
+        assert!(m.is_none());
+        assert!(e.is_none());
+        assert!(!x);
+    }
+
+    #[test]
+    fn monthly_state_reauthorize_success_clears_expired() {
+        // 完整链：过期 → NoToken（等待重新授权）→ 新凭证校验成功，过期提示消失
+        let (m, e, x) = apply_monthly_outcome(
+            Some(monthly_info(74.21)),
+            None,
+            false,
+            MonthlyOutcome::Unauthorized,
+        );
+        let (m, e, x) = apply_monthly_outcome(m, e, x, MonthlyOutcome::NoToken);
+        let (m, e, x) = apply_monthly_outcome(m, e, x, MonthlyOutcome::Success(monthly_info(80.0)));
+        assert!(
+            (m.unwrap().total_pct - 80.0).abs() < 1e-9,
+            "新数据替换旧数据"
+        );
+        assert!(e.is_none(), "过期提示必须消失");
+        assert!(!x);
     }
 
     #[test]
@@ -3015,6 +3265,461 @@ mod tests {
         std::env::remove_var("KIMICODEBAR_CONFIG_DIR");
         std::env::remove_var("KIMICODEBAR_KEYRING_SERVICE");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// 月度过期状态跨重启保留 + 主动清除不复活（复用 extra_key 的隔离环境，
+    /// 本测试不碰 keyring，service 隔离只是该套环境的附带保险）
+    #[test]
+    fn monthly_expired_restored_on_warmup_and_cleared_by_hand() {
+        let _guard = EXTRA_KEY_ENV_LOCK.lock().unwrap();
+        let acc = account("acc-m", "月度号");
+        let acc_id = acc.id.clone();
+        let (dir, service) = setup_extra_key_env(vec![acc]);
+
+        // 模拟"过期后落盘"的缓存：旧月度数据 + 过期标记（refresh_token 401 轮写入）
+        storage::save_cache(
+            &acc_id,
+            &CachedQuota {
+                quota: KimiQuota::default(),
+                fetched_at: 1_900_000_000,
+                monthly: Some(MonthlyInfo {
+                    total_pct: 74.21,
+                    kimi_pct: 70.0,
+                    code_pct: 4.21,
+                    reset_time: None,
+                }),
+                monthly_expired: true,
+                deepseek_balance: None,
+            },
+        )
+        .unwrap();
+
+        // 启动预热：旧数据、过期提示与标记都恢复（过期文案由标记派生）
+        let state = AppState::new();
+        {
+            let inner = state.inner.lock().unwrap();
+            let rt = inner.accounts.get(&acc_id).cloned().unwrap();
+            assert!(
+                (rt.monthly.as_ref().unwrap().total_pct - 74.21).abs() < 1e-9,
+                "重启后旧月度数据必须恢复"
+            );
+            assert_eq!(
+                rt.monthly_error.as_deref(),
+                Some("网页登录态已过期，请到设置页更新")
+            );
+            assert!(rt.monthly_expired);
+        }
+        // 面板契约：月度卡与过期提示同时可见（goal 拍板的展示语义）
+        let panel = state.snapshot();
+        assert!((panel.accounts[0].monthly.as_ref().unwrap().total_pct - 74.21).abs() < 1e-9);
+        assert_eq!(
+            panel.accounts[0].monthly_error.as_deref(),
+            Some("网页登录态已过期，请到设置页更新")
+        );
+
+        // 主动清除（clear_web_token 走 clear_monthly_state）：内存三元组清空
+        state.clear_monthly_state(&acc_id);
+        {
+            let inner = state.inner.lock().unwrap();
+            let rt = inner.accounts.get(&acc_id).cloned().unwrap();
+            assert!(rt.monthly.is_none());
+            assert!(rt.monthly_error.is_none());
+            assert!(!rt.monthly_expired);
+        }
+        // 缓存同步清除，其余字段（fetched_at / quota）不被误伤
+        let cache = storage::load_cache(&acc_id).unwrap();
+        assert!(cache.monthly.is_none());
+        assert!(!cache.monthly_expired);
+        assert_eq!(cache.fetched_at, 1_900_000_000);
+
+        // 再次"重启"（预热）：不复活
+        let state2 = AppState::new();
+        {
+            let inner = state2.inner.lock().unwrap();
+            let rt = inner.accounts.get(&acc_id).cloned().unwrap();
+            assert!(rt.monthly.is_none(), "主动清除后重启不得复活月度数据");
+            assert!(rt.monthly_error.is_none());
+            assert!(!rt.monthly_expired);
+        }
+
+        cleanup_extra_key_env(&dir, &service, &[&acc_id]);
+    }
+
+    /// 竞态回归（2026-11-23 验收发现）：do_refresh 在途的旧月度 Success 在
+    /// clear_web_token 之后落地，不得把已清除的数据写回（内存、缓存、重启预热）
+    #[test]
+    fn monthly_stale_success_after_clear_does_not_resurrect() {
+        let _guard = EXTRA_KEY_ENV_LOCK.lock().unwrap();
+        let acc = account("acc-race", "竞态号");
+        let acc_id = acc.id.clone();
+        let (dir, service) = setup_extra_key_env(vec![acc]);
+
+        // 前置：曾成功过的月度数据（内存 + 缓存，模拟 74.21% 场景）
+        let state = AppState::new();
+        {
+            let mut inner = state.inner.lock().unwrap();
+            let rt = inner.accounts.get_mut(&acc_id).unwrap();
+            rt.monthly = Some(monthly_info(74.21));
+        }
+        storage::save_cache(
+            &acc_id,
+            &CachedQuota {
+                quota: KimiQuota::default(),
+                fetched_at: 1_900_000_000,
+                monthly: Some(monthly_info(74.21)),
+                monthly_expired: false,
+                deepseek_balance: None,
+            },
+        )
+        .unwrap();
+
+        // ① do_refresh 发起月度请求前记录代次（生产同款读法）
+        let epoch = {
+            let inner = state.inner.lock().unwrap();
+            inner
+                .accounts
+                .get(&acc_id)
+                .map(|rt| rt.monthly_epoch)
+                .unwrap_or(0)
+        };
+
+        // ② 联网期间用户点击清除（clear_web_token 的内存 + 缓存侧）
+        state.clear_monthly_state(&acc_id);
+
+        // ③ 在途旧 Success 落地（do_refresh 应用阶段走的生产函数）
+        let (monthly_success, monthly_expired_entered) = {
+            let mut inner = state.inner.lock().unwrap();
+            let rt = inner.accounts.get_mut(&acc_id).unwrap();
+            apply_monthly_checked(rt, epoch, MonthlyOutcome::Success(monthly_info(74.21)))
+        };
+        assert!(
+            !monthly_success,
+            "过时结果不得作为 monthly_success 触发落盘"
+        );
+        assert!(!monthly_expired_entered);
+
+        // ④ 模拟 quota_success 触发的落盘（do_refresh 落盘分支取 runtime 当前值）
+        {
+            let inner = state.inner.lock().unwrap();
+            let rt = inner.accounts.get(&acc_id).unwrap();
+            let _ = storage::save_cache(
+                &acc_id,
+                &CachedQuota {
+                    quota: KimiQuota::default(),
+                    fetched_at: 1_900_000_100,
+                    monthly: rt.monthly.clone(),
+                    monthly_expired: rt.monthly_expired,
+                    deepseek_balance: None,
+                },
+            );
+        }
+
+        // ⑤ 下一轮 NoToken（清除后凭证已无，代次已新）：no-op，不得纠正出数据来
+        {
+            let mut inner = state.inner.lock().unwrap();
+            let epoch_next = inner.accounts.get(&acc_id).unwrap().monthly_epoch;
+            let rt = inner.accounts.get_mut(&acc_id).unwrap();
+            apply_monthly_checked(rt, epoch_next, MonthlyOutcome::NoToken);
+        }
+
+        // 最终：内存三空
+        {
+            let inner = state.inner.lock().unwrap();
+            let rt = inner.accounts.get(&acc_id).cloned().unwrap();
+            assert!(
+                rt.monthly.is_none(),
+                "清除后落地的旧 Success 不得复活内存数据"
+            );
+            assert!(rt.monthly_error.is_none());
+            assert!(!rt.monthly_expired);
+        }
+        // 缓存也空；重启（再次预热）不复活
+        let cache = storage::load_cache(&acc_id).unwrap();
+        assert!(cache.monthly.is_none(), "旧 Success 不得写回缓存");
+        assert!(!cache.monthly_expired);
+        let state2 = AppState::new();
+        {
+            let inner = state2.inner.lock().unwrap();
+            let rt = inner.accounts.get(&acc_id).cloned().unwrap();
+            assert!(rt.monthly.is_none(), "重启预热不得复活");
+            assert!(rt.monthly_error.is_none());
+            assert!(!rt.monthly_expired);
+        }
+
+        cleanup_extra_key_env(&dir, &service, &[&acc_id]);
+    }
+
+    /// 竞态回归（姊妹案）：清除后在途的旧 Unauthorized 落地，
+    /// 同样不得重新制造过期提示（数据与提示都保持清除后的空态）
+    #[test]
+    fn monthly_stale_unauthorized_after_clear_stays_silent() {
+        let _guard = EXTRA_KEY_ENV_LOCK.lock().unwrap();
+        let acc = account("acc-race2", "竞态二号");
+        let acc_id = acc.id.clone();
+        let (dir, service) = setup_extra_key_env(vec![acc]);
+
+        let state = AppState::new();
+        {
+            let mut inner = state.inner.lock().unwrap();
+            let rt = inner.accounts.get_mut(&acc_id).unwrap();
+            rt.monthly = Some(monthly_info(74.21));
+        }
+
+        let epoch = {
+            let inner = state.inner.lock().unwrap();
+            inner.accounts.get(&acc_id).unwrap().monthly_epoch
+        };
+        state.clear_monthly_state(&acc_id);
+
+        let (monthly_success, monthly_expired_entered) = {
+            let mut inner = state.inner.lock().unwrap();
+            let rt = inner.accounts.get_mut(&acc_id).unwrap();
+            apply_monthly_checked(rt, epoch, MonthlyOutcome::Unauthorized)
+        };
+        assert!(!monthly_success);
+        assert!(
+            !monthly_expired_entered,
+            "过时 Unauthorized 不得作为过期落盘触发"
+        );
+
+        let inner = state.inner.lock().unwrap();
+        let rt = inner.accounts.get(&acc_id).cloned().unwrap();
+        assert!(rt.monthly.is_none(), "旧数据保持清除态");
+        assert!(
+            rt.monthly_error.is_none(),
+            "清除后落地的旧 Unauthorized 不得重新制造过期提示"
+        );
+        assert!(!rt.monthly_expired);
+
+        cleanup_extra_key_env(&dir, &service, &[&acc_id]);
+    }
+
+    /// 反向验证：没有发生清除时，正常 Success 必须照常生效（不能用"忽略全部
+    /// 刷新结果"凑绿）——代次闸门只拦清除后过时的结果
+    #[test]
+    fn monthly_fresh_success_without_clear_still_applies() {
+        let _guard = EXTRA_KEY_ENV_LOCK.lock().unwrap();
+        let acc = account("acc-fresh", "新鲜号");
+        let acc_id = acc.id.clone();
+        let (dir, service) = setup_extra_key_env(vec![acc]);
+
+        let state = AppState::new();
+        // 正常成功：代次一致 → 生效
+        let (success, expired_entered) = {
+            let mut inner = state.inner.lock().unwrap();
+            let epoch = inner.accounts.get(&acc_id).unwrap().monthly_epoch;
+            let rt = inner.accounts.get_mut(&acc_id).unwrap();
+            apply_monthly_checked(rt, epoch, MonthlyOutcome::Success(monthly_info(31.4)))
+        };
+        assert!(success, "无清除时 Success 必须生效（落盘触发）");
+        assert!(!expired_entered);
+        {
+            let inner = state.inner.lock().unwrap();
+            let rt = inner.accounts.get(&acc_id).cloned().unwrap();
+            assert!((rt.monthly.unwrap().total_pct - 31.4).abs() < 1e-9);
+        }
+
+        // 正常过期：同代次 Unauthorized 也要生效（上一轮六状态语义不倒退）
+        let (success2, expired_entered2) = {
+            let mut inner = state.inner.lock().unwrap();
+            let epoch = inner.accounts.get(&acc_id).unwrap().monthly_epoch;
+            let rt = inner.accounts.get_mut(&acc_id).unwrap();
+            apply_monthly_checked(rt, epoch, MonthlyOutcome::Unauthorized)
+        };
+        assert!(!success2);
+        assert!(expired_entered2, "同代次 Unauthorized 必须生效");
+        {
+            let inner = state.inner.lock().unwrap();
+            let rt = inner.accounts.get(&acc_id).cloned().unwrap();
+            assert!(rt.monthly.is_some(), "过期保留旧数据");
+            assert_eq!(
+                rt.monthly_error.as_deref(),
+                Some("网页登录态已过期，请到设置页更新")
+            );
+            assert!(rt.monthly_expired);
+        }
+
+        cleanup_extra_key_env(&dir, &service, &[&acc_id]);
+    }
+
+    /// 反向验证：清除账号 A 只作废 A 的在途结果，账号 B 的正常月度更新不受影响
+    #[test]
+    fn monthly_clear_one_account_does_not_drop_another() {
+        let _guard = EXTRA_KEY_ENV_LOCK.lock().unwrap();
+        let a = account("acc-a", "A 号");
+        let b = account("acc-b", "B 号");
+        let (dir, service) = setup_extra_key_env(vec![a, b]);
+
+        let state = AppState::new();
+        // A 记录代次 → 清除 A；B 记录代次（未被 A 的清除递增）
+        let epoch_a = {
+            let inner = state.inner.lock().unwrap();
+            inner.accounts.get("acc-a").unwrap().monthly_epoch
+        };
+        state.clear_monthly_state("acc-a");
+        let epoch_b = {
+            let inner = state.inner.lock().unwrap();
+            inner.accounts.get("acc-b").unwrap().monthly_epoch
+        };
+
+        // A 的在途 Success：丢弃
+        let (success_a, _) = {
+            let mut inner = state.inner.lock().unwrap();
+            let rt = inner.accounts.get_mut("acc-a").unwrap();
+            apply_monthly_checked(rt, epoch_a, MonthlyOutcome::Success(monthly_info(50.0)))
+        };
+        assert!(!success_a, "A 的过时结果必须丢弃");
+        // B 的正常 Success：生效
+        let (success_b, _) = {
+            let mut inner = state.inner.lock().unwrap();
+            let rt = inner.accounts.get_mut("acc-b").unwrap();
+            apply_monthly_checked(rt, epoch_b, MonthlyOutcome::Success(monthly_info(60.0)))
+        };
+        assert!(success_b, "B 的正常结果不得因 A 的清除被丢弃");
+
+        let inner = state.inner.lock().unwrap();
+        assert!(inner.accounts.get("acc-a").unwrap().monthly.is_none());
+        assert!(
+            (inner
+                .accounts
+                .get("acc-b")
+                .unwrap()
+                .monthly
+                .as_ref()
+                .unwrap()
+                .total_pct
+                - 60.0)
+                .abs()
+                < 1e-9
+        );
+
+        cleanup_extra_key_env(&dir, &service, &["acc-a", "acc-b"]);
+    }
+
+    /// 凭证层竞态回归（2026-11-23 第三轮）：在途续期把 refresh_token / 访问缓存
+    /// 写回——月度代次只挡旧月度结果，挡不住凭证写回；清除必须与整轮刷新
+    /// （refresh_lock）串行，等在途续期全部落地后最后执行。
+    /// 全同步测试体（手动 runtime），EXTRA_KEY_ENV_LOCK 全程持有。
+    #[test]
+    fn web_clear_serializes_with_inflight_token_writeback() {
+        let _guard = EXTRA_KEY_ENV_LOCK.lock().unwrap();
+        let a = account("acc-w", "凭证竞态号");
+        let b = account("acc-b3", "邻号");
+        let (dir, service) = setup_extra_key_env(vec![a, b]);
+
+        // 清除前写入（旧续期的正常落盘）：新旧网页令牌 + 访问缓存 + 带月度的缓存
+        creds::save_web_token("acc-w", "dummy-web-old").unwrap();
+        creds::save_web_refresh_token("acc-w", "dummy-refresh-old").unwrap();
+        creds::save_web_refresh_token("acc-b3", "dummy-refresh-b").unwrap();
+        WEB_ACCESS_CACHE.lock().unwrap().insert(
+            "acc-w".to_string(),
+            ("dummy-access-old".to_string(), i64::MAX),
+        );
+        storage::save_cache(
+            "acc-w",
+            &CachedQuota {
+                quota: KimiQuota::default(),
+                fetched_at: 1_900_000_000,
+                monthly: Some(monthly_info(74.21)),
+                monthly_expired: false,
+                deepseek_balance: None,
+            },
+        )
+        .unwrap();
+
+        let state = AppState::new();
+        // tokio 上下文仅供 async 生产方法落地（清除内部无 timer / spawn 依赖）
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+
+        // 模拟在途刷新持有 refresh_lock（do_refresh 的持锁姿势）
+        let permit = rt.block_on(state.refresh_lock.lock());
+
+        // 并发启动生产清除方法（started=已进入；done=已返回，携带结果）
+        let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<Result<(), String>>();
+        std::thread::scope(|s| {
+            let handle = rt.handle().clone();
+            let st = &state;
+            s.spawn(move || {
+                started_tx.send(()).unwrap();
+                let r = handle.block_on(clear_web_credentials_and_monthly(st, "acc-w"));
+                let _ = done_tx.send(r);
+            });
+            started_rx.recv().unwrap();
+
+            // 清除已启动：要么（旧行为）不等锁直接完成，要么（新行为）挂起等锁。
+            // recv_timeout 是行为判别——完成与否由 done 信号直接证明，两分支都落断言
+            let settled = done_rx.recv_timeout(std::time::Duration::from_millis(1000));
+
+            // 模拟旧续期迟到写回（在途刷新语境内）：新 refresh_token + 访问缓存
+            creds::save_web_refresh_token("acc-w", "dummy-refresh-late").unwrap();
+            WEB_ACCESS_CACHE.lock().unwrap().insert(
+                "acc-w".to_string(),
+                ("dummy-access-late".to_string(), i64::MAX),
+            );
+
+            // 在途刷新结束（新行为下清除此刻拿锁执行，迟到写回随清除一并抹掉）
+            drop(permit);
+
+            let clear_result = match settled {
+                Ok(r) => r,
+                Err(_) => done_rx.recv().expect("放锁后清除应完成"),
+            };
+            clear_result.expect("清除方法本身应成功");
+
+            // ① 迟到写回不得复活凭证
+            assert!(
+                creds::load_web_refresh_token("acc-w").unwrap().is_none(),
+                "清除后迟到写回的 refresh_token 不得复活"
+            );
+            assert!(creds::load_web_token("acc-w").unwrap().is_none());
+            // ② 访问缓存无该账号条目
+            assert!(
+                !WEB_ACCESS_CACHE.lock().unwrap().contains_key("acc-w"),
+                "清除后访问缓存不得残留迟到条目"
+            );
+            // ③ 月度内存三空 + 缓存三空 + 重新预热不复活
+            {
+                let inner = state.inner.lock().unwrap();
+                let snapshot = inner.accounts.get("acc-w").cloned().unwrap();
+                assert!(snapshot.monthly.is_none());
+                assert!(snapshot.monthly_error.is_none());
+                assert!(!snapshot.monthly_expired);
+            }
+            let cache = storage::load_cache("acc-w").unwrap();
+            assert!(cache.monthly.is_none());
+            assert!(!cache.monthly_expired);
+            let state2 = AppState::new();
+            {
+                let inner = state2.inner.lock().unwrap();
+                let snapshot2 = inner.accounts.get("acc-w").cloned().unwrap();
+                assert!(snapshot2.monthly.is_none(), "重新预热不得复活");
+                assert!(snapshot2.monthly_error.is_none());
+                assert!(!snapshot2.monthly_expired);
+            }
+            // ④ 跨账号隔离：B 号 dummy 凭证不受影响
+            assert_eq!(
+                creds::load_web_refresh_token("acc-b3").unwrap().as_deref(),
+                Some("dummy-refresh-b")
+            );
+            // ⑤ 清除完整返回后写入的合法新授权必须保留（防误删后续授权）
+            creds::save_web_refresh_token("acc-w", "dummy-refresh-post").unwrap();
+            assert_eq!(
+                creds::load_web_refresh_token("acc-w").unwrap().as_deref(),
+                Some("dummy-refresh-post")
+            );
+
+            // 清理 dummy 凭证与缓存条目（隔离 service 内，用完即删）
+            for id in ["acc-w", "acc-b3"] {
+                let _ = creds::clear_web_token(id);
+                let _ = creds::clear_web_refresh_token(id);
+            }
+            WEB_ACCESS_CACHE.lock().unwrap().remove("acc-w");
+        });
+
+        cleanup_extra_key_env(&dir, &service, &["acc-w", "acc-b3"]);
     }
 
     #[test]

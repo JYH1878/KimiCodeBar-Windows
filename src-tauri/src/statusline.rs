@@ -397,6 +397,7 @@ mod tests {
             quota,
             fetched_at,
             monthly: None,
+            monthly_expired: false,
             deepseek_balance: None,
         }
     }

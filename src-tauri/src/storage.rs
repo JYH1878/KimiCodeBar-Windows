@@ -328,6 +328,10 @@ pub struct CachedQuota {
     /// 月度总量缓存（网页 token 数据）；旧版缓存文件无此字段，向后兼容
     #[serde(default)]
     pub monthly: Option<crate::kimi::web::MonthlyInfo>,
+    /// 月度过期标记：网页登录态失效（401）后置位、重新授权成功清除；启动预热据此
+    /// 恢复"网页登录态已过期"提示。旧版缓存文件无此字段，按未过期读取
+    #[serde(default)]
+    pub monthly_expired: bool,
     /// DeepSeek 余额缓存（仅 provider=deepseek 的账号有值）；旧版缓存文件无此字段，向后兼容
     #[serde(default)]
     pub deepseek_balance: Option<crate::deepseek::models::DeepSeekBalance>,
@@ -807,6 +811,7 @@ mod tests {
             quota,
             fetched_at: 1_900_000_000,
             monthly: None,
+            monthly_expired: false,
             deepseek_balance: None,
         };
         save_cache(acc, &cache).unwrap();
@@ -827,6 +832,7 @@ mod tests {
                 quota: loaded.quota.clone(),
                 fetched_at: 1_900_000_100,
                 monthly: None,
+                monthly_expired: false,
                 deepseek_balance: None,
             },
         )
@@ -882,6 +888,7 @@ mod tests {
                 quota: crate::quota::KimiQuota::default(),
                 fetched_at: 1_900_000_000,
                 monthly: Some(monthly),
+                monthly_expired: false,
                 deepseek_balance: None,
             },
         )
@@ -892,6 +899,61 @@ mod tests {
         assert!((m.kimi_pct - 11.12).abs() < 1e-9);
         assert!((m.code_pct - 5.0).abs() < 1e-9);
         assert_eq!(m.reset_time.as_deref(), Some("2026-08-01T00:00:00Z"));
+
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn cache_monthly_expired_roundtrip_and_backward_compat() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = use_temp_config_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let acc = "acc-exp";
+
+        // 旧版缓存文件没有 monthly_expired 字段：#[serde(default)] 保证读回未过期
+        std::fs::write(
+            dir.join("cache-acc-exp.json"),
+            r#"{"quota":{},"fetched_at":1900000000,"monthly":{"total_pct":74.21,"kimi_pct":70.0,"code_pct":4.21,"reset_time":null}}"#,
+        )
+        .unwrap();
+        let loaded = load_cache(acc).expect("旧格式缓存应能读回");
+        assert!(!loaded.monthly_expired, "旧缓存按未过期读取");
+        assert!(loaded.monthly.is_some(), "旧缓存的月度数据照常恢复");
+
+        // 过期标记写入 → 读回一致（磁盘为 snake_case 布尔）
+        save_cache(
+            acc,
+            &CachedQuota {
+                quota: crate::quota::KimiQuota::default(),
+                fetched_at: 1_900_000_000,
+                monthly: loaded.monthly.clone(),
+                monthly_expired: true,
+                deepseek_balance: None,
+            },
+        )
+        .unwrap();
+        let loaded = load_cache(acc).expect("应能读回缓存");
+        assert!(loaded.monthly_expired, "过期标记往返保持 true");
+        assert!(loaded.monthly.is_some(), "过期时旧数据仍在缓存里");
+
+        let raw = std::fs::read_to_string(dir.join("cache-acc-exp.json")).unwrap();
+        assert!(raw.contains("\"monthly_expired\": true"));
+
+        // 清除后写回 → 标记复位
+        save_cache(
+            acc,
+            &CachedQuota {
+                quota: crate::quota::KimiQuota::default(),
+                fetched_at: 1_900_000_001,
+                monthly: None,
+                monthly_expired: false,
+                deepseek_balance: None,
+            },
+        )
+        .unwrap();
+        let loaded = load_cache(acc).expect("应能读回缓存");
+        assert!(!loaded.monthly_expired);
+        assert!(loaded.monthly.is_none());
 
         cleanup(&dir);
     }
@@ -1087,6 +1149,7 @@ mod tests {
                 quota: crate::quota::KimiQuota::default(),
                 fetched_at: 1_900_000_000,
                 monthly: None,
+                monthly_expired: false,
                 deepseek_balance: Some(balance),
             },
         )
